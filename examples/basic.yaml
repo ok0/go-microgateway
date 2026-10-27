@@ -1,0 +1,199 @@
+# A complete, valid lychgate configuration. Every value is safe to run locally.
+# Check it with: lychgate validate -config examples/basic.yaml
+version: 1
+
+# Global settings apply to every listener and route.
+global:
+  # Header carrying the request identifier. Incoming values are kept.
+  request_id_header: X-Request-ID
+  # Peers whose X-Forwarded-For headers are trusted. Accepts CIDRs or single addresses.
+  trusted_proxies:
+    - 10.0.0.0/8
+    - 127.0.0.1
+  # Identity headers removed from incoming requests before routing.
+  strip_identity_headers:
+    - X-Consumer-ID
+    - X-User-ID
+    - X-Auth-Subject
+    - X-Auth-Claims
+  # Time allowed for in-flight requests to finish during shutdown.
+  drain_timeout: 30s
+  # Delay between marking the server unready and closing listeners.
+  shutdown_delay: 0s
+  log:
+    level: info
+    format: json
+    access_log: true
+  reload:
+    debounce: 250ms
+    poll_interval: 5s
+
+listeners:
+  - name: public
+    address: ":8080"
+    http2: true
+    read_header_timeout: 10s
+    idle_timeout: 120s
+    max_header_bytes: 1048576
+
+# The admin endpoint serves health and metrics on a loopback address only.
+admin:
+  enabled: true
+  address: "127.0.0.1:9901"
+
+upstreams:
+  - name: users
+    hosts:
+      - url: "http://127.0.0.1:9001"
+        weight: 3
+      - url: "http://127.0.0.1:9002"
+        weight: 1
+    load_balancer:
+      algorithm: p2c
+      bounded_load_factor: 1.25
+      virtual_nodes: 160
+    timeouts:
+      connect: 5s
+      tls_handshake: 10s
+      response_header: 30s
+      idle: 90s
+    pool:
+      max_idle_per_host: 64
+      max_conns_per_host: 0
+    passive_health:
+      consecutive_failures: 5
+      base_ejection_time: 30s
+      max_ejection_time: 300s
+      max_ejection_percent: 50
+    active_health:
+      path: /health
+      interval: 10s
+      jitter: 0.1
+      timeout: 2s
+      healthy_threshold: 2
+      unhealthy_threshold: 3
+      expected_statuses:
+        - "200-399"
+    circuit_breaker:
+      window: 10s
+      buckets: 10
+      min_requests: 20
+      failure_ratio: 0.5
+      consecutive_failures: 5
+      open_timeout: 30s
+      half_open_probes: 3
+      success_threshold: 2
+
+  # Requests for the same X-User-ID value always reach the same host.
+  - name: orders
+    hosts:
+      - url: "http://127.0.0.1:9101"
+      - url: "http://127.0.0.1:9102"
+    load_balancer:
+      algorithm: consistent_hash
+      hash:
+        source: header
+        name: X-User-ID
+
+auth:
+  jwt:
+    - name: jwt-api
+      # Tokens must name this issuer and carry one of these audiences.
+      issuer: https://auth.example.com
+      audiences:
+        - example-api
+      leeway: 30s
+      keys:
+        # The secret falls back to a placeholder when JWT_SECRET is unset.
+        - kid: example-hs256
+          algorithm: HS256
+          secret: "${JWT_SECRET:-example-hs256-secret-do-not-use}"
+  api_keys:
+    - name: api-clients
+      header: X-API-Key
+      consumer_header: X-Consumer-ID
+      # Keys are stored as sha256 hashes. The plaintext for alice is example-api-key-alice
+      # and for bob is example-api-key-bob. Both are fake values for this example.
+      keys:
+        - id: alice-1
+          hash: "sha256:9771189e33ad49531f98873eb4e4458ce1c96f313fe15c6d753f4c7b6ad4eba5"
+          consumer: alice
+          metadata:
+            tier: gold
+        - id: bob-1
+          hash: "sha256:dff38ba3323b08b8f7a333da8f5b561106e69523bfdd4fa46e89eeb3d1a7e84a"
+          consumer: bob
+          metadata:
+            tier: silver
+
+middlewares:
+  - name: cors
+    type: cors
+    params:
+      origin: https://app.example.com
+      max_age: 600
+
+routes:
+  # Requests under /api/users require a JWT, are rate limited per IP and retried on server errors.
+  - name: users-api
+    match:
+      path: /api/users
+      path_type: prefix
+    upstream: users
+    middlewares:
+      - cors
+    auth:
+      mode: jwt
+      providers:
+        - jwt-api
+      require:
+        scopes:
+          - read
+    rate_limit:
+      algorithm: token_bucket
+      rate: 10
+      per: 1s
+      key:
+        source: ip
+    retry:
+      attempts: 3
+
+  # Single user lookup that accepts an API key.
+  - name: user-by-id
+    match:
+      path: /api/users/:id
+      path_type: pattern
+    upstream: users
+    auth:
+      mode: apikey
+      providers:
+        - api-clients
+
+  # Strips the /orders prefix, applies a sliding window limit and retries with an explicit pipeline.
+  - name: orders
+    match:
+      path: /orders
+      path_type: prefix
+    upstream: orders
+    rewrite:
+      strip_prefix: /orders
+    rate_limit:
+      algorithm: sliding_window
+      limit: 100
+      window: 1m
+      key:
+        source: ip
+    retry:
+      attempts: 2
+    pipeline:
+      - timeout
+      - rate_limit
+      - cors
+      - retry
+
+  # Health probe answered by the users upstream without authentication.
+  - name: health
+    match:
+      path: /healthz
+      path_type: exact
+    upstream: users
