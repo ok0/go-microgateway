@@ -101,6 +101,34 @@ func TestNoEligibleHosts(t *testing.T) {
 	}
 }
 
+func TestSnapshot(t *testing.T) {
+	u, err := Build(config.Upstream{Name: "u", Hosts: []config.Host{
+		{URL: "http://a:1", Weight: w(1)},
+		{URL: "http://b:1", Weight: w(3)},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.Hosts[1].Begin()
+
+	want := []HostStatus{
+		{URL: "http://a:1", Weight: 1, Healthy: true, Ejected: false, BreakerState: "closed", InFlight: 0},
+		{URL: "http://b:1", Weight: 3, Healthy: true, Ejected: false, BreakerState: "closed", InFlight: 1},
+	}
+	got := u.Snapshot()
+	if got == nil {
+		t.Fatal("Snapshot returned nil slice")
+	}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("host %d: got %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
 func TestBuildDNSUnsupported(t *testing.T) {
 	_, err := Build(config.Upstream{Name: "d", DNS: &config.DNS{Hostname: "x", Port: 80}})
 	if err == nil || !strings.Contains(err.Error(), "not yet supported") {
