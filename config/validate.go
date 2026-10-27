@@ -233,7 +233,7 @@ func checkHost(ck *checker, p string, h *Host) {
 	case u.Host == "":
 		ck.add(p+".url", "missing host")
 	}
-	if h.Weight < 0 {
+	if h.Weight != nil && *h.Weight < 0 {
 		ck.add(p+".weight", "must not be negative")
 	}
 }

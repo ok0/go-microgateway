@@ -75,7 +75,7 @@ func TestFingerprintChanges(t *testing.T) {
 	base := parseFull(t).Fingerprint()
 	edits := map[string]func(*Config){
 		"route priority": func(c *Config) { c.Routes[0].Priority++ },
-		"host weight":    func(c *Config) { c.Upstreams[0].Hosts[0].Weight++ },
+		"host weight":    func(c *Config) { *c.Upstreams[0].Hosts[0].Weight++ },
 		"retry status":   func(c *Config) { c.Routes[0].Retry.OnStatuses[0] = 599 },
 		"middleware param": func(c *Config) {
 			c.Middlewares[0].Params["max_age"] = 601

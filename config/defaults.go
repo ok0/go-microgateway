@@ -9,6 +9,10 @@ func boolPtr(b bool) *bool {
 	return &b
 }
 
+func intPtr(v int) *int {
+	return &v
+}
+
 func defStr(p *string, v string) {
 	if *p == "" {
 		*p = v
@@ -78,7 +82,9 @@ func (c *Config) applyDefaults() {
 	for i := range c.Upstreams {
 		u := &c.Upstreams[i]
 		for j := range u.Hosts {
-			defInt(&u.Hosts[j].Weight, 1)
+			if u.Hosts[j].Weight == nil {
+				u.Hosts[j].Weight = intPtr(1)
+			}
 		}
 		if d := u.DNS; d != nil {
 			defStr(&d.Scheme, "http")

@@ -385,8 +385,8 @@ func TestDefaults(t *testing.T) {
 	if c.Upstreams[0].LoadBalancer.Algorithm != "p2c" {
 		t.Errorf("Algorithm = %q", c.Upstreams[0].LoadBalancer.Algorithm)
 	}
-	if c.Upstreams[0].Hosts[0].Weight != 1 {
-		t.Errorf("Weight = %d", c.Upstreams[0].Hosts[0].Weight)
+	if w := c.Upstreams[0].Hosts[0].Weight; w == nil || *w != 1 {
+		t.Errorf("Weight = %v", w)
 	}
 	if c.Routes[0].Match.Path != "/" || c.Routes[0].Match.PathType != "prefix" {
 		t.Errorf("Match = %+v", c.Routes[0].Match)
@@ -402,6 +402,23 @@ func TestDefaults(t *testing.T) {
 	}
 	if r.Attempts != 3 || !reflect.DeepEqual(r.OnStatuses, []int{502, 503, 504}) {
 		t.Errorf("retry defaults = %+v", r)
+	}
+}
+
+func TestHostWeightZero(t *testing.T) {
+	src := strings.Replace(minimalYAML, "      - url: \"http://127.0.0.1:9001\"\n", "      - url: \"http://127.0.0.1:9001\"\n        weight: 0\n", 1)
+	c, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := c.Upstreams[0].Hosts[0].Weight; w == nil || *w != 0 {
+		t.Errorf("Weight = %v, want explicit 0", w)
+	}
+
+	src = strings.Replace(minimalYAML, "      - url: \"http://127.0.0.1:9001\"\n", "      - url: \"http://127.0.0.1:9001\"\n        weight: -1\n", 1)
+	_, err = Parse([]byte(src))
+	if !hasPath(fieldErrors(t, err), "upstreams[0].hosts[0].weight") {
+		t.Errorf("negative weight not reported at upstreams[0].hosts[0].weight: %v", err)
 	}
 }
 

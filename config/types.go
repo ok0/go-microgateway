@@ -127,8 +127,8 @@ type Upstream struct {
 type Host struct {
 	// URL is the backend base URL, with an http or https scheme.
 	URL string `yaml:"url" json:"url"`
-	// Weight is the relative share of traffic. Default 1.
-	Weight int `yaml:"weight" json:"weight"`
+	// Weight is the relative share of traffic. Default 1 when absent; 0 means the host is never selected.
+	Weight *int `yaml:"weight" json:"weight"`
 }
 
 // DNS describes a backend discovered through DNS. Fields left at their zero value take the defaults noted on each field.
