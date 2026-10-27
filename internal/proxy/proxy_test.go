@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"io"
 	"net"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ok0/lychgate/config"
+	"github.com/ok0/lychgate/internal/metrics"
 	"github.com/ok0/lychgate/internal/upstream"
 )
 
@@ -240,4 +242,78 @@ func TestInFlightNormal(t *testing.T) {
 		t.Errorf("body = %q, want %q", body, "ok")
 	}
 	eventually(t, func() bool { return up.Hosts[0].InFlight() == 0 })
+}
+
+func blockUntilDone(t *testing.T, started chan<- struct{}) string {
+	t.Helper()
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if started != nil {
+			started <- struct{}{}
+		}
+		<-r.Context().Done()
+	}))
+	t.Cleanup(s.Close)
+	return s.URL
+}
+
+func runAttempt(t *testing.T, ctx context.Context, attempts *metrics.CounterVec, rawURL, outcome string) {
+	t.Helper()
+	up := newUpstream(t, rawURL)
+	req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+	New(RouteSpec{}, up, Deps{Attempts: attempts}).ServeHTTP(httptest.NewRecorder(), req)
+	host := strings.TrimPrefix(rawURL, "http://")
+	if got := attempts.With(up.Name, host, outcome).Value(); got != 1 {
+		t.Errorf("outcome %q count = %v, want 1", outcome, got)
+	}
+}
+
+func TestAttemptOutcomes(t *testing.T) {
+	reg := metrics.NewRegistry()
+	attempts, err := reg.Counter("t_attempts", "h", "upstream", "host", "outcome")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	t.Cleanup(ok.Close)
+	t.Run("success", func(t *testing.T) {
+		runAttempt(t, context.Background(), attempts, ok.URL, "success")
+	})
+
+	unavailable := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(unavailable.Close)
+	t.Run("status_5xx", func(t *testing.T) {
+		runAttempt(t, context.Background(), attempts, unavailable.URL, "status_5xx")
+	})
+
+	closed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	closedURL := closed.URL
+	closed.Close()
+	t.Run("error", func(t *testing.T) {
+		runAttempt(t, context.Background(), attempts, closedURL, "error")
+	})
+
+	t.Run("canceled", func(t *testing.T) {
+		started := make(chan struct{}, 1)
+		backend := blockUntilDone(t, started)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() {
+			select {
+			case <-started:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+		runAttempt(t, ctx, attempts, backend, "canceled")
+	})
+
+	t.Run("timeout", func(t *testing.T) {
+		backend := blockUntilDone(t, nil)
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		runAttempt(t, ctx, attempts, backend, "timeout")
+	})
 }
