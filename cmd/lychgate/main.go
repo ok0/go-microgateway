@@ -8,11 +8,11 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"slices"
 	"syscall"
-	"time"
 
 	"github.com/ok0/lychgate"
 	"github.com/ok0/lychgate/config"
@@ -33,6 +33,16 @@ commands:
   version                   print version information
 `
 
+type serveAddrs struct {
+	Listeners map[string]net.Addr
+	Admin     net.Addr
+}
+
+type serveHooks struct {
+	onReady func(serveAddrs)
+	signals <-chan os.Signal
+}
+
 func main() {
 	os.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
 }
@@ -46,7 +56,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	case "validate":
 		return runValidate(args[1:], stdout, stderr)
 	case "run":
-		return runServe(ctx, args[1:], stdout, stderr, nil)
+		return runServe(ctx, args[1:], stdout, stderr, serveHooks{})
 	case "version":
 		fmt.Fprintf(stdout, "lychgate %s (commit %s, built %s)\n", version, commit, date)
 		return 0
@@ -100,7 +110,7 @@ func printLoadError(stderr io.Writer, cmd, path string, err error) int {
 	return 1
 }
 
-func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, onReady func(map[string]net.Addr)) int {
+func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, hooks serveHooks) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	path := fs.String("config", "", "path to the configuration file")
@@ -148,7 +158,11 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, onRe
 		fmt.Fprintf(stderr, "lychgate run: %v\n", err)
 		return 1
 	}
-	srv, err := server.New(cfg, g, logger)
+	var admin http.Handler
+	if cfg.Admin.Enabled == nil || *cfg.Admin.Enabled {
+		admin = g.AdminHandler()
+	}
+	srv, err := server.New(cfg, g, admin, g.SetReady, logger)
 	if err != nil {
 		fmt.Fprintf(stderr, "lychgate run: %v\n", err)
 		g.Close()
@@ -164,24 +178,53 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, onRe
 	for _, l := range cfg.Listeners {
 		logger.Info("listening", "listener", l.Name, "address", addrs[l.Name].String())
 	}
-	if onReady != nil {
-		onReady(addrs)
+	if a := srv.AdminAddr(); a != nil {
+		logger.Info("listening", "listener", "admin", "address", a.String())
+	}
+	if hooks.onReady != nil {
+		hooks.onReady(serveAddrs{Listeners: addrs, Admin: srv.AdminAddr()})
 	}
 
-	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	sig := hooks.signals
+	if sig == nil {
+		ch := make(chan os.Signal, 2)
+		signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+		defer signal.Stop(ch)
+		sig = ch
+	}
+
+	var ctxDone <-chan struct{} = ctx.Done()
 	code := 0
 	select {
-	case <-sigCtx.Done():
+	case <-ctx.Done():
+		ctxDone = nil
+	case s := <-sig:
+		logger.Info("shutting down", "signal", s)
 	case err := <-srv.Errors():
 		logger.Error("listener failed", "error", err)
 		code = 1
 	}
 
-	shCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(shCtx); err != nil {
+	shCtx, force := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		select {
+		case s := <-sig:
+			logger.Warn("second signal; forcing shutdown", "signal", s)
+			force()
+		case <-ctxDone:
+			force()
+		case <-done:
+		}
+	}()
+	err = srv.Shutdown(shCtx)
+	close(done)
+	force()
+	if err != nil {
 		logger.Warn("shutdown", "error", err)
+		if errors.Is(err, server.ErrForcedClose) {
+			code = 1
+		}
 	}
 	g.Close()
 	logger.Info("stopped")

@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,40 +23,61 @@ func runCmd(t *testing.T, args ...string) (int, string, string) {
 	return code, out.String(), errb.String()
 }
 
-func startRun(t *testing.T, cfgPath string) (map[string]net.Addr, func() int) {
+type runHandle struct {
+	t      *testing.T
+	addrs  serveAddrs
+	sig    chan os.Signal
+	done   chan int
+	cancel context.CancelFunc
+	errb   *bytes.Buffer
+}
+
+func (h *runHandle) stop() int {
+	h.cancel()
+	return h.wait(h.t, 10*time.Second)
+}
+
+func (h *runHandle) wait(t *testing.T, d time.Duration) int {
+	t.Helper()
+	select {
+	case code := <-h.done:
+		return code
+	case <-time.After(d):
+		t.Fatalf("run did not return within %s; stderr:\n%s", d, h.errb.String())
+		return -1
+	}
+}
+
+func startRun(t *testing.T, cfgPath string) *runHandle {
 	t.Helper()
 	return startRunArgs(t, []string{"-config", cfgPath}, &bytes.Buffer{})
 }
 
-func startRunArgs(t *testing.T, args []string, errb *bytes.Buffer) (map[string]net.Addr, func() int) {
+func startRunArgs(t *testing.T, args []string, errb *bytes.Buffer) *runHandle {
 	t.Helper()
-	ctx, cancelCtx := context.WithCancel(context.Background())
-	t.Cleanup(cancelCtx)
-	ready := make(chan map[string]net.Addr, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	ready := make(chan serveAddrs, 1)
 	done := make(chan int, 1)
+	sig := make(chan os.Signal, 2)
 	var out bytes.Buffer
 	go func() {
-		done <- runServe(ctx, args, &out, errb, func(a map[string]net.Addr) { ready <- a })
+		done <- runServe(ctx, args, &out, errb, serveHooks{
+			onReady: func(a serveAddrs) { ready <- a },
+			signals: sig,
+		})
 	}()
-	stop := func() int {
-		cancelCtx()
-		select {
-		case code := <-done:
-			return code
-		case <-time.After(10 * time.Second):
-			t.Fatalf("run did not return within 10s of cancel; stderr:\n%s", errb.String())
-			return -1
-		}
-	}
+	h := &runHandle{t: t, sig: sig, done: done, cancel: cancel, errb: errb}
 	select {
-	case addrs := <-ready:
-		return addrs, stop
+	case a := <-ready:
+		h.addrs = a
+		return h
 	case code := <-done:
 		t.Fatalf("run exited with code %d before listening; stderr:\n%s", code, errb.String())
 	case <-time.After(10 * time.Second):
 		t.Fatalf("run not ready within 10s; stderr:\n%s", errb.String())
 	}
-	return nil, nil
+	return nil
 }
 
 type echoBody struct {
@@ -139,6 +160,8 @@ routes:
       path: /
       path_type: prefix
     upstream: users
+admin:
+  address: "127.0.0.1:0"
 `
 
 func TestValidateExample(t *testing.T) {
@@ -248,10 +271,12 @@ func TestRunExample(t *testing.T) {
 	cfg = strings.ReplaceAll(cfg, "127.0.0.1:9101", hostPort(orders))
 	cfg = strings.ReplaceAll(cfg, "127.0.0.1:9102", hostPort(orders))
 	cfg = strings.ReplaceAll(cfg, `":8080"`, `"127.0.0.1:0"`)
+	cfg = strings.ReplaceAll(cfg, "127.0.0.1:9901", "127.0.0.1:0")
 	path := writeTemp(t, cfg)
 
-	addrs, cancel := startRun(t, path)
-	public := addrs["public"].String()
+	h := startRun(t, path)
+	public := h.addrs.Listeners["public"].String()
+	admin := h.addrs.Admin.String()
 	client := &http.Client{Timeout: 5 * time.Second}
 
 	t.Run("users api", func(t *testing.T) {
@@ -335,7 +360,39 @@ func TestRunExample(t *testing.T) {
 		}
 	})
 
-	if code := cancel(); code != 0 {
+	t.Run("admin readyz", func(t *testing.T) {
+		resp, body := doGet(t, client, admin, "/readyz", "", nil)
+		if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"ready"`) {
+			t.Errorf("status = %d body %s, want 200 with ready", resp.StatusCode, body)
+		}
+	})
+
+	t.Run("admin metrics", func(t *testing.T) {
+		resp, body := doGet(t, client, admin, "/metrics", "", nil)
+		if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "lychgate_requests_total") {
+			t.Errorf("status = %d, want 200 with lychgate_requests_total in body %s", resp.StatusCode, body)
+		}
+	})
+
+	t.Run("admin paths not on data listener", func(t *testing.T) {
+		resp, body := doGet(t, client, public, "/readyz", "", nil)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404; body %s", resp.StatusCode, body)
+		}
+		var e struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(body, &e); err != nil {
+			t.Fatalf("decode error body %q: %v", body, err)
+		}
+		if e.Error.Code != "route_not_found" {
+			t.Errorf("code = %q, want route_not_found", e.Error.Code)
+		}
+	})
+
+	if code := h.stop(); code != 0 {
 		t.Errorf("exit code = %d, want 0", code)
 	}
 }
@@ -363,34 +420,6 @@ func TestRunInvalidConfig(t *testing.T) {
 		if !lineRE.MatchString(l) {
 			t.Errorf("error line %q does not match %s", l, lineRE)
 		}
-	}
-}
-
-func TestRunTLSNotSupported(t *testing.T) {
-	path := writeTemp(t, `version: 1
-listeners:
-  - name: public
-    address: "127.0.0.1:0"
-    tls:
-      cert_file: c.pem
-      key_file: k.pem
-upstreams:
-  - name: users
-    hosts:
-      - url: "http://127.0.0.1:9001"
-routes:
-  - name: all
-    match:
-      path: /
-      path_type: prefix
-    upstream: users
-`)
-	code, _, errs := runCmd(t, "run", "-config", path)
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1; stderr:\n%s", code, errs)
-	}
-	if !strings.Contains(errs, "not yet supported") {
-		t.Errorf("stderr = %q, want it to contain %q", errs, "not yet supported")
 	}
 }
 
@@ -443,11 +472,60 @@ func TestRunBadFlags(t *testing.T) {
 func TestRunLogFlagOverride(t *testing.T) {
 	path := writeTemp(t, minimalConfig)
 	var errb bytes.Buffer
-	_, cancel := startRunArgs(t, []string{"-config", path, "-log-format", "text", "-log-level", "debug"}, &errb)
-	if code := cancel(); code != 0 {
+	h := startRunArgs(t, []string{"-config", path, "-log-format", "text", "-log-level", "debug"}, &errb)
+	if code := h.stop(); code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr:\n%s", code, errb.String())
 	}
 	if !strings.Contains(errb.String(), "level=INFO msg=listening") {
 		t.Errorf("stderr = %q, want it to contain %q", errb.String(), "level=INFO msg=listening")
+	}
+}
+
+func lineOf(t *testing.T, src, substr string) int {
+	t.Helper()
+	for i, line := range strings.Split(src, "\n") {
+		if strings.Contains(line, substr) {
+			return i + 1
+		}
+	}
+	t.Fatalf("%q not found in config", substr)
+	return 0
+}
+
+func TestValidateMiddlewareErrors(t *testing.T) {
+	src := minimalConfig + `middlewares:
+  - name: retry
+    type: cors
+  - name: c
+    type: cors
+    params:
+      max_age: -1
+`
+	path := writeTemp(t, src)
+	code, _, errs := runCmd(t, "validate", "-config", path)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; stderr:\n%s", code, errs)
+	}
+	wants := []string{
+		fmt.Sprintf("middlewares[0].name (line %d): ", lineOf(t, src, "- name: retry")),
+		fmt.Sprintf("middlewares[1].params.max_age (line %d): ", lineOf(t, src, "max_age: -1")),
+	}
+	for _, w := range wants {
+		if !strings.Contains(errs, w) {
+			t.Errorf("stderr missing line with prefix %q\nstderr:\n%s", w, errs)
+		}
+	}
+}
+
+func TestValidateUnregisteredType(t *testing.T) {
+	path := writeTemp(t, minimalConfig+`middlewares:
+  - name: x
+    type: my_custom
+    params:
+      anything: 1
+`)
+	code, _, errs := runCmd(t, "validate", "-config", path)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr:\n%s", code, errs)
 	}
 }
