@@ -1,0 +1,243 @@
+package proxy
+
+import (
+	"bufio"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/ok0/lychgate/config"
+	"github.com/ok0/lychgate/internal/upstream"
+)
+
+func newUpstream(t *testing.T, rawURL string) *upstream.Upstream {
+	t.Helper()
+	up, err := upstream.Build(config.Upstream{Name: "u", Hosts: []config.Host{{URL: rawURL}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = up.Close() })
+	return up
+}
+
+func eventually(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for {
+		if cond() {
+			return
+		}
+		tick := time.NewTimer(5 * time.Millisecond)
+		select {
+		case <-deadline.C:
+			tick.Stop()
+			t.Fatal("condition not met before deadline")
+		case <-tick.C:
+		}
+	}
+}
+
+func TestRewritePath(t *testing.T) {
+	tests := []struct {
+		name     string
+		from     string
+		to       string
+		path     string
+		rawPath  string
+		wantPath string
+		wantRaw  string
+	}{
+		{"strip prefix root", "/orders", "", "/orders", "", "/", ""},
+		{"strip prefix child", "/orders", "", "/orders/123", "", "/123", ""},
+		{"strip keeps sibling", "/orders", "", "/ordersx", "", "/ordersx", ""},
+		{"strip encoded slash", "/orders", "", "/orders/a/b", "/orders/a%2Fb", "/a/b", "/a%2Fb"},
+		{"replace prefix child", "/v2", "/api/v2", "/v2/items", "", "/api/v2/items", ""},
+		{"replace prefix exact", "/v2", "/api/v2", "/v2", "", "/api/v2", ""},
+		{"replace trailing slash", "/old/", "/new/", "/old/x", "", "/new/x", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u := &url.URL{Path: tt.path, RawPath: tt.rawPath, RawQuery: "a=1"}
+			rewritePath(u, tt.from, tt.to)
+			if u.Path != tt.wantPath {
+				t.Errorf("Path = %q, want %q", u.Path, tt.wantPath)
+			}
+			if u.RawPath != tt.wantRaw {
+				t.Errorf("RawPath = %q, want %q", u.RawPath, tt.wantRaw)
+			}
+			if u.RawQuery != "a=1" {
+				t.Errorf("RawQuery = %q, want %q", u.RawQuery, "a=1")
+			}
+		})
+	}
+}
+
+func TestApplyHeaderOps(t *testing.T) {
+	h := http.Header{}
+	h.Set("X-Debug", "1")
+	h.Set("X-Env", "wrong")
+	h.Set("X-Gateway", "edge")
+	applyHeaderOps(h, config.HeaderOps{
+		Remove: []string{"X-Debug"},
+		Set:    map[string]string{"X-Env": "example"},
+		Add:    map[string]string{"X-Gateway": "lychgate"},
+	})
+	if got := h.Values("X-Debug"); len(got) != 0 {
+		t.Errorf("X-Debug = %v, want removed", got)
+	}
+	if got := h.Values("X-Env"); !slices.Equal(got, []string{"example"}) {
+		t.Errorf("X-Env = %v, want [example]", got)
+	}
+	if got := h.Values("X-Gateway"); !slices.Equal(got, []string{"edge", "lychgate"}) {
+		t.Errorf("X-Gateway = %v, want [edge lychgate]", got)
+	}
+}
+
+func TestPreserveHost(t *testing.T) {
+	tests := []struct {
+		name     string
+		preserve bool
+		useBack  bool
+		want     string
+	}{
+		{"upstream host", false, true, ""},
+		{"original host", true, false, "public.test"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hosts := make(chan string, 1)
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hosts <- r.Host
+			}))
+			defer backend.Close()
+			want := tt.want
+			if tt.useBack {
+				want = strings.TrimPrefix(backend.URL, "http://")
+			}
+			up := newUpstream(t, backend.URL)
+			gw := httptest.NewServer(New(RouteSpec{PreserveHost: tt.preserve}, up, Deps{}))
+			defer gw.Close()
+
+			req, err := http.NewRequest(http.MethodGet, gw.URL+"/", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Host = "public.test"
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+
+			select {
+			case got := <-hosts:
+				if got != want {
+					t.Errorf("backend Host = %q, want %q", got, want)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("backend did not receive request")
+			}
+		})
+	}
+}
+
+func TestInFlightUpgrade(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("response writer cannot hijack")
+			return
+		}
+		conn, buf, err := hj.Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close()
+		if _, err := io.WriteString(conn, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: test\r\n\r\n"); err != nil {
+			return
+		}
+		for {
+			line, err := buf.ReadString('\n')
+			if line != "" {
+				if _, werr := io.WriteString(conn, line); werr != nil {
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}))
+	defer backend.Close()
+
+	up := newUpstream(t, backend.URL)
+	gw := httptest.NewServer(New(RouteSpec{}, up, Deps{}))
+	defer gw.Close()
+
+	conn, err := net.Dial("tcp", gw.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := io.WriteString(conn, "GET /ws HTTP/1.1\r\nHost: gateway.test\r\nConnection: Upgrade\r\nUpgrade: test\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("status = %d, want 101", resp.StatusCode)
+	}
+	if _, err := io.WriteString(conn, "ping\n"); err != nil {
+		t.Fatal(err)
+	}
+	line, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != "ping\n" {
+		t.Errorf("echo = %q, want %q", line, "ping\n")
+	}
+	if got := up.Hosts[0].InFlight(); got != 1 {
+		t.Errorf("InFlight while open = %d, want 1", got)
+	}
+
+	_ = conn.Close()
+	eventually(t, func() bool { return up.Hosts[0].InFlight() == 0 })
+}
+
+func TestInFlightNormal(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer backend.Close()
+
+	up := newUpstream(t, backend.URL)
+	gw := httptest.NewServer(New(RouteSpec{}, up, Deps{}))
+	defer gw.Close()
+
+	resp, err := http.Get(gw.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "ok" {
+		t.Errorf("body = %q, want %q", body, "ok")
+	}
+	eventually(t, func() bool { return up.Hosts[0].InFlight() == 0 })
+}
