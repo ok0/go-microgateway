@@ -148,11 +148,15 @@ middlewares:
   - name: cors
     type: cors
     params:
-      origin: https://app.example.com
-      max_age: 600
-      methods:
+      allowed_origins:
+        - https://app.example.com
+      allowed_methods:
         - GET
         - POST
+      max_age: 600
+  - name: audit
+    type: audit_log
+    params:
       nested:
         list:
           - one

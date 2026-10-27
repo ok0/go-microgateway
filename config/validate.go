@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"math"
@@ -492,12 +493,40 @@ func checkMiddlewares(ck *checker, ms []Middleware) {
 	for i := range ms {
 		p := fmt.Sprintf("middlewares[%d]", i)
 		checkName(ck, p+".name", ms[i].Name, names)
+		if slices.Contains(BuiltinStages, ms[i].Name) {
+			ck.add(p+".name", fmt.Sprintf("%q is reserved for a built-in stage", ms[i].Name))
+		}
 		if ms[i].Type == "" {
 			ck.add(p+".type", "is required")
 		}
 		if hasNonStringKeys(ms[i].Params) {
 			ck.add(p+".params", "keys must be strings")
+		} else if slices.Contains(BuiltinMiddlewareTypes, ms[i].Type) {
+			checkBuiltinParams(ck, p, &ms[i])
 		}
+	}
+}
+
+func checkBuiltinParams(ck *checker, p string, m *Middleware) {
+	_, err := m.BuiltinParams()
+	if err == nil {
+		return
+	}
+	var pe *ParamsError
+	if !errors.As(err, &pe) {
+		ck.add(p+".params", err.Error())
+		return
+	}
+	for _, fe := range pe.Errors {
+		suffix := ""
+		switch {
+		case fe.Path == "":
+		case strings.HasPrefix(fe.Path, "["):
+			suffix = fe.Path
+		default:
+			suffix = "." + fe.Path
+		}
+		ck.add(p+".params"+suffix, fe.Msg)
 	}
 }
 
@@ -554,10 +583,15 @@ func checkRoutes(ck *checker, c *Config, kinds map[string]string) {
 		if r.Retry != nil {
 			checkRetry(ck, p+".retry", r.Retry)
 		}
+		usedMws := map[string]bool{}
 		for j, m := range r.Middlewares {
 			if !mws[m] {
 				ck.add(fmt.Sprintf("%s.middlewares[%d]", p, j), fmt.Sprintf("unknown middleware %q", m))
 			}
+			if usedMws[m] {
+				ck.add(fmt.Sprintf("%s.middlewares[%d]", p, j), fmt.Sprintf("duplicate middleware %q", m))
+			}
+			usedMws[m] = true
 		}
 		checkPipeline(ck, p+".pipeline", r.Pipeline, mws)
 		key := routeKey(r)

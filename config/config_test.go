@@ -564,6 +564,77 @@ func TestLoadFileResolvesKeyFile(t *testing.T) {
 	}
 }
 
+func TestMiddlewareErrorLines(t *testing.T) {
+	src := `version: 1
+listeners:
+  - name: public
+    address: ":8080"
+upstreams:
+  - name: users
+    hosts:
+      - url: "http://127.0.0.1:9001"
+middlewares:
+  - name: retry
+    type: cors
+  - name: lim
+    type: request_size_limit
+    params:
+      max_bytes: 0
+  - name: c
+    type: cors
+    params:
+      allowed_origins:
+        - "*"
+      allow_credentials: true
+      bogus: 1
+routes:
+  - name: all
+    upstream: users
+    middlewares:
+      - lim
+      - lim
+    pipeline:
+      - timeout
+      - timeout
+`
+	nthLine := func(substr string, n int) int {
+		seen := 0
+		for i, l := range strings.Split(src, "\n") {
+			if strings.Contains(l, substr) {
+				seen++
+				if seen == n {
+					return i + 1
+				}
+			}
+		}
+		return 0
+	}
+	_, err := Parse([]byte(src))
+	errs := fieldErrors(t, err)
+	want := []struct {
+		path string
+		line int
+	}{
+		{"middlewares[0].name", lineOf(src, "- name: retry")},
+		{"middlewares[1].params.max_bytes", lineOf(src, "max_bytes: 0")},
+		{"middlewares[2].params.allow_credentials", lineOf(src, "allow_credentials: true")},
+		{"middlewares[2].params.bogus", lineOf(src, "bogus: 1")},
+		{"routes[0].middlewares[1]", nthLine("- lim", 2)},
+		{"routes[0].pipeline[1]", nthLine("- timeout", 2)},
+	}
+	for _, w := range want {
+		found := false
+		for _, fe := range errs {
+			if fe.Path == w.path && fe.Line == w.line {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("no error at %s (line %d); got %v", w.path, w.line, err)
+		}
+	}
+}
+
 func hasPath(errs []FieldError, path string) bool {
 	for _, fe := range errs {
 		if fe.Path == path {

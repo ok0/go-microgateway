@@ -130,7 +130,8 @@ middlewares:
   - name: cors
     type: cors
     params:
-      origin: https://app.example.com
+      allowed_origins:
+        - https://app.example.com
       max_age: 600
 
 routes:

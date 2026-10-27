@@ -160,6 +160,24 @@ func TestSemanticChecks(t *testing.T) {
 		{"jwt mode with an api_keys provider", func(c *Config) {
 			c.Routes[0].Auth = &RouteAuth{Mode: "jwt", Providers: []string{"keys1"}}
 		}, "routes[0].auth.providers[0]", "is not a jwt provider"},
+		{"middleware named retry", func(c *Config) {
+			c.Middlewares[0].Name = "retry"
+		}, "middlewares[0].name", "reserved"},
+		{"duplicate route middleware", func(c *Config) {
+			c.Routes[0].Middlewares = []string{"cors1", "cors1"}
+		}, "routes[0].middlewares[1]", "duplicate middleware"},
+		{"invalid cors param", func(c *Config) {
+			c.Middlewares[0].Params = map[string]any{"max_age": -1}
+		}, "middlewares[0].params.max_age", "must not be negative"},
+		{"unknown builtin param", func(c *Config) {
+			c.Middlewares[0].Params = map[string]any{"origin": "x"}
+		}, "middlewares[0].params.origin", "unknown field"},
+		{"request_size_limit missing max_bytes", func(c *Config) {
+			c.Middlewares = append(c.Middlewares, Middleware{Name: "lim", Type: "request_size_limit"})
+		}, "middlewares[1].params.max_bytes", "must be positive"},
+		{"duplicate pipeline stage", func(c *Config) {
+			c.Routes[0].Pipeline = []string{"timeout", "timeout"}
+		}, "routes[0].pipeline[1]", "duplicate"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -181,6 +199,14 @@ func TestSemanticChecks(t *testing.T) {
 
 func TestBaseValid(t *testing.T) {
 	if err := base().Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUnregisteredTypeAccepted(t *testing.T) {
+	c := base()
+	c.Middlewares = append(c.Middlewares, Middleware{Name: "x", Type: "my_custom", Params: map[string]any{"anything": 1}})
+	if err := c.Validate(); err != nil {
 		t.Fatal(err)
 	}
 }
