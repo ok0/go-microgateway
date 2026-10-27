@@ -1,0 +1,100 @@
+// Package httperr writes gateway-originated JSON errors and maps errors to statuses.
+package httperr
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net"
+	"net/http"
+
+	"github.com/ok0/lychgate/internal/reqctx"
+)
+
+const (
+	CodeRouteNotFound     = "route_not_found"
+	CodeUnauthorized      = "unauthorized"
+	CodeForbidden         = "forbidden"
+	CodePayloadTooLarge   = "payload_too_large"
+	CodeRateLimited       = "rate_limited"
+	CodeBadGateway        = "bad_gateway"
+	CodeCircuitOpen       = "circuit_open"
+	CodeNoHealthyUpstream = "no_healthy_upstream"
+	CodeGatewayTimeout    = "gateway_timeout"
+	CodeInternal          = "internal_error"
+	CodeClientClosed      = "client_closed_request"
+)
+
+const StatusClientClosed = 499
+
+var ErrNoHealthyUpstream = errors.New("no healthy upstream")
+
+var ErrCircuitOpen = errors.New("circuit open")
+
+type body struct {
+	Status    int    `json:"status"`
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	RequestID string `json:"request_id"`
+}
+
+// Write writes a JSON error body with the given status, code and message. Nothing is written for StatusClientClosed.
+func Write(w http.ResponseWriter, r *http.Request, status int, code, msg string) {
+	if status == StatusClientClosed {
+		return
+	}
+	b, _ := json.Marshal(struct {
+		Error body `json:"error"`
+	}{Error: body{
+		Status:    status,
+		Code:      code,
+		Message:   msg,
+		RequestID: reqctx.RequestID(r.Context()),
+	}})
+	h := w.Header()
+	h.Set("Content-Type", "application/json")
+	h.Set("Cache-Control", "no-store")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Del("Content-Length")
+	w.WriteHeader(status)
+	_, _ = w.Write(append(b, '\n'))
+}
+
+// FromError maps err to an HTTP status and error code.
+func FromError(err error) (status int, code string) {
+	var ne net.Error
+	switch {
+	case errors.Is(err, context.Canceled):
+		return StatusClientClosed, CodeClientClosed
+	case errors.Is(err, context.DeadlineExceeded):
+		return http.StatusGatewayTimeout, CodeGatewayTimeout
+	case errors.Is(err, ErrNoHealthyUpstream):
+		return http.StatusServiceUnavailable, CodeNoHealthyUpstream
+	case errors.Is(err, ErrCircuitOpen):
+		return http.StatusServiceUnavailable, CodeCircuitOpen
+	case errors.As(err, &ne) && ne.Timeout():
+		return http.StatusGatewayTimeout, CodeGatewayTimeout
+	default:
+		return http.StatusBadGateway, CodeBadGateway
+	}
+}
+
+// Message returns the fixed client-facing message for code.
+func Message(code string) string {
+	switch code {
+	case CodeRouteNotFound:
+		return "no route matches the request"
+	case CodeBadGateway:
+		return "upstream connection failed"
+	case CodeGatewayTimeout:
+		return "upstream timed out"
+	case CodeNoHealthyUpstream:
+		return "no healthy upstream host"
+	case CodeCircuitOpen:
+		return "upstream circuit is open"
+	case CodeInternal:
+		return "internal server error"
+	default:
+		return "error"
+	}
+}

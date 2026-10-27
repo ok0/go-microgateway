@@ -1,0 +1,90 @@
+package httperr
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/ok0/lychgate/internal/reqctx"
+)
+
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
+
+func TestWrite(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req = req.WithContext(reqctx.WithRequestID(req.Context(), "abc"))
+
+	rec := httptest.NewRecorder()
+	Write(rec, req, 404, CodeRouteNotFound, "x")
+
+	if rec.Code != 404 {
+		t.Errorf("status = %d, want 404", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q", got)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q", got)
+	}
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q", got)
+	}
+
+	var out struct {
+		Error struct {
+			Status    int    `json:"status"`
+			Code      string `json:"code"`
+			Message   string `json:"message"`
+			RequestID string `json:"request_id"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if out.Error.Status != 404 || out.Error.Code != CodeRouteNotFound || out.Error.Message != "x" || out.Error.RequestID != "abc" {
+		t.Errorf("body = %+v", out.Error)
+	}
+
+	rec = httptest.NewRecorder()
+	Write(rec, req, StatusClientClosed, CodeClientClosed, "x")
+	if rec.Body.Len() != 0 {
+		t.Errorf("body written for 499: %q", rec.Body.String())
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want unwritten 200", rec.Code)
+	}
+}
+
+func TestFromError(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		{"canceled", context.Canceled, 499, CodeClientClosed},
+		{"wrapped deadline", fmt.Errorf("w: %w", context.DeadlineExceeded), http.StatusGatewayTimeout, CodeGatewayTimeout},
+		{"net op error", &net.OpError{Op: "dial", Err: errors.New("refused")}, http.StatusBadGateway, CodeBadGateway},
+		{"net timeout", timeoutErr{}, http.StatusGatewayTimeout, CodeGatewayTimeout},
+		{"wrapped no healthy", fmt.Errorf("w: %w", ErrNoHealthyUpstream), http.StatusServiceUnavailable, CodeNoHealthyUpstream},
+		{"circuit open", ErrCircuitOpen, http.StatusServiceUnavailable, CodeCircuitOpen},
+		{"plain", errors.New("x"), http.StatusBadGateway, CodeBadGateway},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status, code := FromError(tt.err)
+			if status != tt.wantStatus || code != tt.wantCode {
+				t.Errorf("FromError = (%d, %q), want (%d, %q)", status, code, tt.wantStatus, tt.wantCode)
+			}
+		})
+	}
+}
