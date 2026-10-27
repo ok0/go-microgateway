@@ -7,12 +7,14 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ok0/lychgate/internal/clock"
+	"github.com/ok0/lychgate/internal/metrics"
 	"github.com/ok0/lychgate/internal/reqctx"
 )
 
@@ -176,41 +178,127 @@ func TestTimeout(t *testing.T) {
 	}
 }
 
-func TestAccessLog(t *testing.T) {
+func logRecords(t *testing.T, buf *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("log line %q: %v", line, err)
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+func TestObserve(t *testing.T) {
+	reg := metrics.NewRegistry()
+	counter, err := reg.Counter("requests_total", "Requests served.", "route", "method", "code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hist, err := reg.Histogram("request_duration_seconds", "Request latency.", metrics.DefaultBuckets(), "route")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rm := &RequestMetrics{Requests: counter, Duration: hist}
+
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	clk := clock.NewFake(t0)
-	h := AccessLog(logger, clk, true)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ip := netip.MustParseAddr("192.0.2.1")
+	h := Observe(logger, clk, true, rm)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/x" {
+			info := reqctx.InfoFrom(r.Context())
+			info.Route = "r1"
+			info.Upstream = "u1"
+		}
 		clk.Advance(15 * time.Millisecond)
 		w.WriteHeader(http.StatusCreated)
 		_, _ = io.WriteString(w, "hi")
 	}))
-	req := httptest.NewRequest(http.MethodGet, "/x", nil)
-	ctx := reqctx.WithRoute(reqctx.WithRequestID(req.Context(), "rid"), "r1")
-	h.ServeHTTP(httptest.NewRecorder(), req.WithContext(ctx))
 
-	var m map[string]any
-	if err := json.Unmarshal(buf.Bytes(), &m); err != nil {
-		t.Fatalf("log line %q: %v", buf.String(), err)
+	req := httptest.NewRequest(http.MethodGet, "/x?q=1", nil)
+	ctx := reqctx.WithClientIP(reqctx.WithRequestID(req.Context(), "rid"), ip)
+	h.ServeHTTP(httptest.NewRecorder(), req.WithContext(ctx))
+	recs := logRecords(t, &buf)
+	if len(recs) != 1 {
+		t.Fatalf("got %d log records, want 1", len(recs))
 	}
-	if m["request_id"] != "rid" {
-		t.Errorf("request_id = %v", m["request_id"])
+	m := recs[0]
+	want := map[string]any{
+		"request_id": "rid",
+		"method":     "GET",
+		"path":       "/x",
+		"route":      "r1",
+		"upstream":   "u1",
+		"status":     float64(201),
+		"bytes":      float64(2),
+		"latency_ms": float64(15),
+		"client_ip":  "192.0.2.1",
 	}
-	if m["route"] != "r1" {
-		t.Errorf("route = %v", m["route"])
+	for k, v := range want {
+		if m[k] != v {
+			t.Errorf("%s = %v, want %v", k, m[k], v)
+		}
 	}
-	if m["status"] != float64(201) {
-		t.Errorf("status = %v", m["status"])
+	if got := counter.With("r1", "GET", "201").Value(); got != 1 {
+		t.Errorf("requests r1/GET/201 = %v, want 1", got)
 	}
-	if m["bytes"] != float64(2) {
-		t.Errorf("bytes = %v", m["bytes"])
+	if got := hist.With("r1").Count(); got != 1 {
+		t.Errorf("duration r1 count = %v, want 1", got)
 	}
-	if m["latency_ms"] != float64(15) {
-		t.Errorf("latency_ms = %v", m["latency_ms"])
+
+	buf.Reset()
+	req = httptest.NewRequest(http.MethodGet, "/y", nil)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	recs = logRecords(t, &buf)
+	if len(recs) != 1 {
+		t.Fatalf("got %d log records, want 1", len(recs))
 	}
-	if AccessLog(logger, clk, false) != nil {
-		t.Error("AccessLog(enabled=false) is not nil")
+	if recs[0]["route"] != "" {
+		t.Errorf("route = %v, want empty", recs[0]["route"])
+	}
+	if _, ok := recs[0]["upstream"]; ok {
+		t.Error("upstream key present for unmatched request")
+	}
+	if got := counter.With("unmatched", "GET", "201").Value(); got != 1 {
+		t.Errorf("requests unmatched/GET/201 = %v, want 1", got)
+	}
+
+	buf.Reset()
+	req = httptest.NewRequest("PURGE", "/y", nil)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	if got := counter.With("unmatched", "OTHER", "201").Value(); got != 1 {
+		t.Errorf("requests unmatched/OTHER/201 = %v, want 1", got)
+	}
+
+	buf.Reset()
+	ph := Observe(logger, clk, true, rm)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic(http.ErrAbortHandler)
+	}))
+	func() {
+		defer func() {
+			if got := recover(); got != http.ErrAbortHandler {
+				t.Errorf("recovered = %v, want http.ErrAbortHandler", got)
+			}
+		}()
+		ph.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/p", nil))
+	}()
+	recs = logRecords(t, &buf)
+	if len(recs) != 1 {
+		t.Fatalf("panic: got %d log records, want 1", len(recs))
+	}
+	if recs[0]["status"] != float64(500) {
+		t.Errorf("panic: status = %v, want 500", recs[0]["status"])
+	}
+
+	if Observe(nil, clk, false, nil) != nil {
+		t.Error("Observe with logging and metrics disabled is not nil")
 	}
 }
 

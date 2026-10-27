@@ -1,4 +1,4 @@
-// Package middleware provides the fixed request stages that wrap every route.
+// Package middleware composes request stages: fixed framework stages, built-in configurable middleware, user middleware and the per-route pipeline.
 package middleware
 
 import (
