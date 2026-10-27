@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"time"
 
 	"github.com/ok0/lychgate/config"
+	"github.com/ok0/lychgate/internal/metrics"
+	"github.com/ok0/lychgate/internal/middleware"
 	"github.com/ok0/lychgate/internal/reqctx"
 	"github.com/ok0/lychgate/internal/router"
 )
@@ -175,4 +178,144 @@ func TestParamsInContext(t *testing.T) {
 	}
 
 	s.dispatch(httptest.NewRecorder(), req)
+}
+
+func passthroughFactory(config.Middleware) (middleware.Middleware, error) {
+	return func(next http.Handler) http.Handler { return next }, nil
+}
+
+func TestBuildMiddlewareErrors(t *testing.T) {
+	t.Run("unknown type", func(t *testing.T) {
+		cfg := mustParse(t, `version: 1
+listeners:
+  - name: public
+    address: ":8080"
+upstreams:
+  - name: users
+    hosts:
+      - url: "http://127.0.0.1:9001"
+middlewares:
+  - name: a
+    type: nope
+routes:
+  - name: api
+    match:
+      path: /api
+    upstream: users
+`)
+		s, err := Build(cfg, Deps{})
+		if err == nil || !strings.Contains(err.Error(), "middlewares[0].type") || !strings.Contains(err.Error(), `unknown middleware type "nope"`) {
+			t.Fatalf("Build error = %v, want middlewares[0].type and unknown middleware type \"nope\"", err)
+		}
+		if s != nil {
+			t.Errorf("snapshot = %v, want nil", s)
+		}
+	})
+
+	t.Run("factory error", func(t *testing.T) {
+		reg := middleware.NewRegistry()
+		if err := reg.Register("ok", passthroughFactory); err != nil {
+			t.Fatal(err)
+		}
+		if err := reg.Register("t", func(config.Middleware) (middleware.Middleware, error) {
+			return nil, errors.New("boom")
+		}); err != nil {
+			t.Fatal(err)
+		}
+		cfg := mustParse(t, `version: 1
+listeners:
+  - name: public
+    address: ":8080"
+upstreams:
+  - name: users
+    hosts:
+      - url: "http://127.0.0.1:9001"
+middlewares:
+  - name: a
+    type: ok
+  - name: b
+    type: t
+routes:
+  - name: api
+    match:
+      path: /api
+    upstream: users
+`)
+		s, err := Build(cfg, Deps{Middlewares: reg})
+		if err == nil || !strings.Contains(err.Error(), "middlewares[1]") || !strings.Contains(err.Error(), "boom") {
+			t.Fatalf("Build error = %v, want middlewares[1] and boom", err)
+		}
+		if s != nil {
+			t.Errorf("snapshot = %v, want nil", s)
+		}
+	})
+}
+
+func TestFactoryCalledOncePerDefinition(t *testing.T) {
+	calls := 0
+	reg := middleware.NewRegistry()
+	if err := reg.Register("count", func(def config.Middleware) (middleware.Middleware, error) {
+		calls++
+		return passthroughFactory(def)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := mustParse(t, `version: 1
+listeners:
+  - name: public
+    address: ":8080"
+upstreams:
+  - name: users
+    hosts:
+      - url: "http://127.0.0.1:9001"
+middlewares:
+  - name: first
+    type: count
+  - name: unused
+    type: count
+routes:
+  - name: a
+    match:
+      path: /a
+    upstream: users
+    middlewares: [first]
+  - name: b
+    match:
+      path: /b
+    upstream: users
+    middlewares: [first]
+`)
+	s, err := Build(cfg, Deps{Middlewares: reg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if calls != 2 {
+		t.Errorf("factory calls = %d, want 2", calls)
+	}
+}
+
+func TestSeriesReusedAcrossBuilds(t *testing.T) {
+	reg := metrics.NewRegistry()
+	cfg := mustParse(t, `version: 1
+listeners:
+  - name: public
+    address: ":8080"
+upstreams:
+  - name: users
+    hosts:
+      - url: "http://127.0.0.1:9001"
+routes:
+  - name: api
+    match:
+      path: /api
+    upstream: users
+`)
+	for i := range 2 {
+		s, err := Build(cfg, Deps{Metrics: reg})
+		if err != nil {
+			t.Fatalf("Build %d: %v", i, err)
+		}
+		t.Cleanup(func() { _ = s.Close() })
+	}
 }
