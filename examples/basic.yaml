@@ -191,6 +191,33 @@ routes:
       - cors
       - retry
 
+  # Requests for orders.example.com under /v2 are rewritten to /api/v2 and get extra headers.
+  - name: orders-v2
+    match:
+      hosts:
+        - orders.example.com
+      path: /v2
+      path_type: prefix
+    upstream: orders
+    rewrite:
+      replace_prefix:
+        from: /v2
+        to: /api/v2
+    request_headers:
+      add:
+        X-Gateway: lychgate
+      set:
+        X-Env: example
+      remove:
+        - X-Debug
+    response_headers:
+      add:
+        X-Served-By: lychgate
+      set:
+        Cache-Control: no-cache
+      remove:
+        - X-Internal
+
   # Health probe answered by the users upstream without authentication.
   - name: health
     match:
