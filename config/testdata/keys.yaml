@@ -1,0 +1,4 @@
+keys:
+  - id: file-key
+    hash: "sha256:dff38ba3323b08b8f7a333da8f5b561106e69523bfdd4fa46e89eeb3d1a7e84a"
+    consumer: file-consumer

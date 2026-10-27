@@ -1,0 +1,268 @@
+version: 1
+global:
+  request_id_header: X-Request-ID
+  trusted_proxies:
+    - 10.0.0.0/8
+    - 127.0.0.1
+  strip_identity_headers:
+    - X-Consumer-ID
+    - X-User-ID
+  drain_timeout: 45s
+  shutdown_delay: 2s
+  log:
+    level: debug
+    format: text
+    access_log: false
+  reload:
+    debounce: 500ms
+    poll_interval: 10s
+listeners:
+  - name: public
+    address: ":8443"
+    tls:
+      cert_file: certs/server.crt
+      key_file: certs/server.key
+      min_version: "1.3"
+    http2: true
+    h2c: false
+    read_header_timeout: 5s
+    read_timeout: 30s
+    write_timeout: 60s
+    idle_timeout: 90s
+    max_header_bytes: 65536
+admin:
+  enabled: true
+  address: "127.0.0.1:9901"
+upstreams:
+  - name: users
+    hosts:
+      - url: "http://127.0.0.1:9001"
+        weight: 3
+      - url: "https://127.0.0.1:9002"
+        weight: 1
+    load_balancer:
+      algorithm: consistent_hash
+      hash:
+        source: header
+        name: X-User-ID
+      bounded_load_factor: 1.5
+      virtual_nodes: 100
+    timeouts:
+      connect: 2s
+      tls_handshake: 5s
+      response_header: 15s
+      idle: 60s
+    pool:
+      max_idle_per_host: 32
+      max_conns_per_host: 100
+    http2: true
+    passive_health:
+      consecutive_failures: 4
+      base_ejection_time: 20s
+      max_ejection_time: 200s
+      max_ejection_percent: 40
+    active_health:
+      path: /healthz
+      interval: 5s
+      jitter: 0.2
+      timeout: 1s
+      healthy_threshold: 2
+      unhealthy_threshold: 3
+      expected_statuses:
+        - "200"
+        - "204-299"
+    circuit_breaker:
+      window: 20s
+      buckets: 10
+      min_requests: 10
+      failure_ratio: 0.6
+      consecutive_failures: 5
+      open_timeout: 45s
+      half_open_probes: 3
+      success_threshold: 2
+  - name: orders-dns
+    dns:
+      hostname: orders.internal.example.com
+      port: 8080
+      scheme: http
+      refresh_interval: 15s
+auth:
+  jwt:
+    - name: jwt-hs
+      issuer: https://auth.example.com
+      audiences:
+        - example-api
+      leeway: 10s
+      header: Authorization
+      keys:
+        - kid: hs-1
+          algorithm: HS256
+          secret: example-hs256-secret
+          public_key: ""
+          public_key_file: ""
+      jwks:
+        url: https://auth.example.com/.well-known/jwks.json
+        ttl: 10m
+        min_refresh_interval: 1m
+        timeout: 3s
+      scope_claim: scope
+      roles_claim: roles
+      forward_claims:
+        sub: X-Auth-Subject
+    - name: jwt-rs
+      issuer: https://sso.example.com
+      audiences:
+        - example-api
+        - example-web
+      header: X-Access-Token
+      keys:
+        - kid: rs-1
+          algorithm: RS256
+          public_key: |
+            -----BEGIN PUBLIC KEY-----
+            ZmFrZQ==
+            -----END PUBLIC KEY-----
+          public_key_file: ""
+      scope_claim: scp
+      roles_claim: groups
+  api_keys:
+    - name: partners
+      header: X-API-Key
+      query: api_key
+      key_file: ""
+      consumer_header: X-Consumer-ID
+      metadata_headers:
+        tier: X-Consumer-Tier
+      keys:
+        - id: alice-1
+          hash: "sha256:9771189e33ad49531f98873eb4e4458ce1c96f313fe15c6d753f4c7b6ad4eba5"
+          consumer: alice
+          metadata:
+            tier: gold
+        - id: bob-1
+          hash: "sha256:dff38ba3323b08b8f7a333da8f5b561106e69523bfdd4fa46e89eeb3d1a7e84a"
+          consumer: bob
+          metadata:
+            tier: silver
+middlewares:
+  - name: cors
+    type: cors
+    params:
+      origin: https://app.example.com
+      max_age: 600
+      methods:
+        - GET
+        - POST
+      nested:
+        list:
+          - one
+routes:
+  - name: users-api
+    priority: 10
+    match:
+      hosts:
+        - api.example.com
+        - "*.example.com"
+      path: /api/users
+      path_type: prefix
+      methods:
+        - GET
+        - POST
+      headers:
+        X-Tenant: acme
+    upstream: users
+    preserve_host: true
+    rewrite:
+      strip_prefix: /api
+    request_headers:
+      add:
+        X-Gateway: lychgate
+      set:
+        X-Forwarded-Proto: https
+      remove:
+        - X-Debug
+    response_headers:
+      add:
+        Cache-Control: no-store
+      set:
+        X-Frame-Options: DENY
+      remove:
+        - Server
+    timeout: 20s
+    auth:
+      mode: jwt
+      providers:
+        - jwt-hs
+      allow_anonymous: false
+      require:
+        scopes:
+          - read
+        roles:
+          - user
+        claims:
+          tier: gold
+    rate_limit:
+      algorithm: token_bucket
+      rate: 10
+      per: 1s
+      burst: 20
+      key:
+        source: header
+        name: X-Tenant
+      max_keys: 50000
+      idle_ttl: 10m
+    circuit_breaker:
+      enabled: true
+    retry:
+      attempts: 3
+      base_delay: 25ms
+      max_delay: 250ms
+      on_statuses:
+        - 502
+        - 503
+      methods:
+        - GET
+        - PUT
+      idempotency_key:
+        enabled: true
+        header: Idempotency-Key
+      budget:
+        ratio: 0.2
+        min_per_second: 5
+        window: 10s
+      max_body_bytes: 65536
+    middlewares:
+      - cors
+    pipeline:
+      - timeout
+      - auth
+      - rate_limit
+      - circuit_breaker
+      - cors
+      - retry
+  - name: legacy
+    match:
+      path: /v1/items/:id
+      path_type: pattern
+    upstream: orders-dns
+    rewrite:
+      replace_prefix:
+        from: /v1
+        to: /api/v2
+    rate_limit:
+      algorithm: sliding_window
+      limit: 100
+      window: 1m
+      key:
+        source: ip
+      max_keys: 1000
+      idle_ttl: 5m
+  - name: partners-api
+    match:
+      path: /partners
+      path_type: prefix
+    upstream: users
+    auth:
+      mode: apikey
+      providers:
+        - partners
