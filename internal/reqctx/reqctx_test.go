@@ -4,9 +4,47 @@ import (
 	"context"
 	"net/http"
 	"net/netip"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestIdentity(t *testing.T) {
+	bg := context.Background()
+	if id, ok := IdentityFrom(bg); ok || !reflect.DeepEqual(id, Identity{}) {
+		t.Fatalf("IdentityFrom(background) = (%+v, %v), want zero value and false", id, ok)
+	}
+
+	want := Identity{
+		Provider: "jwt",
+		Consumer: "billing",
+		Subject:  "user-1",
+		Claims:   map[string]any{"scope": "read"},
+		Metadata: map[string]string{"tier": "gold"},
+	}
+	ctx := WithIdentity(bg, want)
+	got, ok := IdentityFrom(ctx)
+	if !ok {
+		t.Fatal("IdentityFrom reported absent after WithIdentity")
+	}
+	if got.Provider != want.Provider || got.Consumer != want.Consumer || got.Subject != want.Subject ||
+		!reflect.DeepEqual(got.Claims, want.Claims) || !reflect.DeepEqual(got.Metadata, want.Metadata) {
+		t.Errorf("IdentityFrom = %+v, want %+v", got, want)
+	}
+}
+
+func TestInfo(t *testing.T) {
+	bg := context.Background()
+	if got := InfoFrom(bg); got != nil {
+		t.Fatalf("InfoFrom(background) = %v, want nil", got)
+	}
+
+	p := &Info{Route: "users", Upstream: "u1"}
+	ctx := WithInfo(bg, p)
+	if got := InfoFrom(ctx); got != p {
+		t.Errorf("InfoFrom = %p, want %p", got, p)
+	}
+}
 
 func TestContextValues(t *testing.T) {
 	bg := context.Background()

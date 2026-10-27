@@ -23,6 +23,8 @@ const (
 	CodeGatewayTimeout    = "gateway_timeout"
 	CodeInternal          = "internal_error"
 	CodeClientClosed      = "client_closed_request"
+	CodeNotFound          = "not_found"
+	CodeMethodNotAllowed  = "method_not_allowed"
 )
 
 const StatusClientClosed = 499
@@ -94,6 +96,20 @@ func Message(code string) string {
 		return "upstream circuit is open"
 	case CodeInternal:
 		return "internal server error"
+	case CodeUnauthorized:
+		return "unauthorized"
+	case CodeForbidden:
+		return "forbidden"
+	case CodePayloadTooLarge:
+		return "request body too large"
+	case CodeRateLimited:
+		return "rate limit exceeded"
+	case CodeClientClosed:
+		return "client closed request"
+	case CodeNotFound:
+		return "not found"
+	case CodeMethodNotAllowed:
+		return "method not allowed"
 	default:
 		return "error"
 	}

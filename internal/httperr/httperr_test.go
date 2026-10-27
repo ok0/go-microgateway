@@ -64,6 +64,29 @@ func TestWrite(t *testing.T) {
 	}
 }
 
+func TestMessages(t *testing.T) {
+	codes := []string{
+		CodeRouteNotFound,
+		CodeUnauthorized,
+		CodeForbidden,
+		CodePayloadTooLarge,
+		CodeRateLimited,
+		CodeBadGateway,
+		CodeCircuitOpen,
+		CodeNoHealthyUpstream,
+		CodeGatewayTimeout,
+		CodeInternal,
+		CodeClientClosed,
+		CodeNotFound,
+		CodeMethodNotAllowed,
+	}
+	for _, code := range codes {
+		if msg := Message(code); msg == "" || msg == "error" {
+			t.Errorf("Message(%q) = %q, want a specific message", code, msg)
+		}
+	}
+}
+
 func TestFromError(t *testing.T) {
 	tests := []struct {
 		name       string

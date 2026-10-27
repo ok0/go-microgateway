@@ -17,12 +17,51 @@ const (
 	keyRoute
 	keyParams
 	keyClientIP
+	keyIdentity
+	keyInfo
 )
 
 // Param is a single named path parameter captured by a route pattern.
 type Param struct {
 	Name  string
 	Value string
+}
+
+// Identity describes the authenticated caller of a request.
+type Identity struct {
+	Provider string
+	Consumer string
+	Subject  string
+	Claims   map[string]any
+	Metadata map[string]string
+}
+
+// Info is filled in by inner request stages and read by the outer observation stage once the request completes. Only the goroutine serving the request may write it.
+type Info struct {
+	Route    string
+	Upstream string
+}
+
+// WithIdentity returns a context carrying the caller identity id.
+func WithIdentity(ctx context.Context, id Identity) context.Context {
+	return context.WithValue(ctx, keyIdentity, id)
+}
+
+// IdentityFrom returns the caller identity stored in ctx and whether one is present.
+func IdentityFrom(ctx context.Context) (Identity, bool) {
+	v, ok := ctx.Value(keyIdentity).(Identity)
+	return v, ok
+}
+
+// WithInfo returns a context carrying the mutable request record in.
+func WithInfo(ctx context.Context, in *Info) context.Context {
+	return context.WithValue(ctx, keyInfo, in)
+}
+
+// InfoFrom returns the request record stored in ctx, or nil if absent.
+func InfoFrom(ctx context.Context) *Info {
+	v, _ := ctx.Value(keyInfo).(*Info)
+	return v
 }
 
 // WithRequestID returns a context carrying the request ID id.
