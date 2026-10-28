@@ -4,7 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"net/url"
 	"reflect"
+	"strings"
 )
 
 // Clone returns a deep copy of c that shares no mutable data with c. Source line information is kept.
@@ -27,7 +29,8 @@ func (c *Config) Line(path string) int {
 }
 
 // Redacted returns a deep copy of c in which every non-empty JWT key secret and every API key hash
-// is replaced by "REDACTED". c itself is not modified.
+// is replaced by "REDACTED", and the userinfo of every upstream host URL and JWKS URL is replaced by
+// "REDACTED" as described in RedactURL. c itself is not modified.
 func (c *Config) Redacted() *Config {
 	r := deepCopy(reflect.ValueOf(c)).Interface().(*Config)
 	for i := range r.Auth.JWT {
@@ -35,6 +38,9 @@ func (c *Config) Redacted() *Config {
 			if r.Auth.JWT[i].Keys[k].Secret != "" {
 				r.Auth.JWT[i].Keys[k].Secret = "REDACTED"
 			}
+		}
+		if r.Auth.JWT[i].JWKS != nil {
+			r.Auth.JWT[i].JWKS.URL = RedactURL(r.Auth.JWT[i].JWKS.URL)
 		}
 	}
 	for i := range r.Auth.APIKeys {
@@ -44,7 +50,38 @@ func (c *Config) Redacted() *Config {
 			}
 		}
 	}
+	for i := range r.Upstreams {
+		for j := range r.Upstreams[i].Hosts {
+			r.Upstreams[i].Hosts[j].URL = RedactURL(r.Upstreams[i].Hosts[j].URL)
+		}
+	}
 	return r
+}
+
+// RedactURL returns raw with any userinfo replaced by REDACTED; unparseable input is redacted heuristically.
+func RedactURL(raw string) string {
+	if strings.Contains(raw, "://") {
+		if u, err := url.Parse(raw); err == nil {
+			if u.User == nil {
+				return raw
+			}
+			u.User = url.User("REDACTED")
+			return u.String()
+		}
+	}
+	start := 0
+	if i := strings.Index(raw, "://"); i >= 0 {
+		start = i + len("://")
+	}
+	end := len(raw)
+	if i := strings.IndexAny(raw[start:], "/?#"); i >= 0 {
+		end = start + i
+	}
+	at := strings.LastIndex(raw[start:end], "@")
+	if at < 0 {
+		return raw
+	}
+	return raw[:start] + "REDACTED" + raw[start+at:]
 }
 
 // Fingerprint returns the lowercase hex SHA-256 of the JSON encoding of c. encoding/json sorts map

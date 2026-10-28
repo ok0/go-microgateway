@@ -1,8 +1,10 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
@@ -89,5 +91,45 @@ func TestFingerprintChanges(t *testing.T) {
 		if c.Fingerprint() == base {
 			t.Errorf("%s edit did not change the fingerprint", name)
 		}
+	}
+}
+
+func TestRedactURL(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"http://user:pw@h:80/p", "http://REDACTED@h:80/p"},
+		{"http://user@h", "http://REDACTED@h"},
+		{"http://h:80/a%2Fb", "http://h:80/a%2Fb"},
+		{"http://u:p w@h:80/%zz", "http://REDACTED@h:80/%zz"},
+		{"u:p@h/x", "REDACTED@h/x"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := RedactURL(tc.in); got != tc.want {
+			t.Errorf("RedactURL(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestRedactedURLCredentials(t *testing.T) {
+	c := parseFull(t)
+	c.Upstreams[0].Hosts[0].URL = "http://user:s3cret@h:80"
+	c.Auth.JWT[0].JWKS = &JWKS{URL: "https://u:s3cret@idp/keys"}
+	before := c.Fingerprint()
+
+	r := c.Redacted()
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "s3cret") {
+		t.Errorf("redacted configuration still contains the credential: %s", b)
+	}
+	if c.Upstreams[0].Hosts[0].URL != "http://user:s3cret@h:80" || c.Auth.JWT[0].JWKS.URL != "https://u:s3cret@idp/keys" {
+		t.Error("original configuration was modified")
+	}
+	if c.Fingerprint() != before {
+		t.Error("original fingerprint changed")
 	}
 }
