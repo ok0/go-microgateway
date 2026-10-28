@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"context"
@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/upstream"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
 var healthEpoch = time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
@@ -341,13 +341,13 @@ func (r *healthRig) metric(name string, labels ...string) float64 {
 func (r *healthRig) attempts(s *hostStub) float64 {
 	total := 0.0
 	for _, o := range []string{"success", "failure", "ignored"} {
-		total += r.metric("lychgate_upstream_attempts_total", "upstream", "up", "host", s.label(), "outcome", o)
+		total += r.metric("microgateway_upstream_attempts_total", "upstream", "up", "host", s.label(), "outcome", o)
 	}
 	return total
 }
 
 func (r *healthRig) activeChecks() float64 {
-	return metricSum(r.t, r.metrics(), `lychgate_upstream_active_checks_total{upstream="up",`)
+	return metricSum(r.t, r.metrics(), `microgateway_upstream_active_checks_total{upstream="up",`)
 }
 
 func (r *healthRig) reload(doc upstreamDoc) {
@@ -472,10 +472,10 @@ func runPassiveEjection(t *testing.T, n testNetwork) {
 		if got := bad.hits(); got != 3 {
 			t.Fatalf("bad host hits = %d, want 3", got)
 		}
-		if v := r.metric("lychgate_upstream_ejections_total", "upstream", "up", "host", bad.label()); v != 1 {
+		if v := r.metric("microgateway_upstream_ejections_total", "upstream", "up", "host", bad.label()); v != 1 {
 			t.Fatalf("ejections_total = %v, want 1", v)
 		}
-		if v := r.metric("lychgate_upstream_host_healthy", "upstream", "up", "host", bad.label()); v != 0 {
+		if v := r.metric("microgateway_upstream_host_healthy", "upstream", "up", "host", bad.label()); v != 0 {
 			t.Fatalf("host_healthy = %v, want 0", v)
 		}
 		recs := r.logs.records(t, "upstream host ejected")
@@ -503,7 +503,7 @@ func runPassiveEjection(t *testing.T, n testNetwork) {
 		}
 		bad.setStatus(http.StatusOK)
 		ignored := func() float64 {
-			return r.metric("lychgate_upstream_attempts_total", "upstream", "up", "host", bad.label(), "outcome", "ignored")
+			return r.metric("microgateway_upstream_attempts_total", "upstream", "up", "host", bad.label(), "outcome", "ignored")
 		}
 		base := ignored()
 		for k := range 3 {
@@ -566,7 +566,7 @@ func runPassiveEjection(t *testing.T, n testNetwork) {
 		if !st.Ejected || st.EjectionCount != 1 {
 			t.Fatalf("bad host = %+v, want ejected once", st)
 		}
-		if v := r.metric("lychgate_upstream_ejections_total", "upstream", "up", "host", bad.label()); v != 1 {
+		if v := r.metric("microgateway_upstream_ejections_total", "upstream", "up", "host", bad.label()); v != 1 {
 			t.Fatalf("ejections_total = %v, want 1", v)
 		}
 	})
@@ -644,7 +644,7 @@ func runPassiveEjection(t *testing.T, n testNetwork) {
 		if r.host(hosts[3]).Ejected {
 			t.Fatal("healthy host was ejected")
 		}
-		if v := r.metric("lychgate_upstream_ejections_refused_total", "upstream", "up"); v <= 0 {
+		if v := r.metric("microgateway_upstream_ejections_refused_total", "upstream", "up"); v <= 0 {
 			t.Fatalf("ejections_refused_total = %v, want > 0", v)
 		}
 	})
@@ -664,7 +664,7 @@ func runPassiveEjection(t *testing.T, n testNetwork) {
 		if st.Ejected || st.EjectionCount != 0 {
 			t.Fatalf("bad host = %+v, want never ejected", st)
 		}
-		if v := r.metric("lychgate_upstream_ejections_total", "upstream", "up", "host", bad.label()); v != 0 {
+		if v := r.metric("microgateway_upstream_ejections_total", "upstream", "up", "host", bad.label()); v != 0 {
 			t.Fatalf("ejections_total = %v, want 0", v)
 		}
 	})
@@ -693,7 +693,7 @@ func runPassiveEjection(t *testing.T, n testNetwork) {
 		if !r.status().PanicMode {
 			t.Fatal("panic_mode = false, want true")
 		}
-		if v := r.metric("lychgate_upstream_panic_mode", "upstream", "up"); v != 1 {
+		if v := r.metric("microgateway_upstream_panic_mode", "upstream", "up"); v != 1 {
 			t.Fatalf("panic_mode gauge = %v, want 1", v)
 		}
 		if recs := r.logs.records(t, "upstream entered panic mode"); len(recs) != 1 {
@@ -704,7 +704,7 @@ func runPassiveEjection(t *testing.T, n testNetwork) {
 		if r.status().PanicMode {
 			t.Fatal("panic_mode = true after expiry, want false")
 		}
-		if v := r.metric("lychgate_upstream_panic_mode", "upstream", "up"); v != 0 {
+		if v := r.metric("microgateway_upstream_panic_mode", "upstream", "up"); v != 0 {
 			t.Fatalf("panic_mode gauge = %v, want 0", v)
 		}
 		if recs := r.logs.records(t, "upstream left panic mode"); len(recs) != 1 {
@@ -929,12 +929,12 @@ func TestUpstreamsAdminAndMetrics(t *testing.T) {
 
 	body := r.metrics()
 	for _, f := range []string{
-		"lychgate_upstream_attempts_total",
-		"lychgate_upstream_ejections_total",
-		"lychgate_upstream_ejections_refused_total",
-		"lychgate_upstream_host_healthy",
-		"lychgate_upstream_panic_mode",
-		"lychgate_upstream_active_checks_total",
+		"microgateway_upstream_attempts_total",
+		"microgateway_upstream_ejections_total",
+		"microgateway_upstream_ejections_refused_total",
+		"microgateway_upstream_host_healthy",
+		"microgateway_upstream_panic_mode",
+		"microgateway_upstream_active_checks_total",
 	} {
 		if !strings.Contains(body, "\n"+f+"{") {
 			t.Fatalf("metrics lack a sample line for %s before any request", f)
@@ -942,18 +942,18 @@ func TestUpstreamsAdminAndMetrics(t *testing.T) {
 	}
 	for _, h := range []*hostStub{a, b} {
 		for _, line := range []string{
-			series("lychgate_upstream_host_healthy", "upstream", "up", "host", h.label()) + " 1",
-			series("lychgate_upstream_ejections_total", "upstream", "up", "host", h.label()) + " 0",
-			series("lychgate_upstream_active_checks_total", "upstream", "up", "host", h.label(), "result", "pass") + " 0",
-			series("lychgate_upstream_active_checks_total", "upstream", "up", "host", h.label(), "result", "fail") + " 0",
-			series("lychgate_upstream_attempts_total", "upstream", "up", "host", h.label(), "outcome", "success") + " 0",
+			series("microgateway_upstream_host_healthy", "upstream", "up", "host", h.label()) + " 1",
+			series("microgateway_upstream_ejections_total", "upstream", "up", "host", h.label()) + " 0",
+			series("microgateway_upstream_active_checks_total", "upstream", "up", "host", h.label(), "result", "pass") + " 0",
+			series("microgateway_upstream_active_checks_total", "upstream", "up", "host", h.label(), "result", "fail") + " 0",
+			series("microgateway_upstream_attempts_total", "upstream", "up", "host", h.label(), "outcome", "success") + " 0",
 		} {
 			if !metricsHasLine(body, line) {
 				t.Fatalf("metrics lack line %q before any request", line)
 			}
 		}
 	}
-	if !metricsHasLine(body, series("lychgate_upstream_panic_mode", "upstream", "up")+" 0") {
+	if !metricsHasLine(body, series("microgateway_upstream_panic_mode", "upstream", "up")+" 0") {
 		t.Fatal("metrics lack panic_mode line before any request")
 	}
 
@@ -969,16 +969,16 @@ func TestUpstreamsAdminAndMetrics(t *testing.T) {
 	if !st.Ejected || st.Healthy || st.EjectionRemainingSeconds != 30 || st.EjectionCount != 1 {
 		t.Fatalf("admin host a = %+v, want ejected once for 30s", st)
 	}
-	if v := r.metric("lychgate_upstream_host_healthy", "upstream", "up", "host", a.label()); v != 0 {
+	if v := r.metric("microgateway_upstream_host_healthy", "upstream", "up", "host", a.label()); v != 0 {
 		t.Fatalf("host_healthy for a = %v, want 0", v)
 	}
-	if v := r.metric("lychgate_upstream_ejections_total", "upstream", "up", "host", a.label()); v != 1 {
+	if v := r.metric("microgateway_upstream_ejections_total", "upstream", "up", "host", a.label()); v != 1 {
 		t.Fatalf("ejections_total for a = %v, want 1", v)
 	}
-	if v := r.metric("lychgate_upstream_attempts_total", "upstream", "up", "host", a.label(), "outcome", "failure"); v != 3 {
+	if v := r.metric("microgateway_upstream_attempts_total", "upstream", "up", "host", a.label(), "outcome", "failure"); v != 3 {
 		t.Fatalf("attempts failure for a = %v, want 3", v)
 	}
-	if v := r.metric("lychgate_upstream_attempts_total", "upstream", "up", "host", b.label(), "outcome", "success"); v != 2 {
+	if v := r.metric("microgateway_upstream_attempts_total", "upstream", "up", "host", b.label(), "outcome", "success"); v != 2 {
 		t.Fatalf("attempts success for b = %v, want 2", v)
 	}
 

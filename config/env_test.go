@@ -141,8 +141,8 @@ func TestSubstitutionInParamsAndMaps(t *testing.T) {
 }
 
 func TestDefaultLookupIsOSEnv(t *testing.T) {
-	t.Setenv("LYCHGATE_TEST_HDR", "X-Req")
-	src := "version: 1\nglobal:\n  request_id_header: ${LYCHGATE_TEST_HDR}\n" + minimalBody
+	t.Setenv("MICROGATEWAY_TEST_HDR", "X-Req")
+	src := "version: 1\nglobal:\n  request_id_header: ${MICROGATEWAY_TEST_HDR}\n" + minimalBody
 	c, err := Parse([]byte(src))
 	if err != nil {
 		t.Fatal(err)

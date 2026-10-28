@@ -16,15 +16,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/breaker"
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/health"
-	"github.com/ok0/lychgate/internal/httperr"
-	"github.com/ok0/lychgate/internal/lb"
-	"github.com/ok0/lychgate/internal/metrics"
-	"github.com/ok0/lychgate/internal/reqctx"
-	"github.com/ok0/lychgate/internal/state"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/breaker"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/health"
+	"github.com/ok0/go-microgateway/internal/httperr"
+	"github.com/ok0/go-microgateway/internal/lb"
+	"github.com/ok0/go-microgateway/internal/metrics"
+	"github.com/ok0/go-microgateway/internal/reqctx"
+	"github.com/ok0/go-microgateway/internal/state"
 )
 
 var ErrNoHosts = httperr.ErrNoHealthyUpstream
@@ -70,34 +70,34 @@ func newMetrics(r *metrics.Registry) (*Metrics, error) {
 		m   Metrics
 		err error
 	)
-	if m.Attempts, err = r.Counter("lychgate_upstream_attempts_total", "Upstream attempts by outcome.", "upstream", "host", "outcome"); err != nil {
+	if m.Attempts, err = r.Counter("microgateway_upstream_attempts_total", "Upstream attempts by outcome.", "upstream", "host", "outcome"); err != nil {
 		return nil, err
 	}
-	if m.Ejections, err = r.Counter("lychgate_upstream_ejections_total", "Upstream host ejections.", "upstream", "host"); err != nil {
+	if m.Ejections, err = r.Counter("microgateway_upstream_ejections_total", "Upstream host ejections.", "upstream", "host"); err != nil {
 		return nil, err
 	}
-	if m.EjectionsRefused, err = r.Counter("lychgate_upstream_ejections_refused_total", "Ejections refused by max_ejection_percent.", "upstream"); err != nil {
+	if m.EjectionsRefused, err = r.Counter("microgateway_upstream_ejections_refused_total", "Ejections refused by max_ejection_percent.", "upstream"); err != nil {
 		return nil, err
 	}
-	if m.DNSRefresh, err = r.Counter("lychgate_upstream_dns_refresh_total", "Upstream DNS refreshes by result.", "upstream", "result"); err != nil {
+	if m.DNSRefresh, err = r.Counter("microgateway_upstream_dns_refresh_total", "Upstream DNS refreshes by result.", "upstream", "result"); err != nil {
 		return nil, err
 	}
-	if m.ActiveChecks, err = r.Counter("lychgate_upstream_active_checks_total", "Upstream active health probes by result.", "upstream", "host", "result"); err != nil {
+	if m.ActiveChecks, err = r.Counter("microgateway_upstream_active_checks_total", "Upstream active health probes by result.", "upstream", "host", "result"); err != nil {
 		return nil, err
 	}
-	if m.HostHealthy, err = r.Gauge("lychgate_upstream_host_healthy", "Whether an upstream host is currently healthy.", "upstream", "host"); err != nil {
+	if m.HostHealthy, err = r.Gauge("microgateway_upstream_host_healthy", "Whether an upstream host is currently healthy.", "upstream", "host"); err != nil {
 		return nil, err
 	}
-	if m.PanicMode, err = r.Gauge("lychgate_upstream_panic_mode", "Whether an upstream is in panic mode.", "upstream"); err != nil {
+	if m.PanicMode, err = r.Gauge("microgateway_upstream_panic_mode", "Whether an upstream is in panic mode.", "upstream"); err != nil {
 		return nil, err
 	}
-	if m.BreakerState, err = r.Gauge("lychgate_circuit_breaker_state", "Circuit breaker state (0 closed, 1 half-open, 2 open); host is empty for the upstream aggregate.", "upstream", "host"); err != nil {
+	if m.BreakerState, err = r.Gauge("microgateway_circuit_breaker_state", "Circuit breaker state (0 closed, 1 half-open, 2 open); host is empty for the upstream aggregate.", "upstream", "host"); err != nil {
 		return nil, err
 	}
-	if m.BreakerTransitions, err = r.Counter("lychgate_circuit_breaker_transitions_total", "Circuit breaker state transitions.", "upstream", "host", "from", "to"); err != nil {
+	if m.BreakerTransitions, err = r.Counter("microgateway_circuit_breaker_transitions_total", "Circuit breaker state transitions.", "upstream", "host", "from", "to"); err != nil {
 		return nil, err
 	}
-	if m.BreakerRejected, err = r.Counter("lychgate_circuit_breaker_rejected_total", "Requests or attempts rejected by an open circuit breaker.", "upstream", "host"); err != nil {
+	if m.BreakerRejected, err = r.Counter("microgateway_circuit_breaker_rejected_total", "Requests or attempts rejected by an open circuit breaker.", "upstream", "host"); err != nil {
 		return nil, err
 	}
 	return &m, nil

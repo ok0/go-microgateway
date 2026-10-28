@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ok0/lychgate/internal/clock"
+	"github.com/ok0/go-microgateway/internal/clock"
 )
 
 // State is the position of a breaker in its state machine.

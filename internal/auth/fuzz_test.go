@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/ok0/lychgate/internal/authkey"
-	"github.com/ok0/lychgate/internal/clock"
+	"github.com/ok0/go-microgateway/internal/authkey"
+	"github.com/ok0/go-microgateway/internal/clock"
 )
 
 func FuzzParseJWKS(f *testing.F) {

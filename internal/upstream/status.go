@@ -3,7 +3,7 @@ package upstream
 import (
 	"time"
 
-	"github.com/ok0/lychgate/internal/breaker"
+	"github.com/ok0/go-microgateway/internal/breaker"
 )
 
 // ActiveCheckStatus is the observable state of active health checking for one host.

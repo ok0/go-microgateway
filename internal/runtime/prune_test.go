@@ -5,11 +5,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/metrics"
-	"github.com/ok0/lychgate/internal/teststore"
-	"github.com/ok0/lychgate/store"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/metrics"
+	"github.com/ok0/go-microgateway/internal/teststore"
+	"github.com/ok0/go-microgateway/store"
 )
 
 const pruneListeners = "version: 1\nlisteners:\n  - name: public\n    address: \":8080\"\n"
@@ -102,9 +102,9 @@ func TestPruneGauges(t *testing.T) {
 	}
 
 	gauges := []string{
-		`lychgate_ratelimit_keys{route="b"}`,
-		`lychgate_upstream_panic_mode{upstream="extra"}`,
-		`lychgate_store_available{store="s"}`,
+		`microgateway_ratelimit_keys{route="b"}`,
+		`microgateway_upstream_panic_mode{upstream="extra"}`,
+		`microgateway_store_available{store="s"}`,
 	}
 	for _, want := range gauges {
 		if text := stExposition(t, reg); !strings.Contains(text, want) {
@@ -127,10 +127,10 @@ func TestPruneGauges(t *testing.T) {
 		}
 	}
 	kept := []string{
-		`lychgate_ratelimit_keys{route="a"}`,
-		`lychgate_rate_limited_total{route="b"}`,
-		`lychgate_ratelimit_store_fallback_total{route="c",policy="local"}`,
-		`lychgate_store_errors_total{store="s",op="take"}`,
+		`microgateway_ratelimit_keys{route="a"}`,
+		`microgateway_rate_limited_total{route="b"}`,
+		`microgateway_ratelimit_store_fallback_total{route="c",policy="local"}`,
+		`microgateway_store_errors_total{store="s",op="take"}`,
 	}
 	for _, want := range kept {
 		if !strings.Contains(text, want) {

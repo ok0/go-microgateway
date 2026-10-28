@@ -8,7 +8,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/ok0/lychgate/internal/yamlx"
+	"github.com/ok0/go-microgateway/internal/yamlx"
 )
 
 // BuiltinMiddlewareTypes lists the middleware types implemented by the gateway itself.

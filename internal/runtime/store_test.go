@@ -12,11 +12,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/metrics"
-	"github.com/ok0/lychgate/internal/teststore"
-	"github.com/ok0/lychgate/store"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/metrics"
+	"github.com/ok0/go-microgateway/internal/teststore"
+	"github.com/ok0/go-microgateway/store"
 )
 
 const stTypeName = "test"
@@ -296,7 +296,7 @@ func TestStoreBackendScrubsAndClassifies(t *testing.T) {
 func TestGuardEntryOwnership(t *testing.T) {
 	fake := clock.NewFake(stStart)
 	reg := metrics.NewRegistry()
-	avail, err := reg.Gauge("lychgate_store_available", "Test gauge.", "store")
+	avail, err := reg.Gauge("microgateway_store_available", "Test gauge.", "store")
 	if err != nil {
 		t.Fatal(err)
 	}

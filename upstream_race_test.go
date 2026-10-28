@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"fmt"
@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/internal/clock"
+	"github.com/ok0/go-microgateway/internal/clock"
 )
 
 func churnAnswers(i int) []string {

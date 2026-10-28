@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ok0/lychgate/internal/router"
-	"github.com/ok0/lychgate/store"
+	"github.com/ok0/go-microgateway/internal/router"
+	"github.com/ok0/go-microgateway/store"
 )
 
 // Validate reloads the key files referenced by c, applies defaults to c, then checks it. It returns a

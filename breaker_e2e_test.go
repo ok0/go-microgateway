@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"context"
@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/upstream"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
 func bkGet(t *testing.T, client *http.Client, url string, want int) []byte {
@@ -57,12 +57,12 @@ func bkCheckBreaker(t *testing.T, scope, state string, got *upstream.BreakerStat
 
 func bkGauge(t *testing.T, g *Gateway, host string) float64 {
 	t.Helper()
-	return rsMetric(t, g, "lychgate_circuit_breaker_state", "upstream", "up", "host", host)
+	return rsMetric(t, g, "microgateway_circuit_breaker_state", "upstream", "up", "host", host)
 }
 
 func bkTransitions(t *testing.T, g *Gateway, host, from, to string) float64 {
 	t.Helper()
-	return rsMetric(t, g, "lychgate_circuit_breaker_transitions_total", "upstream", "up", "host", host, "from", from, "to", to)
+	return rsMetric(t, g, "microgateway_circuit_breaker_transitions_total", "upstream", "up", "host", host, "from", from, "to", to)
 }
 
 func bkCheckTransitions(t *testing.T, logs *captureHandler, want ...string) {
@@ -134,7 +134,7 @@ func runBreakerOpenClose(t *testing.T, n testNetwork) {
 	if got := be.srv.New.Load(); got != conns {
 		t.Fatalf("connections grew from %d to %d on a rejected request", conns, got)
 	}
-	if v := rsMetric(t, g, "lychgate_circuit_breaker_rejected_total", "upstream", "up", "host", ""); v != 1 {
+	if v := rsMetric(t, g, "microgateway_circuit_breaker_rejected_total", "upstream", "up", "host", ""); v != 1 {
 		t.Fatalf("rejected host=\"\" = %v, want 1", v)
 	}
 
@@ -321,7 +321,7 @@ func TestBreakerSeriesAtStartup(t *testing.T) {
 				t.Fatalf("transitions %s>%s host=%q = %v, want 0", p[0], p[1], h, v)
 			}
 		}
-		if v := rsMetric(t, g, "lychgate_circuit_breaker_rejected_total", "upstream", "up", "host", h); v != 0 {
+		if v := rsMetric(t, g, "microgateway_circuit_breaker_rejected_total", "upstream", "up", "host", h); v != 0 {
 			t.Fatalf("rejected host=%q = %v, want 0", h, v)
 		}
 	}
@@ -531,7 +531,7 @@ func runBreakerPanicSelection(t *testing.T, n testNetwork) {
 	if host := rsHost(t, g, b.URL); !host.Ejected {
 		t.Fatal("host B not ejected")
 	}
-	if v := rsMetric(t, g, "lychgate_upstream_panic_mode", "upstream", "up"); v != 1 {
+	if v := rsMetric(t, g, "microgateway_upstream_panic_mode", "upstream", "up"); v != 1 {
 		t.Fatalf("panic mode gauge = %v, want 1", v)
 	}
 	if host := rsHost(t, g, b.URL); host.BreakerState != "closed" {
@@ -542,7 +542,7 @@ func runBreakerPanicSelection(t *testing.T, n testNetwork) {
 	}
 
 	aHits, bHits := a.hitCount(), b.hitCount()
-	retriesBefore := rsMetric(t, g, "lychgate_retries_total", "route", "all")
+	retriesBefore := rsMetric(t, g, "microgateway_retries_total", "route", "all")
 	for range 20 {
 		if body := bkGet(t, client, ts.URL+"/", http.StatusOK); string(body) != "ok" {
 			t.Fatalf("body = %q, want ok", body)
@@ -554,7 +554,7 @@ func runBreakerPanicSelection(t *testing.T, n testNetwork) {
 	if got := b.hitCount(); got != bHits+20 {
 		t.Fatalf("host B hits = %d, want %d", got, bHits+20)
 	}
-	if got := rsMetric(t, g, "lychgate_retries_total", "route", "all"); got != retriesBefore {
+	if got := rsMetric(t, g, "microgateway_retries_total", "route", "all"); got != retriesBefore {
 		t.Fatalf("retries_total = %v, want %v (host A was never attempted)", got, retriesBefore)
 	}
 	if st := rsStatus(t, g); st.BreakerState != "closed" {
@@ -580,9 +580,9 @@ func runBreakerPanicSelection(t *testing.T, n testNetwork) {
 	}
 
 	aLabel, bLabel := a.srv.Addr, b.srv.Addr
-	rejectedA := rsMetric(t, g, "lychgate_circuit_breaker_rejected_total", "upstream", "up", "host", aLabel)
-	rejectedB := rsMetric(t, g, "lychgate_circuit_breaker_rejected_total", "upstream", "up", "host", bLabel)
-	rejectedAgg := rsMetric(t, g, "lychgate_circuit_breaker_rejected_total", "upstream", "up", "host", "")
+	rejectedA := rsMetric(t, g, "microgateway_circuit_breaker_rejected_total", "upstream", "up", "host", aLabel)
+	rejectedB := rsMetric(t, g, "microgateway_circuit_breaker_rejected_total", "upstream", "up", "host", bLabel)
+	rejectedAgg := rsMetric(t, g, "microgateway_circuit_breaker_rejected_total", "upstream", "up", "host", "")
 	aHits, bHits = a.hitCount(), b.hitCount()
 	bkCircuitOpen(t, bkGet(t, client, ts.URL+"/", http.StatusServiceUnavailable))
 	if got := a.hitCount(); got != aHits {
@@ -591,13 +591,13 @@ func runBreakerPanicSelection(t *testing.T, n testNetwork) {
 	if got := b.hitCount(); got != bHits {
 		t.Fatalf("host B hits = %d, want %d after all breakers open", got, bHits)
 	}
-	if v := rsMetric(t, g, "lychgate_circuit_breaker_rejected_total", "upstream", "up", "host", aLabel); v != rejectedA+1 {
+	if v := rsMetric(t, g, "microgateway_circuit_breaker_rejected_total", "upstream", "up", "host", aLabel); v != rejectedA+1 {
 		t.Fatalf("rejected host A = %v, want %v", v, rejectedA+1)
 	}
-	if v := rsMetric(t, g, "lychgate_circuit_breaker_rejected_total", "upstream", "up", "host", bLabel); v != rejectedB+1 {
+	if v := rsMetric(t, g, "microgateway_circuit_breaker_rejected_total", "upstream", "up", "host", bLabel); v != rejectedB+1 {
 		t.Fatalf("rejected host B = %v, want %v", v, rejectedB+1)
 	}
-	if v := rsMetric(t, g, "lychgate_circuit_breaker_rejected_total", "upstream", "up", "host", ""); v != rejectedAgg {
+	if v := rsMetric(t, g, "microgateway_circuit_breaker_rejected_total", "upstream", "up", "host", ""); v != rejectedAgg {
 		t.Fatalf("rejected aggregate = %v, want %v", v, rejectedAgg)
 	}
 	if st := rsStatus(t, g); st.BreakerState != "closed" {
@@ -668,7 +668,7 @@ func TestBreakerPipelineWithoutPrerequisite(t *testing.T) {
 		t.Fatalf("backend hits = %d, want 1", got)
 	}
 	for line := range strings.SplitSeq(metricsText(t, g), "\n") {
-		if strings.HasPrefix(line, "lychgate_circuit_breaker_state") {
+		if strings.HasPrefix(line, "microgateway_circuit_breaker_state") {
 			t.Fatalf("unexpected breaker series: %q", line)
 		}
 	}

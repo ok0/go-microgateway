@@ -6,10 +6,10 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/leakcheck"
-	"github.com/ok0/lychgate/store"
-	"github.com/ok0/lychgate/store/storetest"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/leakcheck"
+	"github.com/ok0/go-microgateway/store"
+	"github.com/ok0/go-microgateway/store/storetest"
 )
 
 func TestPublicStoreTypesHoldNoSecrets(t *testing.T) {

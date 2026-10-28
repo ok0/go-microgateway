@@ -95,7 +95,7 @@ stores:
         - "10.0.1.10:26379"
         - "10.0.1.11:26379"
       master_name: mymaster
-      username: lychgate
+      username: microgateway
       password: example-redis-password
       sentinel_username: sentinel-user
       sentinel_password: example-sentinel-password
@@ -112,7 +112,7 @@ stores:
       write_timeout: 500ms
       pool_size: 16
       min_idle_conns: 2
-      key_prefix: lychgate
+      key_prefix: microgateway
   - name: custom-backend
     type: external
     guard:
@@ -235,7 +235,7 @@ routes:
       strip_prefix: /api
     request_headers:
       add:
-        X-Gateway: lychgate
+        X-Gateway: microgateway
       set:
         X-Forwarded-Proto: https
       remove:

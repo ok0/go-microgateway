@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/memstore"
-	"github.com/ok0/lychgate/internal/middleware"
-	"github.com/ok0/lychgate/internal/ratelimit"
-	"github.com/ok0/lychgate/internal/state"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/memstore"
+	"github.com/ok0/go-microgateway/internal/middleware"
+	"github.com/ok0/go-microgateway/internal/ratelimit"
+	"github.com/ok0/go-microgateway/internal/state"
 )
 
 // KindRateLimit is the state kind of a route rate-limit store.

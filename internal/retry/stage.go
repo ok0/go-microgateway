@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/ok0/lychgate/internal/clock"
+	"github.com/ok0/go-microgateway/internal/clock"
 )
 
 // Hooks are called when a retry is made or the budget refuses one. Nil hooks are skipped.

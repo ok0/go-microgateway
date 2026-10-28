@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/config"
+	"github.com/ok0/go-microgateway/config"
 )
 
 func runCmd(t *testing.T, args ...string) (int, string, string) {
@@ -151,7 +151,7 @@ func decodeEcho(t *testing.T, body []byte) echoBody {
 
 func writeTemp(t *testing.T, content string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "lychgate.yaml")
+	path := filepath.Join(t.TempDir(), "microgateway.yaml")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -243,6 +243,27 @@ func TestVersion(t *testing.T) {
 	for _, want := range []string{"dev", "none", "unknown"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout = %q, want it to contain %q", out, want)
+		}
+	}
+	if !strings.HasPrefix(out, "microgateway dev ") {
+		t.Errorf("stdout = %q, want it to start with %q", out, "microgateway dev ")
+	}
+}
+
+func TestHelpNamesBinary(t *testing.T) {
+	for _, arg := range []string{"help", "-h", "--help"} {
+		code, out, _ := runCmd(t, arg)
+		if code != 0 {
+			t.Fatalf("%s: exit code = %d, want 0", arg, code)
+		}
+		first, _, _ := strings.Cut(out, "\n")
+		if first != "usage: microgateway <command> [flags]" {
+			t.Errorf("%s: first line = %q, want %q", arg, first, "usage: microgateway <command> [flags]")
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if strings.Contains(line, "usage:") && !strings.Contains(line, "usage: microgateway") {
+				t.Errorf("%s: usage line %q does not name microgateway", arg, line)
+			}
 		}
 	}
 }
@@ -347,8 +368,8 @@ func TestRunExample(t *testing.T) {
 		if echo.Backend != "orders" || echo.Path != "/api/v2/items" {
 			t.Errorf("echo = %+v, want backend orders path /api/v2/items", echo)
 		}
-		if got := echo.Headers.Get("X-Gateway"); got != "lychgate" {
-			t.Errorf("backend X-Gateway = %q, want lychgate", got)
+		if got := echo.Headers.Get("X-Gateway"); got != "microgateway" {
+			t.Errorf("backend X-Gateway = %q, want microgateway", got)
 		}
 		if got := echo.Headers.Get("X-Env"); got != "example" {
 			t.Errorf("backend X-Env = %q, want example", got)
@@ -356,8 +377,8 @@ func TestRunExample(t *testing.T) {
 		if _, ok := echo.Headers["X-Debug"]; ok {
 			t.Error("backend received X-Debug, want it removed")
 		}
-		if got := resp.Header.Get("X-Served-By"); got != "lychgate" {
-			t.Errorf("response X-Served-By = %q, want lychgate", got)
+		if got := resp.Header.Get("X-Served-By"); got != "microgateway" {
+			t.Errorf("response X-Served-By = %q, want microgateway", got)
 		}
 		if got := resp.Header.Get("Cache-Control"); got != "no-cache" {
 			t.Errorf("response Cache-Control = %q, want no-cache", got)
@@ -394,8 +415,8 @@ func TestRunExample(t *testing.T) {
 
 	t.Run("admin metrics", func(t *testing.T) {
 		resp, body := doGet(t, client, admin, "/metrics", "", nil)
-		if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "lychgate_requests_total") {
-			t.Errorf("status = %d, want 200 with lychgate_requests_total in body %s", resp.StatusCode, body)
+		if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "microgateway_requests_total") {
+			t.Errorf("status = %d, want 200 with microgateway_requests_total in body %s", resp.StatusCode, body)
 		}
 	})
 
@@ -639,7 +660,7 @@ func TestWatchPathsIncludesKeyFiles(t *testing.T) {
         - algorithm: EdDSA
           public_key_file: pub.pem
 `
-	path := filepath.Join(dir, "lychgate.yaml")
+	path := filepath.Join(dir, "microgateway.yaml")
 	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}

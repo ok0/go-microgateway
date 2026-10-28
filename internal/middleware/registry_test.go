@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ok0/lychgate/config"
+	"github.com/ok0/go-microgateway/config"
 )
 
 func TestRegisterErrors(t *testing.T) {

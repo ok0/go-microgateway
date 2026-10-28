@@ -10,11 +10,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/auth"
-	"github.com/ok0/lychgate/internal/authkey"
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/state"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/auth"
+	"github.com/ok0/go-microgateway/internal/authkey"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/state"
 )
 
 func buildAuth(cfg *config.Config, tx *state.Tx, f auth.Fetcher, clk clock.Clock, logger *slog.Logger, s *Series) (map[string]auth.Authenticator, []string, error) {

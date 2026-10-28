@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/store"
-	"github.com/ok0/lychgate/store/storetest"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/store"
+	"github.com/ok0/go-microgateway/store/storetest"
 )
 
-const brokenEnv = "LYCHGATE_STORETEST_BROKEN"
+const brokenEnv = "MICROGATEWAY_STORETEST_BROKEN"
 
 type handle struct {
 	rl     *RateLimiter

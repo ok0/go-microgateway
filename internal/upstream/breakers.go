@@ -4,11 +4,11 @@ import (
 	"maps"
 	"sync"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/breaker"
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/health"
-	"github.com/ok0/lychgate/internal/httperr"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/breaker"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/health"
+	"github.com/ok0/go-microgateway/internal/httperr"
 )
 
 const (

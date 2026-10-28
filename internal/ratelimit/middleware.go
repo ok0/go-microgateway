@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/ok0/lychgate/internal/httperr"
-	"github.com/ok0/lychgate/internal/reqctx"
+	"github.com/ok0/go-microgateway/internal/httperr"
+	"github.com/ok0/go-microgateway/internal/reqctx"
 )
 
 type KeyFunc func(*http.Request) string

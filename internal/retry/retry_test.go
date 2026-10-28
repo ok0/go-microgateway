@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/internal/clock"
+	"github.com/ok0/go-microgateway/internal/clock"
 )
 
 var testStart = time.Unix(1000, 0)
@@ -741,7 +741,7 @@ func TestImports(t *testing.T) {
 		"log/slog":           true,
 		"math/rand":          true,
 		"math/rand/v2":       true,
-		"github.com/ok0/lychgate/internal/metrics": true,
+		"github.com/ok0/go-microgateway/internal/metrics": true,
 	}
 	entries, err := os.ReadDir(".")
 	if err != nil {

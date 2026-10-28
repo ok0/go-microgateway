@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"context"
@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/reqctx"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/reqctx"
 )
 
 const listenersYAML = "listeners:\n  - name: public\n    address: \"127.0.0.1:0\"\n"

@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"encoding/json"
@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/internal/clock"
+	"github.com/ok0/go-microgateway/internal/clock"
 )
 
 const (
@@ -38,7 +38,7 @@ func miActiveChecks(t *testing.T, gs ...*Gateway) func() float64 {
 		var sum float64
 		for _, g := range gs {
 			for _, line := range strings.Split(metricsText(t, g), "\n") {
-				if !strings.HasPrefix(line, "lychgate_upstream_active_checks_total{") {
+				if !strings.HasPrefix(line, "microgateway_upstream_active_checks_total{") {
 					continue
 				}
 				v, err := strconv.ParseFloat(line[strings.LastIndexByte(line, ' ')+1:], 64)

@@ -12,12 +12,12 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/httperr"
-	"github.com/ok0/lychgate/internal/metrics"
-	"github.com/ok0/lychgate/internal/reqctx"
-	"github.com/ok0/lychgate/internal/upstream"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/httperr"
+	"github.com/ok0/go-microgateway/internal/metrics"
+	"github.com/ok0/go-microgateway/internal/reqctx"
+	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
 type RouteSpec struct {

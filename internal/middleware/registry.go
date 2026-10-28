@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/ok0/lychgate/config"
+	"github.com/ok0/go-microgateway/config"
 )
 
 // Factory builds a middleware from its configuration definition.

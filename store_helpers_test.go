@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"fmt"
@@ -6,9 +6,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/teststore"
-	"github.com/ok0/lychgate/store"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/teststore"
+	"github.com/ok0/go-microgateway/store"
 )
 
 const (

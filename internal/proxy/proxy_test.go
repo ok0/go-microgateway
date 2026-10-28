@@ -16,14 +16,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/breaker"
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/httperr"
-	"github.com/ok0/lychgate/internal/metrics"
-	"github.com/ok0/lychgate/internal/reqctx"
-	"github.com/ok0/lychgate/internal/state"
-	"github.com/ok0/lychgate/internal/upstream"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/breaker"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/httperr"
+	"github.com/ok0/go-microgateway/internal/metrics"
+	"github.com/ok0/go-microgateway/internal/reqctx"
+	"github.com/ok0/go-microgateway/internal/state"
+	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
 func newUpstream(t *testing.T, rawURL string) *upstream.Upstream {
@@ -110,7 +110,7 @@ func TestApplyHeaderOps(t *testing.T) {
 	applyHeaderOps(h, config.HeaderOps{
 		Remove: []string{"X-Debug"},
 		Set:    map[string]config.Secret{"X-Env": config.NewSecret("example")},
-		Add:    map[string]config.Secret{"X-Gateway": config.NewSecret("lychgate")},
+		Add:    map[string]config.Secret{"X-Gateway": config.NewSecret("microgateway")},
 	})
 	if got := h.Values("X-Debug"); len(got) != 0 {
 		t.Errorf("X-Debug = %v, want removed", got)
@@ -118,8 +118,8 @@ func TestApplyHeaderOps(t *testing.T) {
 	if got := h.Values("X-Env"); !slices.Equal(got, []string{"example"}) {
 		t.Errorf("X-Env = %v, want [example]", got)
 	}
-	if got := h.Values("X-Gateway"); !slices.Equal(got, []string{"edge", "lychgate"}) {
-		t.Errorf("X-Gateway = %v, want [edge lychgate]", got)
+	if got := h.Values("X-Gateway"); !slices.Equal(got, []string{"edge", "microgateway"}) {
+		t.Errorf("X-Gateway = %v, want [edge microgateway]", got)
 	}
 }
 

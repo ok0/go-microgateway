@@ -12,7 +12,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
-	"github.com/ok0/lychgate/internal/leakcheck"
+	"github.com/ok0/go-microgateway/internal/leakcheck"
 )
 
 type secretHolder struct {

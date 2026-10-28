@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"io"
@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/internal/clock"
+	"github.com/ok0/go-microgateway/internal/clock"
 )
 
 func TestInstancesIsolateBreakers(t *testing.T) {
@@ -78,18 +78,18 @@ func TestInstancesIsolateBudget(t *testing.T) {
 
 	h3Get(gA, "/a")
 	h3Get(gA, "/a")
-	if got := rsMetric(t, gA, "lychgate_retries_total", "route", "a"); got != 1 {
+	if got := rsMetric(t, gA, "microgateway_retries_total", "route", "a"); got != 1 {
 		t.Fatalf("A retries_total{a} = %v, want 1", got)
 	}
-	if got := rsMetric(t, gA, "lychgate_retry_budget_exhausted_total", "route", "a"); got != 1 {
+	if got := rsMetric(t, gA, "microgateway_retry_budget_exhausted_total", "route", "a"); got != 1 {
 		t.Fatalf("A exhausted_total{a} = %v, want 1", got)
 	}
 
 	h3Get(gB, "/a")
-	if got := rsMetric(t, gB, "lychgate_retries_total", "route", "a"); got != 1 {
+	if got := rsMetric(t, gB, "microgateway_retries_total", "route", "a"); got != 1 {
 		t.Fatalf("B retries_total{a} = %v, want 1", got)
 	}
-	if got := rsMetricOr0(t, gB, "lychgate_retry_budget_exhausted_total", "route", "a"); got != 0 {
+	if got := rsMetricOr0(t, gB, "microgateway_retry_budget_exhausted_total", "route", "a"); got != 0 {
 		t.Fatalf("B exhausted_total{a} = %v, want 0", got)
 	}
 }

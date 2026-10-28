@@ -1,5 +1,5 @@
-// Package lychgate is an embeddable HTTP API gateway. A Gateway is an http.Handler built from a validated configuration.
-package lychgate
+// Package microgateway is an embeddable HTTP API gateway. A Gateway is an http.Handler built from a validated configuration.
+package microgateway
 
 import (
 	"errors"
@@ -10,21 +10,21 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/admin"
-	"github.com/ok0/lychgate/internal/auth"
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/hooks"
-	"github.com/ok0/lychgate/internal/httperr"
-	"github.com/ok0/lychgate/internal/metrics"
-	"github.com/ok0/lychgate/internal/middleware"
-	"github.com/ok0/lychgate/internal/runtime"
-	"github.com/ok0/lychgate/internal/state"
-	"github.com/ok0/lychgate/internal/upstream"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/admin"
+	"github.com/ok0/go-microgateway/internal/auth"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/hooks"
+	"github.com/ok0/go-microgateway/internal/httperr"
+	"github.com/ok0/go-microgateway/internal/metrics"
+	"github.com/ok0/go-microgateway/internal/middleware"
+	"github.com/ok0/go-microgateway/internal/runtime"
+	"github.com/ok0/go-microgateway/internal/state"
+	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
 // ErrClosed is returned by Reload, ReloadYAML, ReloadFile and WatchFile after Close.
-var ErrClosed = errors.New("lychgate: gateway closed")
+var ErrClosed = errors.New("microgateway: gateway closed")
 
 type Gateway struct {
 	cur      atomic.Pointer[generation]
@@ -125,7 +125,7 @@ func (o options) middlewareRegistry() (*middleware.Registry, error) {
 			return mw, nil
 		})
 		if err != nil {
-			return nil, fmt.Errorf("lychgate: WithMiddleware(%q): %w", r.typeName, err)
+			return nil, fmt.Errorf("microgateway: WithMiddleware(%q): %w", r.typeName, err)
 		}
 	}
 	return reg, nil
@@ -133,7 +133,7 @@ func (o options) middlewareRegistry() (*middleware.Registry, error) {
 
 func New(cfg *config.Config, opts ...Option) (*Gateway, error) {
 	if cfg == nil {
-		return nil, errors.New("lychgate: nil config")
+		return nil, errors.New("microgateway: nil config")
 	}
 	o := newOptions(opts)
 	if o.err != nil {

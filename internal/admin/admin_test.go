@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/admin"
-	"github.com/ok0/lychgate/internal/metrics"
-	"github.com/ok0/lychgate/internal/upstream"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/admin"
+	"github.com/ok0/go-microgateway/internal/metrics"
+	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
 const (

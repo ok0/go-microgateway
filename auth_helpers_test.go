@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"bytes"
@@ -27,9 +27,9 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/ok0/lychgate/internal/authkey"
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/httperr"
+	"github.com/ok0/go-microgateway/internal/authkey"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/httperr"
 )
 
 const (
@@ -93,7 +93,7 @@ func auPEM(t *testing.T, pub any) string {
 
 // auHMAC returns a deterministic shared secret for alg, exactly the minimum length for that algorithm.
 func auHMAC(alg string) string {
-	base := alg + ":lychgate-auth-test-secret:0123456789abcdef0123456789abcdef"
+	base := alg + ":microgateway-auth-test-secret:0123456789abcdef0123456789abcdef"
 	return strings.Repeat(base, 2)[:authkey.MinSecretBytes(alg)]
 }
 
@@ -449,8 +449,8 @@ func auAssert403(t *testing.T, rec *httptest.ResponseRecorder) {
 	}
 }
 
-// auFailures returns the value of lychgate_auth_failures_total for route and reason, or 0 when not yet recorded.
+// auFailures returns the value of microgateway_auth_failures_total for route and reason, or 0 when not yet recorded.
 func auFailures(t *testing.T, g *Gateway, route, reason string) float64 {
 	t.Helper()
-	return rsMetricOr0(t, g, "lychgate_auth_failures_total", "route", route, "reason", reason)
+	return rsMetricOr0(t, g, "microgateway_auth_failures_total", "route", route, "reason", reason)
 }

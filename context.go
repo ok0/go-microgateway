@@ -1,10 +1,10 @@
-package lychgate
+package microgateway
 
 import (
 	"context"
 	"net/http"
 
-	"github.com/ok0/lychgate/internal/reqctx"
+	"github.com/ok0/go-microgateway/internal/reqctx"
 )
 
 // Identity is the authenticated caller of a request.

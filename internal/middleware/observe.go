@@ -8,10 +8,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/httperr"
-	"github.com/ok0/lychgate/internal/metrics"
-	"github.com/ok0/lychgate/internal/reqctx"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/httperr"
+	"github.com/ok0/go-microgateway/internal/metrics"
+	"github.com/ok0/go-microgateway/internal/reqctx"
 )
 
 // RequestMetrics holds the request series recorded by Observe.

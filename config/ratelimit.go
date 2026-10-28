@@ -1,6 +1,6 @@
 package config
 
-import "github.com/ok0/lychgate/store"
+import "github.com/ok0/go-microgateway/store"
 
 // StoreLimit returns the store.Limit described by rl. It is valid only after defaults have been applied. A
 // validated configuration always yields ok, and the returned Limit validates with store.Limit.Validate.

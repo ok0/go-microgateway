@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ok0/lychgate/internal/metrics"
+	"github.com/ok0/go-microgateway/internal/metrics"
 )
 
 type family struct {

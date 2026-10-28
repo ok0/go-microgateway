@@ -11,12 +11,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/metrics"
-	"github.com/ok0/lychgate/internal/state"
-	"github.com/ok0/lychgate/internal/storeguard"
-	"github.com/ok0/lychgate/store"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/metrics"
+	"github.com/ok0/go-microgateway/internal/state"
+	"github.com/ok0/go-microgateway/internal/storeguard"
+	"github.com/ok0/go-microgateway/store"
 )
 
 // KindStore is the state kind of a store backend.

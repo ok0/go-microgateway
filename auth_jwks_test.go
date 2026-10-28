@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"bytes"
@@ -165,7 +165,7 @@ func TestAuthJWKSLastGood(t *testing.T) {
 			if n := f.count(); n != 2 {
 				t.Errorf("fetches = %d, want 2", n)
 			}
-			if got := rsMetricOr0(t, g, "lychgate_auth_jwks_refreshes_total", "provider", "idp", "result", "failure"); got != 1 {
+			if got := rsMetricOr0(t, g, "microgateway_auth_jwks_refreshes_total", "provider", "idp", "result", "failure"); got != 1 {
 				t.Errorf("failed refreshes = %v, want 1", got)
 			}
 			e.mu.Lock()
@@ -354,7 +354,7 @@ func TestAuthJWKSHTTPClient(t *testing.T) {
 			} else {
 				auAssert401(t, rr, "Bearer")
 			}
-			if got := rsMetricOr0(t, g, "lychgate_auth_jwks_refreshes_total", "provider", "idp", "result", tc.result); got != 1 {
+			if got := rsMetricOr0(t, g, "microgateway_auth_jwks_refreshes_total", "provider", "idp", "result", tc.result); got != 1 {
 				t.Errorf("refreshes{result=%s} = %v, want 1", tc.result, got)
 			}
 		})

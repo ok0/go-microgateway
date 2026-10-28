@@ -1,4 +1,4 @@
-module github.com/ok0/lychgate
+module github.com/ok0/go-microgateway
 
 go 1.27.0
 

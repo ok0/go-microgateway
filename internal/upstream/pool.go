@@ -7,10 +7,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/breaker"
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/health"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/breaker"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/health"
 )
 
 type hostState struct{ inflight atomic.Int64 }

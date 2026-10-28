@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/internal/testcert"
+	"github.com/ok0/go-microgateway/internal/testcert"
 )
 
 type syncBuffer struct {
@@ -230,7 +230,7 @@ func TestRunReloadOnFileEdit(t *testing.T) {
 
 func TestRunSIGHUPReloadsEnvironment(t *testing.T) {
 	backend := echoBackend(t, "users")
-	t.Setenv("LYCHGATE_TEST_ENV", "one")
+	t.Setenv("MICROGATEWAY_TEST_ENV", "one")
 	path := writeTemp(t, fmt.Sprintf(`version: 1
 listeners:
   - name: public
@@ -247,7 +247,7 @@ routes:
     upstream: users
     response_headers:
       set:
-        X-Env: "${LYCHGATE_TEST_ENV}"
+        X-Env: "${MICROGATEWAY_TEST_ENV}"
 admin:
   address: "127.0.0.1:0"
 `, backend.URL))
@@ -262,14 +262,14 @@ admin:
 		t.Fatalf("X-Env before SIGHUP = %q, want one", got)
 	}
 
-	t.Setenv("LYCHGATE_TEST_ENV", "two")
+	t.Setenv("MICROGATEWAY_TEST_ENV", "two")
 	h.sig <- syscall.SIGHUP
 	eventually(t, func() bool {
 		resp, _ := doGet(t, client, public, "/", "", nil)
 		return resp.Header.Get("X-Env") == "two"
 	})
 
-	const unchanged = `lychgate_config_reloads_total{result="unchanged"}`
+	const unchanged = `microgateway_config_reloads_total{result="unchanged"}`
 	before := metric(t, admin, unchanged)
 	h.sig <- syscall.SIGHUP
 	eventually(t, func() bool { return metric(t, admin, unchanged) == before+1 })
@@ -307,7 +307,7 @@ admin:
 	public := h.addrs.Listeners["public"].String()
 	admin := h.addrs.Admin.String()
 	client := &http.Client{Timeout: 5 * time.Second}
-	const failure = `lychgate_config_reloads_total{result="failure"}`
+	const failure = `microgateway_config_reloads_total{result="failure"}`
 	before := metric(t, admin, failure)
 
 	writeFile(t, path, []byte(`version: 1
@@ -506,8 +506,8 @@ admin:
 		Timeout:   5 * time.Second,
 		Transport: &http.Transport{TLSClientConfig: insecureTLS(), DisableKeepAlives: true},
 	}
-	const success = `lychgate_config_reloads_total{result="success"}`
-	const failure = `lychgate_config_reloads_total{result="failure"}`
+	const success = `microgateway_config_reloads_total{result="success"}`
+	const failure = `microgateway_config_reloads_total{result="failure"}`
 
 	swapped := func(name, listener string, oldSerial, newSerial int64, apply func()) {
 		t.Helper()

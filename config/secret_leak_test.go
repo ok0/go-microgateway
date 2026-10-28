@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ok0/lychgate/internal/leakcheck"
+	"github.com/ok0/go-microgateway/internal/leakcheck"
 )
 
 func TestNoFormattingPathRevealsSecrets(t *testing.T) {

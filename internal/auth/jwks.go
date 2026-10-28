@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ok0/lychgate/internal/clock"
+	"github.com/ok0/go-microgateway/internal/clock"
 )
 
 const KindJWKS = "auth.jwks"

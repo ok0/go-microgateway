@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"encoding/json"
@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/ok0/lychgate/internal/upstream"
+	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
 func getOK(t *testing.T, client *http.Client, url string) {

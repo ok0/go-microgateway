@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ok0/lychgate/config"
+	"github.com/ok0/go-microgateway/config"
 )
 
 // scrubber replaces the secret values of one store, and their standard encodings, in text.

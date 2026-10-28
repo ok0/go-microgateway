@@ -13,8 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/clock"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
 )
 
 const maxProbeDrain = 64 << 10
@@ -234,7 +234,7 @@ func (c *Checker) request(pctx context.Context, t Target) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	req.Header.Set("User-Agent", "lychgate-health-check")
+	req.Header.Set("User-Agent", "microgateway-health-check")
 	rt := *c.rtp.Load()
 	resp, err := rt.RoundTrip(req)
 	if err != nil {

@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"context"
@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/upstream"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
 type fakeResolver struct {

@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"context"
@@ -7,10 +7,10 @@ import (
 	"errors"
 	"time"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/metrics"
-	"github.com/ok0/lychgate/internal/reload"
-	"github.com/ok0/lychgate/internal/runtime"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/metrics"
+	"github.com/ok0/go-microgateway/internal/reload"
+	"github.com/ok0/go-microgateway/internal/runtime"
 )
 
 type reloadSeries struct {
@@ -19,11 +19,11 @@ type reloadSeries struct {
 }
 
 func registerReloadSeries(r *metrics.Registry) (*reloadSeries, error) {
-	c, err := r.Counter("lychgate_config_reloads_total", "Configuration reload attempts, by result.", "result")
+	c, err := r.Counter("microgateway_config_reloads_total", "Configuration reload attempts, by result.", "result")
 	if err != nil {
 		return nil, err
 	}
-	g, err := r.Gauge("lychgate_config_last_reload_success_timestamp_seconds", "Unix time of the last successful configuration load, initial or reload.")
+	g, err := r.Gauge("microgateway_config_last_reload_success_timestamp_seconds", "Unix time of the last successful configuration load, initial or reload.")
 	if err != nil {
 		return nil, err
 	}
@@ -39,7 +39,7 @@ func registerReloadSeries(r *metrics.Registry) (*reloadSeries, error) {
 // changes to it have no effect. On failure the previous configuration remains active and the error is returned.
 func (g *Gateway) Reload(cfg *config.Config) error {
 	if cfg == nil {
-		return errors.New("lychgate: nil config")
+		return errors.New("microgateway: nil config")
 	}
 	return g.reload("api", func() (*config.Config, error) {
 		c := cfg.Clone()

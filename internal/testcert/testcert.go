@@ -52,7 +52,7 @@ func Generate(t testing.TB, serial int64, notAfter time.Time) (certPEM, keyPEM [
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(serial),
-		Subject:               pkix.Name{CommonName: "lychgate test"},
+		Subject:               pkix.Name{CommonName: "microgateway test"},
 		DNSNames:              []string{"localhost"},
 		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
 		NotBefore:             time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC),

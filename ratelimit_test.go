@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"fmt"
@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/internal/clock"
+	"github.com/ok0/go-microgateway/internal/clock"
 )
 
 const rlStart = 1_700_000_040
@@ -272,10 +272,10 @@ func TestRateLimitMetrics(t *testing.T) {
 	be, _ := rlBackend(t, n)
 	g := n.gateway(t, rlDoc(be.URL, "", rlRoute("rl", "    rate_limit:\n      rate: 2\n      per: 1h\n")), withClock(fake))
 
-	if got := rsMetric(t, g, "lychgate_rate_limited_total", "route", "rl"); got != 0 {
+	if got := rsMetric(t, g, "microgateway_rate_limited_total", "route", "rl"); got != 0 {
 		t.Fatalf("rate_limited_total before requests = %v, want 0", got)
 	}
-	if got := rsMetric(t, g, "lychgate_ratelimit_keys", "route", "rl"); got != 0 {
+	if got := rsMetric(t, g, "microgateway_ratelimit_keys", "route", "rl"); got != 0 {
 		t.Fatalf("ratelimit_keys before requests = %v, want 0", got)
 	}
 
@@ -299,10 +299,10 @@ func TestRateLimitMetrics(t *testing.T) {
 		}
 	}
 
-	if got := rsMetric(t, g, "lychgate_rate_limited_total", "route", "rl"); got != float64(limited) {
+	if got := rsMetric(t, g, "microgateway_rate_limited_total", "route", "rl"); got != float64(limited) {
 		t.Fatalf("rate_limited_total = %v, want %d", got, limited)
 	}
-	if got := rsMetric(t, g, "lychgate_ratelimit_keys", "route", "rl"); got != 2 {
+	if got := rsMetric(t, g, "microgateway_ratelimit_keys", "route", "rl"); got != 2 {
 		t.Fatalf("ratelimit_keys = %v, want 2", got)
 	}
 	rsCheckExposition(t, metricsText(t, g))

@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"context"
@@ -19,7 +19,7 @@ func WithKeySetFetcher(f KeySetFetcher) Option {
 	return func(o *options) {
 		if f == nil {
 			if o.err == nil {
-				o.err = errors.New("lychgate: WithKeySetFetcher: nil fetcher")
+				o.err = errors.New("microgateway: WithKeySetFetcher: nil fetcher")
 			}
 			return
 		}
@@ -33,7 +33,7 @@ func WithHTTPClient(c *http.Client) Option {
 	return func(o *options) {
 		if c == nil {
 			if o.err == nil {
-				o.err = errors.New("lychgate: WithHTTPClient: nil client")
+				o.err = errors.New("microgateway: WithHTTPClient: nil client")
 			}
 			return
 		}

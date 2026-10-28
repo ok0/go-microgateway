@@ -1,7 +1,7 @@
 //go:build realnet
 
 // The tests in this file repeat the reload scenarios over loopback TCP. They open hundreds of loopback connections and are run explicitly with -tags realnet.
-package lychgate
+package microgateway
 
 import "testing"
 

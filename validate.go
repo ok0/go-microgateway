@@ -1,11 +1,11 @@
-package lychgate
+package microgateway
 
 import (
 	"errors"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/middleware"
-	"github.com/ok0/lychgate/internal/runtime"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/middleware"
+	"github.com/ok0/go-microgateway/internal/runtime"
 )
 
 // Validate reports whether cfg is a valid configuration for a gateway built with opts. Besides the schema rules of
@@ -14,7 +14,7 @@ import (
 // Validate never calls a store factory, opens a connection or mutates cfg. A nil cfg is an error.
 func Validate(cfg *config.Config, opts ...Option) error {
 	if cfg == nil {
-		return errors.New("lychgate: nil config")
+		return errors.New("microgateway: nil config")
 	}
 	o := newOptions(opts)
 	if o.err != nil {

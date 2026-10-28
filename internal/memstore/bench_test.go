@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/store"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/store"
 )
 
 func BenchmarkTake(b *testing.B) {

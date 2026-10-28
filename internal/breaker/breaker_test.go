@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/internal/clock"
+	"github.com/ok0/go-microgateway/internal/clock"
 )
 
 func newTest(t *testing.T, mod func(*Settings)) (*Breaker, *clock.Fake, *[]string) {
@@ -450,12 +450,12 @@ func TestNewTakesNoSharedHandle(t *testing.T) {
 
 func TestImports(t *testing.T) {
 	allowed := map[string]bool{
-		"errors":                                 true,
-		"fmt":                                    true,
-		"sync":                                   true,
-		"sync/atomic":                            true,
-		"time":                                   true,
-		"github.com/ok0/lychgate/internal/clock": true,
+		"errors":      true,
+		"fmt":         true,
+		"sync":        true,
+		"sync/atomic": true,
+		"time":        true,
+		"github.com/ok0/go-microgateway/internal/clock": true,
 	}
 	entries, err := os.ReadDir(".")
 	if err != nil {

@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/ok0/lychgate/internal/clock"
+	"github.com/ok0/go-microgateway/internal/clock"
 )
 
 func hash64(s string) uint64 {

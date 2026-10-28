@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/httperr"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/httperr"
 )
 
 func errorCode(t *testing.T, rec *httptest.ResponseRecorder) string {

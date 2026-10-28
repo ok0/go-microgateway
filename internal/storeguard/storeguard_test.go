@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/store"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/store"
 )
 
 var testSettings = Settings{ConsecutiveFailures: 3, OpenTimeout: 2 * time.Second, MaxInflight: 4}

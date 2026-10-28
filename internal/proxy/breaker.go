@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/ok0/lychgate/internal/breaker"
-	"github.com/ok0/lychgate/internal/httperr"
-	"github.com/ok0/lychgate/internal/upstream"
+	"github.com/ok0/go-microgateway/internal/breaker"
+	"github.com/ok0/go-microgateway/internal/httperr"
+	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
 type stageKey struct{}

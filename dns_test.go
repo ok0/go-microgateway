@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"encoding/json"
@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/upstream"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
 const dnsRefreshInterval = 5 * time.Second
@@ -189,7 +189,7 @@ func TestDNSRefreshKeepsStateOfUnchangedHosts(t *testing.T) {
 	res.fail(errors.New("servfail"))
 	fake.Advance(dnsRefreshInterval)
 	eventually(t, func() bool {
-		return metricsHasLine(metricsText(t, g), `lychgate_upstream_dns_refresh_total{upstream="dns",result="error"} 1`)
+		return metricsHasLine(metricsText(t, g), `microgateway_upstream_dns_refresh_total{upstream="dns",result="error"} 1`)
 	})
 	if got := dnsHostURLs(upstreamStatus(t, g, "dns")); !slices.Equal(got, wantAfter) {
 		t.Fatalf("hosts after error answer = %v, want %v", got, wantAfter)
@@ -202,7 +202,7 @@ func TestDNSRefreshKeepsStateOfUnchangedHosts(t *testing.T) {
 	res.set(nil)
 	fake.Advance(dnsRefreshInterval)
 	eventually(t, func() bool {
-		return metricsHasLine(metricsText(t, g), `lychgate_upstream_dns_refresh_total{upstream="dns",result="empty"} 1`)
+		return metricsHasLine(metricsText(t, g), `microgateway_upstream_dns_refresh_total{upstream="dns",result="empty"} 1`)
 	})
 	if got := dnsHostURLs(upstreamStatus(t, g, "dns")); !slices.Equal(got, wantAfter) {
 		t.Fatalf("hosts after empty answer = %v, want %v", got, wantAfter)

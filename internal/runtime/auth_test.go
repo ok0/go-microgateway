@@ -16,11 +16,11 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/middleware"
-	"github.com/ok0/lychgate/internal/reqctx"
-	"github.com/ok0/lychgate/internal/state"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/middleware"
+	"github.com/ok0/go-microgateway/internal/reqctx"
+	"github.com/ok0/go-microgateway/internal/state"
 )
 
 const (

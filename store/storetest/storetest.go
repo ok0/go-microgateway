@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/store"
+	"github.com/ok0/go-microgateway/store"
 )
 
 // Harness adapts a backend to the suite.

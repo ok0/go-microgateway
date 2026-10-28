@@ -1,6 +1,6 @@
 //go:build realnet
 
-package lychgate
+package microgateway
 
 import (
 	"net/http"

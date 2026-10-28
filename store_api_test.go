@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"bytes"
@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/store"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/store"
 )
 
 type sapiCloseOnly struct{}
@@ -184,7 +184,7 @@ func TestStoreResolutionErrors(t *testing.T) {
 
 	g := n.gateway(t, stDoc(be.URL, "", stRoute("plain", "")), opts...)
 	gfp := g.Config().Fingerprint()
-	if got := stCounter(t, g, "lychgate_config_reloads_total", "result", "failure"); got != 0 {
+	if got := stCounter(t, g, "microgateway_config_reloads_total", "result", "failure"); got != 0 {
 		t.Fatalf("failure reloads before Reload = %v, want 0", got)
 	}
 	rerr := g.Reload(mustParseSapi(t, buildDoc))
@@ -192,7 +192,7 @@ func TestStoreResolutionErrors(t *testing.T) {
 		t.Fatal("Reload() = nil error, want resolution errors")
 	}
 	sapiWant(t, sapiValidationErrors(t, rerr), buildWant)
-	if got := stCounter(t, g, "lychgate_config_reloads_total", "result", "failure"); got != 1 {
+	if got := stCounter(t, g, "microgateway_config_reloads_total", "result", "failure"); got != 1 {
 		t.Fatalf("failure reloads after Reload = %v, want 1", got)
 	}
 	if g.Config().Fingerprint() != gfp {
@@ -715,7 +715,7 @@ func TestStoresSeededViaValidate(t *testing.T) {
 	g := n.gateway(t, stDoc(be.URL, stStore("ok", ""), stRoute("live", "")), opts...)
 	rerr := g.Reload(cfg)
 	sapiWantAt(t, cfg, rerr, want)
-	if got := stCounter(t, g, "lychgate_config_reloads_total", "result", "failure"); got != 1 {
+	if got := stCounter(t, g, "microgateway_config_reloads_total", "result", "failure"); got != 1 {
 		t.Fatalf("failure reloads after Reload = %v, want 1", got)
 	}
 	if got := testCalls.Load() + redisCalls.Load(); got != 0 {

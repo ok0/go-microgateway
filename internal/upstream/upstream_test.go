@@ -18,14 +18,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/breaker"
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/health"
-	"github.com/ok0/lychgate/internal/httperr"
-	"github.com/ok0/lychgate/internal/metrics"
-	"github.com/ok0/lychgate/internal/reqctx"
-	"github.com/ok0/lychgate/internal/state"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/breaker"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/health"
+	"github.com/ok0/go-microgateway/internal/httperr"
+	"github.com/ok0/go-microgateway/internal/metrics"
+	"github.com/ok0/go-microgateway/internal/reqctx"
+	"github.com/ok0/go-microgateway/internal/state"
 )
 
 var testStart = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -1601,13 +1601,13 @@ func TestBreakerMetricsAndLogs(t *testing.T) {
 	}
 	text := out.String()
 	for _, want := range []string{
-		`lychgate_circuit_breaker_state{upstream="u",host="a:1"} 0`,
-		`lychgate_circuit_breaker_state{upstream="u",host=""} 0`,
-		`lychgate_circuit_breaker_transitions_total{upstream="u",host="a:1",from="closed",to="open"} 0`,
-		`lychgate_circuit_breaker_transitions_total{upstream="u",host="a:1",from="open",to="half_open"} 0`,
-		`lychgate_circuit_breaker_transitions_total{upstream="u",host="a:1",from="half_open",to="open"} 0`,
-		`lychgate_circuit_breaker_transitions_total{upstream="u",host="a:1",from="half_open",to="closed"} 0`,
-		`lychgate_circuit_breaker_rejected_total{upstream="u",host="a:1"} 0`,
+		`microgateway_circuit_breaker_state{upstream="u",host="a:1"} 0`,
+		`microgateway_circuit_breaker_state{upstream="u",host=""} 0`,
+		`microgateway_circuit_breaker_transitions_total{upstream="u",host="a:1",from="closed",to="open"} 0`,
+		`microgateway_circuit_breaker_transitions_total{upstream="u",host="a:1",from="open",to="half_open"} 0`,
+		`microgateway_circuit_breaker_transitions_total{upstream="u",host="a:1",from="half_open",to="open"} 0`,
+		`microgateway_circuit_breaker_transitions_total{upstream="u",host="a:1",from="half_open",to="closed"} 0`,
+		`microgateway_circuit_breaker_rejected_total{upstream="u",host="a:1"} 0`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing series %s", want)

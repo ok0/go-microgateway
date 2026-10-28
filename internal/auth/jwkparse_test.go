@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ok0/lychgate/internal/authkey"
+	"github.com/ok0/go-microgateway/internal/authkey"
 )
 
 func TestParseJWKS(t *testing.T) {

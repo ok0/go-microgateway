@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"bufio"
@@ -13,7 +13,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ok0/lychgate/internal/metrics"
+	"github.com/ok0/go-microgateway/internal/metrics"
 )
 
 type captureHandler struct {
@@ -237,23 +237,24 @@ routes:
 		t.Fatalf("Content-Type = %q, want %q", ct, metrics.ContentType)
 	}
 	body := rec.Body.String()
+	checkMetricPrefix(t, body)
 
 	goodHost := strings.TrimPrefix(good.URL, "http://")
 	for _, line := range []string{
-		`lychgate_requests_total{route="api",method="GET",code="200"} 1`,
-		`lychgate_requests_total{route="unmatched",method="GET",code="404"} 1`,
-		`lychgate_requests_total{route="down",method="GET",code="502"} 1`,
-		`lychgate_requests_total{route="api",method="OTHER",code="200"} 1`,
-		`lychgate_request_duration_seconds_count{route="api"} 2`,
-		`lychgate_request_duration_seconds_bucket{route="api",le="+Inf"} 2`,
-		`lychgate_upstream_attempts_total{upstream="good",host="` + goodHost + `",outcome="success"} 2`,
-		`lychgate_upstream_attempts_total{upstream="bad",host="` + badAddr + `",outcome="failure"} 1`,
+		`microgateway_requests_total{route="api",method="GET",code="200"} 1`,
+		`microgateway_requests_total{route="unmatched",method="GET",code="404"} 1`,
+		`microgateway_requests_total{route="down",method="GET",code="502"} 1`,
+		`microgateway_requests_total{route="api",method="OTHER",code="200"} 1`,
+		`microgateway_request_duration_seconds_count{route="api"} 2`,
+		`microgateway_request_duration_seconds_bucket{route="api",le="+Inf"} 2`,
+		`microgateway_upstream_attempts_total{upstream="good",host="` + goodHost + `",outcome="success"} 2`,
+		`microgateway_upstream_attempts_total{upstream="bad",host="` + badAddr + `",outcome="failure"} 1`,
 	} {
 		if !metricsHasLine(body, line) {
 			t.Fatalf("metrics lack line %q\n%s", line, body)
 		}
 	}
-	if !strings.Contains(body, `lychgate_request_duration_seconds_sum{route="api"} `) {
+	if !strings.Contains(body, `microgateway_request_duration_seconds_sum{route="api"} `) {
 		t.Fatalf("metrics lack the duration sum for route api\n%s", body)
 	}
 }

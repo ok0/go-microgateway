@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/testcert"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/testcert"
 )
 
 var farFuture = time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)

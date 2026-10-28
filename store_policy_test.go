@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"context"
@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/httperr"
-	"github.com/ok0/lychgate/internal/teststore"
-	"github.com/ok0/lychgate/store"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/httperr"
+	"github.com/ok0/go-microgateway/internal/teststore"
+	"github.com/ok0/go-microgateway/store"
 )
 
 var spDown = fmt.Errorf("store unreachable: %w", store.ErrUnavailable)
@@ -179,9 +179,9 @@ func TestStorePolicyTable(t *testing.T) {
 				if policy == "local" {
 					wantFallbacks = 4
 				}
-				spExpectValue(t, g, 0, "lychgate_store_available", "store", "shared")
-				spExpectValue(t, g, 1, "lychgate_store_errors_total", "store", "shared", "op", "take")
-				spExpectValue(t, g, float64(wantFallbacks), "lychgate_ratelimit_store_fallback_total", "route", "rl", "policy", policy)
+				spExpectValue(t, g, 0, "microgateway_store_available", "store", "shared")
+				spExpectValue(t, g, 1, "microgateway_store_errors_total", "store", "shared", "op", "take")
+				spExpectValue(t, g, float64(wantFallbacks), "microgateway_ratelimit_store_fallback_total", "route", "rl", "policy", policy)
 				rsCheckExposition(t, metricsText(t, g))
 			})
 		}
@@ -204,26 +204,26 @@ func TestStoreRecovery(t *testing.T) {
 		t.Fatalf("handles = %d, want 1", len(handles))
 	}
 
-	spExpectValue(t, g, 1, "lychgate_store_available", "store", "shared")
-	spExpectValue(t, g, 0, "lychgate_store_errors_total", "store", "shared", "op", "take")
-	spExpectValue(t, g, 0, "lychgate_ratelimit_store_fallback_total", "route", "rl", "policy", "local")
+	spExpectValue(t, g, 1, "microgateway_store_available", "store", "shared")
+	spExpectValue(t, g, 0, "microgateway_store_errors_total", "store", "shared", "op", "take")
+	spExpectValue(t, g, 0, "microgateway_ratelimit_store_fallback_total", "route", "rl", "policy", "local")
 	rsCheckExposition(t, metricsText(t, g))
 
 	shared.SetMode(teststore.Fail, spDown)
 	for i := range 3 {
 		rlExpectRemaining(t, stDo(t, g, "/rl", client), strconv.Itoa(9-i))
 	}
-	spExpectValue(t, g, 0, "lychgate_store_available", "store", "shared")
-	spExpectValue(t, g, 3, "lychgate_store_errors_total", "store", "shared", "op", "take")
-	spExpectValue(t, g, 3, "lychgate_ratelimit_store_fallback_total", "route", "rl", "policy", "local")
+	spExpectValue(t, g, 0, "microgateway_store_available", "store", "shared")
+	spExpectValue(t, g, 3, "microgateway_store_errors_total", "store", "shared", "op", "take")
+	spExpectValue(t, g, 3, "microgateway_ratelimit_store_fallback_total", "route", "rl", "policy", "local")
 	if got := len(shared.Calls()); got != 3 {
 		t.Fatalf("store calls = %d, want 3", got)
 	}
 
 	spCanceledGet(t, g, "/rl", client)
-	spExpectValue(t, g, 0, "lychgate_store_available", "store", "shared")
-	spExpectValue(t, g, 3, "lychgate_store_errors_total", "store", "shared", "op", "take")
-	spExpectValue(t, g, 3, "lychgate_ratelimit_store_fallback_total", "route", "rl", "policy", "local")
+	spExpectValue(t, g, 0, "microgateway_store_available", "store", "shared")
+	spExpectValue(t, g, 3, "microgateway_store_errors_total", "store", "shared", "op", "take")
+	spExpectValue(t, g, 3, "microgateway_ratelimit_store_fallback_total", "route", "rl", "policy", "local")
 	if got := len(shared.Calls()); got != 3 {
 		t.Fatalf("store calls after canceled request = %d, want 3", got)
 	}
@@ -231,8 +231,8 @@ func TestStoreRecovery(t *testing.T) {
 	for i := range 2 {
 		rlExpectRemaining(t, stDo(t, g, "/rl", client), strconv.Itoa(6-i))
 	}
-	spExpectValue(t, g, 5, "lychgate_ratelimit_store_fallback_total", "route", "rl", "policy", "local")
-	spExpectValue(t, g, 3, "lychgate_store_errors_total", "store", "shared", "op", "take")
+	spExpectValue(t, g, 5, "microgateway_ratelimit_store_fallback_total", "route", "rl", "policy", "local")
+	spExpectValue(t, g, 3, "microgateway_store_errors_total", "store", "shared", "op", "take")
 	if got := len(shared.Calls()); got != 3 {
 		t.Fatalf("store calls while open = %d, want 3", got)
 	}
@@ -243,9 +243,9 @@ func TestStoreRecovery(t *testing.T) {
 	if got := len(shared.Calls()); got != 4 {
 		t.Fatalf("store calls after one probe = %d, want 4", got)
 	}
-	spExpectValue(t, g, 1, "lychgate_store_available", "store", "shared")
-	spExpectValue(t, g, 3, "lychgate_store_errors_total", "store", "shared", "op", "take")
-	spExpectValue(t, g, 5, "lychgate_ratelimit_store_fallback_total", "route", "rl", "policy", "local")
+	spExpectValue(t, g, 1, "microgateway_store_available", "store", "shared")
+	spExpectValue(t, g, 3, "microgateway_store_errors_total", "store", "shared", "op", "take")
+	spExpectValue(t, g, 5, "microgateway_ratelimit_store_fallback_total", "route", "rl", "policy", "local")
 
 	rlExpectRemaining(t, stDo(t, g, "/rl", client), "8")
 	if got := len(shared.Calls()); got != 5 {
@@ -276,7 +276,7 @@ func TestStoreSharedGuard(t *testing.T) {
 	for range 3 {
 		spExpectUnavailable(t, stDo(t, g, "/a", client), "2")
 	}
-	spExpectValue(t, g, 0, "lychgate_store_available", "store", "shared")
+	spExpectValue(t, g, 0, "microgateway_store_available", "store", "shared")
 	if got := len(shared.Calls()); got != 3 {
 		t.Fatalf("store calls = %d, want 3", got)
 	}
@@ -286,7 +286,7 @@ func TestStoreSharedGuard(t *testing.T) {
 		t.Fatalf("store calls with guard open = %d, want 3", got)
 	}
 	rlExpectRemaining(t, stDo(t, g, "/c", client), "9")
-	if strings.Contains(metricsText(t, g), `lychgate_ratelimit_store_fallback_total{route="c"`) {
+	if strings.Contains(metricsText(t, g), `microgateway_ratelimit_store_fallback_total{route="c"`) {
 		t.Fatal("memory-store route c has a store fallback series")
 	}
 
@@ -305,7 +305,7 @@ func TestStoreSharedGuard(t *testing.T) {
 
 	h.Release()
 	rlExpectRemaining(t, <-probe, "9")
-	spExpectValue(t, g, 1, "lychgate_store_available", "store", "shared")
+	spExpectValue(t, g, 1, "microgateway_store_available", "store", "shared")
 
 	shared.SetMode(teststore.Healthy, nil)
 	rlExpectRemaining(t, stDo(t, g, "/b", client), "9")

@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/internal/memstore"
-	"github.com/ok0/lychgate/internal/reqctx"
-	"github.com/ok0/lychgate/store"
+	"github.com/ok0/go-microgateway/internal/memstore"
+	"github.com/ok0/go-microgateway/internal/reqctx"
+	"github.com/ok0/go-microgateway/store"
 )
 
 func prepared(path, ip string) *http.Request {

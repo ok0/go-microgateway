@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"bytes"

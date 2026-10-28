@@ -27,7 +27,7 @@ func (s *Store) applyDefaults() {
 		defDurPtr(&r.DialTimeout, time.Second)
 		defDurPtr(&r.ReadTimeout, 500*time.Millisecond)
 		defDurPtr(&r.WriteTimeout, 500*time.Millisecond)
-		defStrPtr(&r.KeyPrefix, "lychgate")
+		defStrPtr(&r.KeyPrefix, "microgateway")
 	}
 }
 

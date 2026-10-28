@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"bufio"
@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/leakcheck"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/leakcheck"
 )
 
 func gwWith(t *testing.T, doc string, opts ...Option) *Gateway {

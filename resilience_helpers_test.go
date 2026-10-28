@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"fmt"
@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/upstream"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
 type rsRoute struct{ name, path, extra string }

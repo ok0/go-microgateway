@@ -14,12 +14,12 @@ import (
 	"slices"
 	"syscall"
 
-	"github.com/ok0/lychgate"
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/clock"
-	internalhooks "github.com/ok0/lychgate/internal/hooks"
-	"github.com/ok0/lychgate/internal/reload"
-	"github.com/ok0/lychgate/internal/server"
+	"github.com/ok0/go-microgateway"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
+	internalhooks "github.com/ok0/go-microgateway/internal/hooks"
+	"github.com/ok0/go-microgateway/internal/reload"
+	"github.com/ok0/go-microgateway/internal/server"
 )
 
 var (
@@ -28,7 +28,7 @@ var (
 	date    = "unknown"
 )
 
-const usage = `usage: lychgate <command> [flags]
+const usage = `usage: microgateway <command> [flags]
 
 commands:
   validate -config <path>   check a configuration file and report every problem
@@ -61,13 +61,13 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	case "run":
 		return runServe(ctx, args[1:], stdout, stderr, serveHooks{})
 	case "version":
-		fmt.Fprintf(stdout, "lychgate %s (commit %s, built %s)\n", version, commit, date)
+		fmt.Fprintf(stdout, "microgateway %s (commit %s, built %s)\n", version, commit, date)
 		return 0
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 		return 0
 	default:
-		fmt.Fprintf(stderr, "lychgate: unknown command %q\n", args[0])
+		fmt.Fprintf(stderr, "microgateway: unknown command %q\n", args[0])
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
@@ -84,11 +84,11 @@ func runValidate(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if fs.NArg() > 0 {
-		fmt.Fprintf(stderr, "lychgate validate: unexpected argument %q\n", fs.Arg(0))
+		fmt.Fprintf(stderr, "microgateway validate: unexpected argument %q\n", fs.Arg(0))
 		return 2
 	}
 	if *path == "" {
-		fmt.Fprintln(stderr, "lychgate validate: -config is required")
+		fmt.Fprintln(stderr, "microgateway validate: -config is required")
 		return 2
 	}
 	cfg, err := config.LoadFile(*path)
@@ -109,7 +109,7 @@ func printLoadError(stderr io.Writer, cmd, path string, err error) int {
 		fmt.Fprintf(stderr, "%s: %d error(s)\n", path, len(ve.Errors))
 		return 1
 	}
-	fmt.Fprintf(stderr, "lychgate %s: %v\n", cmd, err)
+	fmt.Fprintf(stderr, "microgateway %s: %v\n", cmd, err)
 	return 1
 }
 
@@ -126,21 +126,21 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, hook
 		return 2
 	}
 	if fs.NArg() > 0 {
-		fmt.Fprintf(stderr, "lychgate run: unexpected argument %q\n", fs.Arg(0))
+		fmt.Fprintf(stderr, "microgateway run: unexpected argument %q\n", fs.Arg(0))
 		return 2
 	}
 	if *path == "" {
-		fmt.Fprintln(stderr, "lychgate run: -config is required")
+		fmt.Fprintln(stderr, "microgateway run: -config is required")
 		return 2
 	}
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 	if set["log-level"] && !slices.Contains([]string{"debug", "info", "warn", "error"}, *logLevel) {
-		fmt.Fprintf(stderr, "lychgate run: invalid -log-level %q\n", *logLevel)
+		fmt.Fprintf(stderr, "microgateway run: invalid -log-level %q\n", *logLevel)
 		return 2
 	}
 	if set["log-format"] && !slices.Contains([]string{"json", "text"}, *logFormat) {
-		fmt.Fprintf(stderr, "lychgate run: invalid -log-format %q\n", *logFormat)
+		fmt.Fprintf(stderr, "microgateway run: invalid -log-format %q\n", *logFormat)
 		return 2
 	}
 
@@ -158,7 +158,7 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, hook
 	logger := newLogger(stderr, logCfg)
 
 	certs := server.NewCertificates(logger, clock.Real())
-	g, err := lychgate.New(cfg, lychgate.WithLogger(logger), internalhooks.WithParticipant(certs).(lychgate.Option))
+	g, err := microgateway.New(cfg, microgateway.WithLogger(logger), internalhooks.WithParticipant(certs).(microgateway.Option))
 	if err != nil {
 		return printLoadError(stderr, "run", *path, err)
 	}
@@ -168,12 +168,12 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, hook
 	}
 	srv, err := server.New(cfg, g, admin, g.SetReady, logger, server.WithCertificates(certs))
 	if err != nil {
-		fmt.Fprintf(stderr, "lychgate run: %v\n", err)
+		fmt.Fprintf(stderr, "microgateway run: %v\n", err)
 		g.Close()
 		return 1
 	}
 	if err := srv.Start(); err != nil {
-		fmt.Fprintf(stderr, "lychgate run: %v\n", err)
+		fmt.Fprintf(stderr, "microgateway run: %v\n", err)
 		g.Close()
 		return 1
 	}
@@ -196,7 +196,7 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, hook
 		Clock:        clock.Real(),
 		Logger:       logger,
 		Apply:        func() error { return applyReload(g, srv, *path, logger) },
-		Fatal:        func(err error) bool { return errors.Is(err, lychgate.ErrClosed) },
+		Fatal:        func(err error) bool { return errors.Is(err, microgateway.ErrClosed) },
 	})
 	watchCtx, stopWatch := context.WithCancel(context.Background())
 	watchDone := make(chan error, 1)
@@ -291,7 +291,7 @@ func watchPaths(configPath string, cfg *config.Config) []string {
 	return paths
 }
 
-func applyReload(g *lychgate.Gateway, srv *server.Server, path string, logger *slog.Logger) error {
+func applyReload(g *microgateway.Gateway, srv *server.Server, path string, logger *slog.Logger) error {
 	prev := g.Config()
 	if err := g.ReloadFile(path); err != nil {
 		return err

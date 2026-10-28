@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/clock"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
 )
 
 const probeInterval = 10 * time.Second
@@ -235,7 +235,7 @@ func TestProbeRequest(t *testing.T) {
 	if got.Host != "backend:8080" {
 		t.Fatalf("host = %q, want backend:8080", got.Host)
 	}
-	if got.Header.Get("User-Agent") != "lychgate-health-check" {
+	if got.Header.Get("User-Agent") != "microgateway-health-check" {
 		t.Fatalf("user agent = %q", got.Header.Get("User-Agent"))
 	}
 	if !body.drained || !body.closed {

@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"fmt"
@@ -73,7 +73,7 @@ func TestRateLimitStateCarryOver(t *testing.T) {
 		if got := g.state.Len(); got != before {
 			t.Fatalf("state entries = %d, want %d", got, before)
 		}
-		if got := rsMetric(t, g, "lychgate_ratelimit_keys", "route", name); got != 1 {
+		if got := rsMetric(t, g, "microgateway_ratelimit_keys", "route", name); got != 1 {
 			t.Fatalf("ratelimit_keys{route=%q} = %v, want 1", name, got)
 		}
 	}

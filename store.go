@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"encoding/json"
@@ -7,9 +7,9 @@ import (
 	"io"
 	"log/slog"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/runtime"
-	"github.com/ok0/lychgate/store"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/runtime"
+	"github.com/ok0/go-microgateway/store"
 )
 
 // StoreFactory builds the backend of one configured store entry. It is called with the entry's parameters and
@@ -39,7 +39,7 @@ func (p StoreParams) Decode(v any) error {
 
 // String describes the entry by name and type. Parameter values are never included.
 func (p StoreParams) String() string {
-	return fmt.Sprintf("lychgate.StoreParams{Name:%q, Type:%q}", p.Name, p.Type)
+	return fmt.Sprintf("microgateway.StoreParams{Name:%q, Type:%q}", p.Name, p.Type)
 }
 
 // GoString describes the entry by name and type, like String.
@@ -86,19 +86,19 @@ func checkStoreRegistrations(regs []storeRegistration) error {
 	seen := make(map[string]bool, len(regs))
 	for _, r := range regs {
 		if r.typeName == "" {
-			errs = append(errs, errors.New("lychgate: WithStoreType: empty type name"))
+			errs = append(errs, errors.New("microgateway: WithStoreType: empty type name"))
 		}
 		if r.f == nil {
-			errs = append(errs, fmt.Errorf("lychgate: WithStoreType(%q): nil factory", r.typeName))
+			errs = append(errs, fmt.Errorf("microgateway: WithStoreType(%q): nil factory", r.typeName))
 		}
 		if r.caps == 0 {
-			errs = append(errs, fmt.Errorf("lychgate: WithStoreType(%q): capabilities must not be zero", r.typeName))
+			errs = append(errs, fmt.Errorf("microgateway: WithStoreType(%q): capabilities must not be zero", r.typeName))
 		}
 		if unknown := r.caps &^ store.CapRateLimit; unknown != 0 {
-			errs = append(errs, fmt.Errorf("lychgate: WithStoreType(%q): unknown capability bits %#x", r.typeName, unknown))
+			errs = append(errs, fmt.Errorf("microgateway: WithStoreType(%q): unknown capability bits %#x", r.typeName, unknown))
 		}
 		if seen[r.typeName] {
-			errs = append(errs, fmt.Errorf("lychgate: WithStoreType(%q): type registered twice", r.typeName))
+			errs = append(errs, fmt.Errorf("microgateway: WithStoreType(%q): type registered twice", r.typeName))
 		}
 		seen[r.typeName] = true
 	}

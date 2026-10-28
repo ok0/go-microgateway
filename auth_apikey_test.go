@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ok0/lychgate/config"
+	"github.com/ok0/go-microgateway/config"
 )
 
 const apkRoute = "  - name: r\n    match:\n      path: /x\n    upstream: be\n    auth:\n      mode: apikey\n      providers: [keys1]\n"

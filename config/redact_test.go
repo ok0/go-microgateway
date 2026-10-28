@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/internal/leakcheck"
+	"github.com/ok0/go-microgateway/internal/leakcheck"
 	"go.yaml.in/yaml/v3"
 )
 

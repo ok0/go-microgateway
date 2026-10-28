@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"errors"
@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/ok0/lychgate/internal/teststore"
-	"github.com/ok0/lychgate/store"
+	"github.com/ok0/go-microgateway/internal/teststore"
+	"github.com/ok0/go-microgateway/store"
 )
 
 const srlGlobalID = "global:\n  request_id_header: X-Trace-Id\n"
@@ -96,7 +96,7 @@ func TestStoreReloadRetention(t *testing.T) {
 		}
 	}
 	available := func(name string) string {
-		return fmt.Sprintf("lychgate_store_available{store=%q}", name)
+		return fmt.Sprintf("microgateway_store_available{store=%q}", name)
 	}
 	routes := stRoute("rl", srlRateLimit("s1")) + stRoute("other", "")
 
@@ -108,12 +108,12 @@ func TestStoreReloadRetention(t *testing.T) {
 		t.Fatalf("store calls = %d, want 2", got)
 	}
 	srlExpectSample(t, g, available("s1"), 0)
-	srlExpectSample(t, g, `lychgate_store_errors_total{store="s1",op="take"}`, 2)
+	srlExpectSample(t, g, `microgateway_store_errors_total{store="s1",op="take"}`, 2)
 
 	reload(srlDoc(be.URL, "", srlStore("s1", 2, "v0"), "", routes))
 	reload(srlDoc(be.URL, srlGlobalID, srlStore("s1", 2, "v0"), "", routes))
 	reload(srlDoc(be.URL, srlGlobalID, srlStore("s1", 2, "v0"), "", routes))
-	srlExpectSample(t, g, `lychgate_config_reloads_total{result="unchanged"}`, 1)
+	srlExpectSample(t, g, `microgateway_config_reloads_total{result="unchanged"}`, 1)
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("factory calls after retained reloads = %d, want 1", got)
 	}
@@ -136,7 +136,7 @@ func TestStoreReloadRetention(t *testing.T) {
 		t.Fatalf("factory calls after guard-only change = %d, want 1", got)
 	}
 	srlExpectSample(t, g, available("s1"), 1)
-	srlExpectSample(t, g, `lychgate_store_errors_total{store="s1",op="take"}`, 3)
+	srlExpectSample(t, g, `microgateway_store_errors_total{store="s1",op="take"}`, 3)
 
 	h0 := shared.Handles()[0]
 	h0.SetMode(teststore.Hang, nil)
@@ -283,23 +283,23 @@ func TestStoreGaugePrunedAfterDrain(t *testing.T) {
 	if err := g.ReloadYAML([]byte(srlDoc(be.URL, "", "", "", stRoute("keep", "")))); err != nil {
 		t.Fatal(err)
 	}
-	srlExpectSample(t, g, `lychgate_store_available{store="s1"}`, 1)
-	srlExpectSample(t, g, `lychgate_store_errors_total{store="s1",op="take"}`, 0)
-	srlExpectSample(t, g, `lychgate_ratelimit_keys{route="rl"}`, 0)
-	srlExpectSample(t, g, `lychgate_ratelimit_keys{route="mem"}`, 0)
-	srlExpectSample(t, g, `lychgate_upstream_panic_mode{upstream="up2"}`, 0)
+	srlExpectSample(t, g, `microgateway_store_available{store="s1"}`, 1)
+	srlExpectSample(t, g, `microgateway_store_errors_total{store="s1",op="take"}`, 0)
+	srlExpectSample(t, g, `microgateway_ratelimit_keys{route="rl"}`, 0)
+	srlExpectSample(t, g, `microgateway_ratelimit_keys{route="mem"}`, 0)
+	srlExpectSample(t, g, `microgateway_upstream_panic_mode{upstream="up2"}`, 0)
 
 	h0.Release()
 	if rec := <-ch; rec.Code != http.StatusOK {
 		t.Fatalf("in-flight request status = %d, want 200", rec.Code)
 	}
 
-	srlExpectAbsent(t, g, `lychgate_store_available{store="s1"}`)
-	srlExpectSample(t, g, `lychgate_store_errors_total{store="s1",op="take"}`, 0)
-	srlExpectAbsent(t, g, `lychgate_ratelimit_keys{route="rl"}`)
-	srlExpectAbsent(t, g, `lychgate_ratelimit_keys{route="mem"}`)
-	srlExpectAbsent(t, g, `lychgate_upstream_panic_mode{upstream="up2"}`)
-	srlExpectSample(t, g, `lychgate_upstream_panic_mode{upstream="up"}`, 0)
+	srlExpectAbsent(t, g, `microgateway_store_available{store="s1"}`)
+	srlExpectSample(t, g, `microgateway_store_errors_total{store="s1",op="take"}`, 0)
+	srlExpectAbsent(t, g, `microgateway_ratelimit_keys{route="rl"}`)
+	srlExpectAbsent(t, g, `microgateway_ratelimit_keys{route="mem"}`)
+	srlExpectAbsent(t, g, `microgateway_upstream_panic_mode{upstream="up2"}`)
+	srlExpectSample(t, g, `microgateway_upstream_panic_mode{upstream="up"}`, 0)
 }
 
 func TestStoreClosedAfterInFlightDrain(t *testing.T) {
@@ -342,8 +342,8 @@ func TestStoreClosedAfterInFlightDrain(t *testing.T) {
 			if got := h.Closes(); got != 0 {
 				t.Fatalf("handle closed %d times while its request is in flight, want 0", got)
 			}
-			if _, ok := srlSample(t, g, `lychgate_store_available{store="s1"}`); !ok {
-				t.Fatal(`lychgate_store_available{store="s1"} is absent while its request is in flight, want present`)
+			if _, ok := srlSample(t, g, `microgateway_store_available{store="s1"}`); !ok {
+				t.Fatal(`microgateway_store_available{store="s1"} is absent while its request is in flight, want present`)
 			}
 			takes := h.Takes()
 			if rec := stDo(t, g, "/rl", fresh); rec.Code != http.StatusOK {
@@ -361,7 +361,7 @@ func TestStoreClosedAfterInFlightDrain(t *testing.T) {
 			if got := h.Closes(); got != 1 {
 				t.Fatalf("handle closed %d times after drain, want 1", got)
 			}
-			srlExpectAbsent(t, g, `lychgate_store_available{store="s1"}`)
+			srlExpectAbsent(t, g, `microgateway_store_available{store="s1"}`)
 
 			if err := g.Close(); err != nil {
 				t.Fatal(err)

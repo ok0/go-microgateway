@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"encoding/json"
@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ok0/lychgate/internal/upstream"
+	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
 func adminGet(t *testing.T, h http.Handler, method, path string) *httptest.ResponseRecorder {

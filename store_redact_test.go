@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"bytes"
@@ -21,11 +21,11 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/leakcheck"
-	"github.com/ok0/lychgate/internal/teststore"
-	"github.com/ok0/lychgate/store"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/leakcheck"
+	"github.com/ok0/go-microgateway/internal/teststore"
+	"github.com/ok0/go-microgateway/store"
 )
 
 type srdBuf struct {
@@ -303,13 +303,13 @@ func TestStoreSecretsNeverSurface(t *testing.T) {
 			t.Errorf("missing log record %q", want)
 		}
 	}
-	if got := stGauge(t, g, "lychgate_store_available", "store", "cache"); got != 0 {
+	if got := stGauge(t, g, "microgateway_store_available", "store", "cache"); got != 0 {
 		t.Errorf("cache store_available = %v, want 0", got)
 	}
-	if got := stCounter(t, g, "lychgate_store_errors_total", "store", "cache", "op", "take"); got != 3 {
+	if got := stCounter(t, g, "microgateway_store_errors_total", "store", "cache", "op", "take"); got != 3 {
 		t.Errorf("cache store_errors_total = %v, want 3", got)
 	}
-	if got := stCounter(t, g, "lychgate_store_errors_total", "store", "vault", "op", "take"); got != 3 {
+	if got := stCounter(t, g, "microgateway_store_errors_total", "store", "vault", "op", "take"); got != 3 {
 		t.Errorf("vault store_errors_total = %v, want 3", got)
 	}
 

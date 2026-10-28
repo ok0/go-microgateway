@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"errors"
@@ -100,7 +100,7 @@ func TestAuthMetricsExposition(t *testing.T) {
 		if got := auFailures(t, g, p.route, p.reason); got != 1 {
 			t.Errorf("%s: %s failures = %v, want 1", p.route, p.reason, got)
 		}
-		if line := series("lychgate_auth_failures_total", "route", p.route, "reason", p.reason); !strings.Contains(text, line) {
+		if line := series("microgateway_auth_failures_total", "route", p.route, "reason", p.reason); !strings.Contains(text, line) {
 			t.Errorf("metrics lack %s", line)
 		}
 	}
@@ -130,7 +130,7 @@ func TestAuthNoSecretsInLogs(t *testing.T) {
       issuer: https://idp.example
       audiences: [api]
       jwks:
-        url: "https://lychgate-user:%s@idp.example/jwks?token=%s"
+        url: "https://microgateway-user:%s@idp.example/jwks?token=%s"
         algorithms: [RS256]
   api_keys:
     - name: keys1

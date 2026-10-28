@@ -1,7 +1,7 @@
-// Package config defines the lychgate configuration schema, parses it strictly from YAML, and validates it.
+// Package config defines the microgateway configuration schema, parses it strictly from YAML, and validates it.
 package config
 
-// Config is the root of a lychgate configuration document.
+// Config is the root of a microgateway configuration document.
 type Config struct {
 	// Version is the schema version; it must be 1.
 	Version int `yaml:"version" json:"version"`

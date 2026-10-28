@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"encoding/json"
@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/upstream"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
 func h3Upstreams(g *Gateway) ([]upstream.Status, error) {
@@ -242,11 +242,11 @@ func TestResilienceConcurrency(t *testing.T) {
 		}
 	}
 
-	retries := rsMetric(t, g, "lychgate_retries_total", "route", "r")
+	retries := rsMetric(t, g, "microgateway_retries_total", "route", "r")
 	if retries != float64(wantRetries) {
 		t.Fatalf("retries_total{r} = %v, want %d from per-request attempts", retries, wantRetries)
 	}
-	if got := rsMetricOr0(t, g, "lychgate_retries_total", "route", "p"); got != 0 {
+	if got := rsMetricOr0(t, g, "microgateway_retries_total", "route", "p"); got != 0 {
 		t.Fatalf("retries_total{p} = %v, want 0", got)
 	}
 	if retries <= 0 {

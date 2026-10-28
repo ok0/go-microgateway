@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"fmt"
@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/upstream"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
 type h3Result struct {
@@ -215,7 +215,7 @@ func TestBreakerReloadRetention(t *testing.T) {
 				u, snap.Requests, snap.Failures, snap.ConsecutiveFailures)
 		}
 	}
-	if got := rsMetric(t, g, "lychgate_circuit_breaker_state", "upstream", "up", "host", a.srv.Addr); got != 0 {
+	if got := rsMetric(t, g, "microgateway_circuit_breaker_state", "upstream", "up", "host", a.srv.Addr); got != 0 {
 		t.Fatalf("circuit breaker state gauge for A after reload = %v, want 0", got)
 	}
 	hitsA = a.hitCount()
@@ -263,10 +263,10 @@ func TestBudgetReloadRetention(t *testing.T) {
 		if got := be.hitCount() - before; got != hits {
 			t.Fatalf("GET %s backend hits +%d, want +%d", path, got, hits)
 		}
-		if got := rsMetric(t, g, "lychgate_retries_total", "route", route); got != retries {
+		if got := rsMetric(t, g, "microgateway_retries_total", "route", route); got != retries {
 			t.Fatalf("GET %s retries_total{%s} = %v, want %v", path, route, got, retries)
 		}
-		if got := rsMetric(t, g, "lychgate_retry_budget_exhausted_total", "route", route); got != exhausted {
+		if got := rsMetric(t, g, "microgateway_retry_budget_exhausted_total", "route", route); got != exhausted {
 			t.Fatalf("GET %s exhausted_total{%s} = %v, want %v", path, route, got, exhausted)
 		}
 	}

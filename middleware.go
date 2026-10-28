@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"encoding/json"
@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/ok0/lychgate/config"
+	"github.com/ok0/go-microgateway/config"
 )
 
 // Middleware wraps an http.Handler.
@@ -29,7 +29,7 @@ func (p MiddlewareParams) Decode(v any) error {
 
 // String describes the definition by name and type. Parameter values are never included.
 func (p MiddlewareParams) String() string {
-	return fmt.Sprintf("lychgate.MiddlewareParams{Name:%q, Type:%q}", p.Name, p.Type)
+	return fmt.Sprintf("microgateway.MiddlewareParams{Name:%q, Type:%q}", p.Name, p.Type)
 }
 
 // GoString describes the definition by name and type, like String.

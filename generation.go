@@ -1,10 +1,10 @@
-package lychgate
+package microgateway
 
 import (
 	"log/slog"
 	"sync/atomic"
 
-	"github.com/ok0/lychgate/internal/runtime"
+	"github.com/ok0/go-microgateway/internal/runtime"
 )
 
 // generation is one installed configuration: an immutable snapshot and the state lease that keeps its components open.

@@ -11,8 +11,8 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/httperr"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/httperr"
 )
 
 // Headers returns a middleware that edits request headers before the handler runs and response headers before the response is sent.

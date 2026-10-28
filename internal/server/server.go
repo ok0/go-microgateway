@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/clock"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
 )
 
 // ErrForcedClose reports that connections were closed because they were still open after the drain timeout.

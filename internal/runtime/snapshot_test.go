@@ -14,14 +14,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/metrics"
-	"github.com/ok0/lychgate/internal/middleware"
-	"github.com/ok0/lychgate/internal/reqctx"
-	"github.com/ok0/lychgate/internal/retry"
-	"github.com/ok0/lychgate/internal/router"
-	"github.com/ok0/lychgate/internal/state"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/metrics"
+	"github.com/ok0/go-microgateway/internal/middleware"
+	"github.com/ok0/go-microgateway/internal/reqctx"
+	"github.com/ok0/go-microgateway/internal/retry"
+	"github.com/ok0/go-microgateway/internal/router"
+	"github.com/ok0/go-microgateway/internal/state"
 )
 
 func mustParse(t *testing.T, doc string) *config.Config {
@@ -110,10 +110,10 @@ routes:
 	}
 	text := sb.String()
 	for _, want := range []string{
-		`lychgate_upstream_host_healthy{upstream="users",host="127.0.0.1:9001"} 1`,
-		`lychgate_upstream_panic_mode{upstream="users"} 0`,
-		`lychgate_upstream_ejections_refused_total{upstream="users"} 0`,
-		`lychgate_upstream_attempts_total{upstream="users",host="127.0.0.1:9001",outcome="success"} 0`,
+		`microgateway_upstream_host_healthy{upstream="users",host="127.0.0.1:9001"} 1`,
+		`microgateway_upstream_panic_mode{upstream="users"} 0`,
+		`microgateway_upstream_ejections_refused_total{upstream="users"} 0`,
+		`microgateway_upstream_attempts_total{upstream="users",host="127.0.0.1:9001",outcome="success"} 0`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("metrics text lacks %q", want)
@@ -526,12 +526,12 @@ routes:
 	}
 	text := sb.String()
 	for _, want := range []string{
-		`lychgate_circuit_breaker_state{upstream="users",host="127.0.0.1:9001"} 0`,
-		`lychgate_circuit_breaker_state{upstream="users",host=""} 0`,
-		`lychgate_circuit_breaker_transitions_total{upstream="users",host="",from="closed",to="open"} 0`,
-		`lychgate_circuit_breaker_rejected_total{upstream="users",host=""} 0`,
-		`lychgate_retries_total{route="api"} 0`,
-		`lychgate_retry_budget_exhausted_total{route="api"} 0`,
+		`microgateway_circuit_breaker_state{upstream="users",host="127.0.0.1:9001"} 0`,
+		`microgateway_circuit_breaker_state{upstream="users",host=""} 0`,
+		`microgateway_circuit_breaker_transitions_total{upstream="users",host="",from="closed",to="open"} 0`,
+		`microgateway_circuit_breaker_rejected_total{upstream="users",host=""} 0`,
+		`microgateway_retries_total{route="api"} 0`,
+		`microgateway_retry_budget_exhausted_total{route="api"} 0`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("metrics text lacks %q", want)

@@ -6,12 +6,12 @@ import (
 	"encoding/json"
 	"slices"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/middleware"
-	"github.com/ok0/lychgate/internal/retry"
-	"github.com/ok0/lychgate/internal/state"
-	"github.com/ok0/lychgate/internal/upstream"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/middleware"
+	"github.com/ok0/go-microgateway/internal/retry"
+	"github.com/ok0/go-microgateway/internal/state"
+	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
 // KindRetryBudget is the state kind of a route retry budget.

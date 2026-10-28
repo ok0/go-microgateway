@@ -1,9 +1,9 @@
-package lychgate
+package microgateway
 
 import (
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/metrics"
-	"github.com/ok0/lychgate/internal/upstream"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/metrics"
+	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
 type adminSource struct {

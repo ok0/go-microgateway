@@ -111,7 +111,7 @@ func TestStoreDefaults(t *testing.T) {
 	if r.DialTimeout.Std() != time.Second || r.ReadTimeout.Std() != 500*time.Millisecond || r.WriteTimeout.Std() != 500*time.Millisecond {
 		t.Errorf("timeout defaults = %v %v %v", r.DialTimeout, r.ReadTimeout, r.WriteTimeout)
 	}
-	if *r.KeyPrefix != "lychgate" {
+	if *r.KeyPrefix != "microgateway" {
 		t.Errorf("KeyPrefix = %q", *r.KeyPrefix)
 	}
 	rl := c.Routes[0].RateLimit

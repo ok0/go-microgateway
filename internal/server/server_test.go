@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/testcert"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/testcert"
 )
 
 func testConfig(t *testing.T, mutate func(*config.Config)) *config.Config {

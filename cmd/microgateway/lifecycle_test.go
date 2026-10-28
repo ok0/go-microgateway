@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/internal/testcert"
+	"github.com/ok0/go-microgateway/internal/testcert"
 )
 
 func freePort(t *testing.T) string {

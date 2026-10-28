@@ -711,7 +711,7 @@ func TestLoadFileResolvesKeyFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "keys.yaml"), keys, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, "lychgate.yaml")
+	path := filepath.Join(dir, "microgateway.yaml")
 	write := func(src string) {
 		t.Helper()
 		if err := os.WriteFile(path, []byte(src), 0o600); err != nil {

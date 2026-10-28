@@ -8,7 +8,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/ok0/lychgate/internal/reqctx"
+	"github.com/ok0/go-microgateway/internal/reqctx"
 )
 
 // Router matches requests to routes by host, path, method and headers.

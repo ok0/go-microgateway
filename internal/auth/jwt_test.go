@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/ok0/lychgate/internal/authkey"
-	"github.com/ok0/lychgate/internal/clock"
+	"github.com/ok0/go-microgateway/internal/authkey"
+	"github.com/ok0/go-microgateway/internal/clock"
 )
 
 const testIssuer = "https://issuer.test"

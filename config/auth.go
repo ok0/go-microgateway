@@ -17,8 +17,8 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
-	"github.com/ok0/lychgate/internal/authkey"
-	"github.com/ok0/lychgate/internal/yamlx"
+	"github.com/ok0/go-microgateway/internal/authkey"
+	"github.com/ok0/go-microgateway/internal/yamlx"
 )
 
 // maxKeyFileBytes bounds the size of a key file.

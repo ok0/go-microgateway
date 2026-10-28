@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"bufio"
@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/internal/clock"
+	"github.com/ok0/go-microgateway/internal/clock"
 )
 
 type reEnv struct {
@@ -156,7 +156,7 @@ func runRetryBasics(t *testing.T, n testNetwork) {
 		t.Run("method "+method, func(t *testing.T) {
 			be := newRSBackend(t, n, rsStatusSeq(502, 200))
 			env := reServe(t, n, fake, reSingle([]string{be.URL}, "retry: {}"))
-			before := rsMetric(t, env.g, "lychgate_retries_total", "route", "all")
+			before := rsMetric(t, env.g, "microgateway_retries_total", "route", "all")
 			d := reDrive(t, fake, 250*time.Millisecond)
 			code, _, body := rsGet(t, env.client, env.s.URL+"/", method, nil, nil)
 			d.stop()
@@ -170,7 +170,7 @@ func runRetryBasics(t *testing.T, n testNetwork) {
 			if got := be.hitCount(); got != 2 {
 				t.Fatalf("hits = %d, want 2", got)
 			}
-			if got := rsMetric(t, env.g, "lychgate_retries_total", "route", "all") - before; got != 1 {
+			if got := rsMetric(t, env.g, "microgateway_retries_total", "route", "all") - before; got != 1 {
 				t.Fatalf("retries_total increase = %v, want 1", got)
 			}
 			reAssertIdle(t, env.g)
@@ -182,14 +182,14 @@ func runRetryBasics(t *testing.T, n testNetwork) {
 		n.refuse(t, refused.srv)
 		healthy := newRSBackend(t, n, nil)
 		env := reServe(t, n, fake, reSingle([]string{refused.URL, healthy.URL}, "retry: {}"))
-		before := rsMetric(t, env.g, "lychgate_retries_total", "route", "all")
+		before := rsMetric(t, env.g, "microgateway_retries_total", "route", "all")
 		d := reDrive(t, fake, 250*time.Millisecond)
 		code, _, _ := rsGet(t, env.client, env.s.URL+"/", http.MethodGet, nil, nil)
 		d.stop()
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
-		if got := rsMetric(t, env.g, "lychgate_retries_total", "route", "all") - before; got != 1 {
+		if got := rsMetric(t, env.g, "microgateway_retries_total", "route", "all") - before; got != 1 {
 			t.Fatalf("retries_total increase = %v, want 1", got)
 		}
 		reAssertIdle(t, env.g)
@@ -535,14 +535,14 @@ func runRetryBudget(t *testing.T, n testNetwork) {
 			t.Fatalf("stress response = %d (err %v), want 503", r.code, r.err)
 		}
 	}
-	cRetries := rsMetric(t, env.g, "lychgate_retries_total", "route", "c")
+	cRetries := rsMetric(t, env.g, "microgateway_retries_total", "route", "c")
 	if cRetries < 10 || cRetries > 20 {
 		t.Fatalf("retries(c) = %v, want within [10, 20]", cRetries)
 	}
 	if got := float64(hits["/c"].Load()); got != stress+cRetries {
 		t.Fatalf("hits(/c) = %v, want %v", got, stress+cRetries)
 	}
-	if got := rsMetric(t, env.g, "lychgate_retry_budget_exhausted_total", "route", "c"); got != stress-cRetries {
+	if got := rsMetric(t, env.g, "microgateway_retry_budget_exhausted_total", "route", "c"); got != stress-cRetries {
 		t.Fatalf("exhausted(c) = %v, want %v", got, stress-cRetries)
 	}
 
@@ -563,10 +563,10 @@ func runRetryBudget(t *testing.T, n testNetwork) {
 			t.Fatalf("burst response = %d (err %v), want 503", r.code, r.err)
 		}
 	}
-	if got := rsMetric(t, env.g, "lychgate_retries_total", "route", "a"); got != 20 {
+	if got := rsMetric(t, env.g, "microgateway_retries_total", "route", "a"); got != 20 {
 		t.Fatalf("retries(a) = %v, want 20", got)
 	}
-	if got := rsMetric(t, env.g, "lychgate_retry_budget_exhausted_total", "route", "a"); got != 80 {
+	if got := rsMetric(t, env.g, "microgateway_retry_budget_exhausted_total", "route", "a"); got != 80 {
 		t.Fatalf("exhausted(a) = %v, want 80", got)
 	}
 	if got := hits["/a"].Load(); got != 120 {
@@ -581,10 +581,10 @@ func runRetryBudget(t *testing.T, n testNetwork) {
 	if got := hits["/a"].Load() - hitsBefore; got != 1 {
 		t.Fatalf("post-burst hits(/a) increase = %d, want 1", got)
 	}
-	if got := rsMetric(t, env.g, "lychgate_retries_total", "route", "a"); got != 20 {
+	if got := rsMetric(t, env.g, "microgateway_retries_total", "route", "a"); got != 20 {
 		t.Fatalf("retries(a) after post-burst GET = %v, want 20", got)
 	}
-	if got := rsMetric(t, env.g, "lychgate_retry_budget_exhausted_total", "route", "a"); got != 81 {
+	if got := rsMetric(t, env.g, "microgateway_retry_budget_exhausted_total", "route", "a"); got != 81 {
 		t.Fatalf("exhausted(a) after post-burst GET = %v, want 81", got)
 	}
 
@@ -595,10 +595,10 @@ func runRetryBudget(t *testing.T, n testNetwork) {
 	if got := hits["/b"].Load(); got != 2 {
 		t.Fatalf("hits(/b) = %d, want 2", got)
 	}
-	if got := rsMetric(t, env.g, "lychgate_retries_total", "route", "b"); got != 1 {
+	if got := rsMetric(t, env.g, "microgateway_retries_total", "route", "b"); got != 1 {
 		t.Fatalf("retries(b) = %v, want 1", got)
 	}
-	if got := rsMetric(t, env.g, "lychgate_retry_budget_exhausted_total", "route", "b"); got != 0 {
+	if got := rsMetric(t, env.g, "microgateway_retry_budget_exhausted_total", "route", "b"); got != 0 {
 		t.Fatalf("exhausted(b) = %v, want 0", got)
 	}
 
@@ -611,7 +611,7 @@ func runRetryBudget(t *testing.T, n testNetwork) {
 	if got := hits["/a"].Load() - hitsBefore; got != 2 {
 		t.Fatalf("hits(/a) increase after window = %d, want 2", got)
 	}
-	if got := rsMetric(t, env.g, "lychgate_retries_total", "route", "a"); got != 21 {
+	if got := rsMetric(t, env.g, "microgateway_retries_total", "route", "a"); got != 21 {
 		t.Fatalf("retries(a) after window = %v, want 21", got)
 	}
 }

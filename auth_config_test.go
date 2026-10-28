@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"errors"
@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/ok0/lychgate/config"
+	"github.com/ok0/go-microgateway/config"
 )
 
 func TestAuthSeededErrorsNew(t *testing.T) {

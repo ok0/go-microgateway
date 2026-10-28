@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/clock"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
 )
 
 var healthStart = time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)

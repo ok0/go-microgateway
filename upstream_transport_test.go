@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"bufio"
@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/upstream"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
 var transportEpoch = time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)

@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/ok0/lychgate/internal/authkey"
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/reqctx"
+	"github.com/ok0/go-microgateway/internal/authkey"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/reqctx"
 )
 
 type JWTConfig struct {

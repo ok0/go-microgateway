@@ -317,7 +317,7 @@ func TestKeyMaterialLoading(t *testing.T) {
 		dir := t.TempDir()
 		writeTestFile(t, dir, "keys.yaml", apiKeysFile)
 		writeTestFile(t, dir, "pub.pem", pemA)
-		path := writeTestFile(t, dir, "lychgate.yaml", config(""))
+		path := writeTestFile(t, dir, "microgateway.yaml", config(""))
 
 		c, err := LoadFile(path)
 		if err != nil {
@@ -420,7 +420,7 @@ func TestKeyMaterialLoading(t *testing.T) {
 		dir := t.TempDir()
 		keysPath := writeTestFile(t, dir, "keys.yaml", apiKeysFile)
 		pemPath := writeTestFile(t, dir, "pub.pem", pemA)
-		path := writeTestFile(t, dir, "lychgate.yaml", config(""))
+		path := writeTestFile(t, dir, "microgateway.yaml", config(""))
 		load := func() string {
 			c, err := LoadFile(path)
 			if err != nil {
@@ -447,7 +447,7 @@ func TestKeyMaterialLoading(t *testing.T) {
 	t.Run("bad hash in key file reports line and hides the value", func(t *testing.T) {
 		dir := t.TempDir()
 		writeTestFile(t, dir, "keys.yaml", "keys:\n  - id: bad-1\n    hash: \"sha256:not-a-valid-hash-value\"\n    consumer: x\n")
-		path := writeTestFile(t, dir, "lychgate.yaml", minimalYAML+"auth:\n  api_keys:\n    - name: file\n      key_file: keys.yaml\n")
+		path := writeTestFile(t, dir, "microgateway.yaml", minimalYAML+"auth:\n  api_keys:\n    - name: file\n      key_file: keys.yaml\n")
 		_, err := LoadFile(path)
 		var ve *ValidationError
 		if !errors.As(err, &ve) {
@@ -474,7 +474,7 @@ func TestKeyMaterialLoading(t *testing.T) {
 	t.Run("malformed YAML key file reports a line", func(t *testing.T) {
 		dir := t.TempDir()
 		writeTestFile(t, dir, "keys.yaml", "keys:\n  - id: [\n")
-		path := writeTestFile(t, dir, "lychgate.yaml", minimalYAML+"auth:\n  api_keys:\n    - name: file\n      key_file: keys.yaml\n")
+		path := writeTestFile(t, dir, "microgateway.yaml", minimalYAML+"auth:\n  api_keys:\n    - name: file\n      key_file: keys.yaml\n")
 		_, err := LoadFile(path)
 		if !findFieldError(err, "auth.api_keys[0].key_file", "line") {
 			t.Errorf("malformed key file not reported with a line: %v", err)
@@ -500,7 +500,7 @@ func TestKeyMaterialLoading(t *testing.T) {
 		dir := t.TempDir()
 		writeTestFile(t, dir, "keys.yaml", apiKeysFile)
 		src := minimalYAML + "auth:\n  api_keys:\n    - name: file\n      key_file: keys.yaml\n      keys:\n        - id: file-key\n          hash: " + testHash + "\n          consumer: alice\n"
-		path := writeTestFile(t, dir, "lychgate.yaml", src)
+		path := writeTestFile(t, dir, "microgateway.yaml", src)
 		_, err := LoadFile(path)
 		if !findFieldError(err, "auth.api_keys[0].keys[0].id", `duplicate id "file-key" (also in key_file)`) {
 			t.Errorf("duplicate id with key file not reported: %v", err)
@@ -510,7 +510,7 @@ func TestKeyMaterialLoading(t *testing.T) {
 	t.Run("empty key file contains no keys", func(t *testing.T) {
 		dir := t.TempDir()
 		writeTestFile(t, dir, "keys.yaml", "keys: []\n")
-		path := writeTestFile(t, dir, "lychgate.yaml", minimalYAML+"auth:\n  api_keys:\n    - name: file\n      key_file: keys.yaml\n")
+		path := writeTestFile(t, dir, "microgateway.yaml", minimalYAML+"auth:\n  api_keys:\n    - name: file\n      key_file: keys.yaml\n")
 		_, err := LoadFile(path)
 		if !findFieldError(err, "auth.api_keys[0].key_file", "contains no keys") {
 			t.Errorf("empty key file not rejected: %v", err)
@@ -520,7 +520,7 @@ func TestKeyMaterialLoading(t *testing.T) {
 	t.Run("oversized public key file is rejected", func(t *testing.T) {
 		dir := t.TempDir()
 		writeTestFile(t, dir, "pub.pem", strings.Repeat("A", 1<<20+1))
-		path := writeTestFile(t, dir, "lychgate.yaml", config(""))
+		path := writeTestFile(t, dir, "microgateway.yaml", config(""))
 		_, err := LoadFile(path)
 		if !findFieldError(err, "auth.jwt[0].keys[0].public_key_file", "file exceeds 1 MiB") {
 			t.Errorf("oversized public key file not rejected: %v", err)
@@ -557,7 +557,7 @@ func TestKeyFiles(t *testing.T) {
     - name: file
       key_file: keys.yaml
 `)
-	path := writeTestFile(t, dir, "lychgate.yaml", src)
+	path := writeTestFile(t, dir, "microgateway.yaml", src)
 	c, err := LoadFile(path)
 	if err != nil {
 		t.Fatal(err)

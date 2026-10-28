@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"fmt"
@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/internal/ratelimit"
-	"github.com/ok0/lychgate/internal/teststore"
-	"github.com/ok0/lychgate/store"
+	"github.com/ok0/go-microgateway/internal/ratelimit"
+	"github.com/ok0/go-microgateway/internal/teststore"
+	"github.com/ok0/go-microgateway/store"
 )
 
 const smClient = "192.0.2.10:4000"
@@ -223,14 +223,14 @@ func TestStoreMultiInstanceIndependence(t *testing.T) {
 		if got := hA.Takes(); got != 2 {
 			t.Fatalf("A store calls = %d, want 2 before the guard short-circuits", got)
 		}
-		if v := stGauge(t, gA, "lychgate_store_available", "store", "shared"); v != 0 {
+		if v := stGauge(t, gA, "microgateway_store_available", "store", "shared"); v != 0 {
 			t.Fatalf("A store_available = %v, want 0", v)
 		}
-		if v := stCounter(t, gA, "lychgate_store_errors_total", "store", "shared", "op", "take"); v != 2 {
+		if v := stCounter(t, gA, "microgateway_store_errors_total", "store", "shared", "op", "take"); v != 2 {
 			t.Fatalf("A store_errors_total = %v, want 2", v)
 		}
 
-		if v := stGauge(t, gB, "lychgate_store_available", "store", "shared"); v != 1 {
+		if v := stGauge(t, gB, "microgateway_store_available", "store", "shared"); v != 1 {
 			t.Fatalf("B store_available = %v, want 1", v)
 		}
 		rlExpectRemaining(t, stDo(t, gB, "/rl", smClient), "2")
@@ -246,13 +246,13 @@ func TestStoreMultiInstanceIndependence(t *testing.T) {
 
 		hB.SetMode(teststore.Fail, down)
 		rlExpectRemaining(t, stDo(t, gB, "/rl", smClient), "2")
-		if v := stGauge(t, gB, "lychgate_store_available", "store", "shared"); v != 1 {
+		if v := stGauge(t, gB, "microgateway_store_available", "store", "shared"); v != 1 {
 			t.Fatalf("B store_available after one failure = %v, want 1", v)
 		}
-		if v := stCounter(t, gB, "lychgate_store_errors_total", "store", "shared", "op", "take"); v != 1 {
+		if v := stCounter(t, gB, "microgateway_store_errors_total", "store", "shared", "op", "take"); v != 1 {
 			t.Fatalf("B store_errors_total = %v, want 1", v)
 		}
-		if v := stGauge(t, gA, "lychgate_store_available", "store", "shared"); v != 0 {
+		if v := stGauge(t, gA, "microgateway_store_available", "store", "shared"); v != 0 {
 			t.Fatalf("A store_available after B failure = %v, want 0", v)
 		}
 		rlExpectLimited(t, stDo(t, gA, "/rl", smClient), "1")

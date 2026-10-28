@@ -1,7 +1,7 @@
-// Package hooks exposes gateway extension points to the lychgate binary without making them public API.
+// Package hooks exposes gateway extension points to the microgateway binary without making them public API.
 package hooks
 
-import "github.com/ok0/lychgate/config"
+import "github.com/ok0/go-microgateway/config"
 
 // Participant takes part in every configuration load of a gateway, the initial one and every reload.
 type Participant interface {
@@ -12,6 +12,6 @@ type Participant interface {
 	Prepare(cfg *config.Config) (digest string, apply func(), err error)
 }
 
-// WithParticipant returns a lychgate.Option, typed as any, that adds p to a gateway. Package lychgate sets it
+// WithParticipant returns a microgateway.Option, typed as any, that adds p to a gateway. Package microgateway sets it
 // when it is initialized; it is nil until then.
 var WithParticipant func(p Participant) any

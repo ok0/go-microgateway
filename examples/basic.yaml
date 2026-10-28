@@ -1,5 +1,5 @@
-# A complete, valid lychgate configuration. Every value is safe to run locally.
-# Check it with: lychgate validate -config examples/basic.yaml
+# A complete, valid microgateway configuration. Every value is safe to run locally.
+# Check it with: microgateway validate -config examples/basic.yaml
 version: 1
 
 # Global settings apply to every listener and route.
@@ -207,14 +207,14 @@ routes:
         to: /api/v2
     request_headers:
       add:
-        X-Gateway: lychgate
+        X-Gateway: microgateway
       set:
         X-Env: example
       remove:
         - X-Debug
     response_headers:
       add:
-        X-Served-By: lychgate
+        X-Served-By: microgateway
       set:
         Cache-Control: no-cache
       remove:

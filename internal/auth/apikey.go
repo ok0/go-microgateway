@@ -9,7 +9,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/ok0/lychgate/internal/reqctx"
+	"github.com/ok0/go-microgateway/internal/reqctx"
 )
 
 type APIKeyEntry struct {

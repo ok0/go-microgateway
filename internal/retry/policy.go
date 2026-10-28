@@ -7,7 +7,7 @@ package retry
 import (
 	"time"
 
-	"github.com/ok0/lychgate/internal/clock"
+	"github.com/ok0/go-microgateway/internal/clock"
 )
 
 // Policy describes when and how a request may be retried.

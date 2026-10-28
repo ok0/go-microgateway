@@ -1,4 +1,4 @@
-package lychgate
+package microgateway
 
 import (
 	"bytes"
@@ -20,9 +20,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/lychgate/config"
-	"github.com/ok0/lychgate/internal/clock"
-	"github.com/ok0/lychgate/internal/upstream"
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
 type logBuf struct {
@@ -84,7 +84,9 @@ func metricsText(t *testing.T, g *Gateway) string {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("metrics status = %d, want 200", rec.Code)
 	}
-	return rec.Body.String()
+	body := rec.Body.String()
+	checkMetricPrefix(t, body)
+	return body
 }
 
 func adminBody(t *testing.T, g *Gateway, path string) string {
@@ -237,7 +239,7 @@ func TestReloadEnvironment(t *testing.T) {
 	n := newMemNetwork()
 	be := n.serve(t, echoHandler("env"))
 	var mu sync.Mutex
-	env := map[string]string{"LYCHGATE_TEST_ENV": "one"}
+	env := map[string]string{"MICROGATEWAY_TEST_ENV": "one"}
 	lookup := func(k string) (string, bool) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -247,7 +249,7 @@ func TestReloadEnvironment(t *testing.T) {
 	setEnv := func(v string) {
 		mu.Lock()
 		defer mu.Unlock()
-		env["LYCHGATE_TEST_ENV"] = v
+		env["MICROGATEWAY_TEST_ENV"] = v
 	}
 	doc := "version: 1\n" + listenersYAML + fmt.Sprintf(`upstreams:
   - name: up
@@ -258,7 +260,7 @@ routes:
     upstream: up
     response_headers:
       set:
-        X-Env: "${LYCHGATE_TEST_ENV}"
+        X-Env: "${MICROGATEWAY_TEST_ENV}"
 `, be.URL)
 	g := n.gateway(t, doc, WithEnvLookup(lookup))
 	resp, _ := serve(t, g, httptest.NewRequest(http.MethodGet, "/x", nil))
@@ -788,15 +790,15 @@ routes:
 		return strconv.FormatFloat(float64(tt.Unix()), 'g', -1, 64)
 	}
 	tsLine := func(tt time.Time) string {
-		return "lychgate_config_last_reload_success_timestamp_seconds " + ts(tt)
+		return "microgateway_config_last_reload_success_timestamp_seconds " + ts(tt)
 	}
 
 	g := n.gateway(t, docOld, withClock(fake))
 	body := metricsText(t, g)
 	for _, line := range []string{
-		`lychgate_config_reloads_total{result="success"} 0`,
-		`lychgate_config_reloads_total{result="failure"} 0`,
-		`lychgate_config_reloads_total{result="unchanged"} 0`,
+		`microgateway_config_reloads_total{result="success"} 0`,
+		`microgateway_config_reloads_total{result="failure"} 0`,
+		`microgateway_config_reloads_total{result="unchanged"} 0`,
 		tsLine(t0),
 	} {
 		if !metricsHasLine(body, line) {
@@ -824,7 +826,7 @@ routes:
 	if !metricsHasLine(body, tsLine(t0)) {
 		t.Fatalf("timestamp moved after unchanged reload\n%s", body)
 	}
-	if !metricsHasLine(body, `lychgate_config_reloads_total{result="unchanged"} 1`) {
+	if !metricsHasLine(body, `microgateway_config_reloads_total{result="unchanged"} 1`) {
 		t.Fatalf("unchanged counter lacks 1\n%s", body)
 	}
 
@@ -840,7 +842,7 @@ routes:
 	if !metricsHasLine(body, tsLine(t3)) {
 		t.Fatalf("timestamp not updated after success\n%s", body)
 	}
-	if !metricsHasLine(body, `lychgate_requests_total{route="old",method="GET",code="200"} 1`) {
+	if !metricsHasLine(body, `microgateway_requests_total{route="old",method="GET",code="200"} 1`) {
 		t.Fatalf("removed route series missing after reload\n%s", body)
 	}
 
@@ -945,7 +947,7 @@ func TestNewIsNotAReload(t *testing.T) {
 	if s, f, u := counters(g); s != 0 || f != 0 || u != 0 {
 		t.Fatalf("counters after New = %v %v %v, want 0 0 0", s, f, u)
 	}
-	line := "lychgate_config_last_reload_success_timestamp_seconds " +
+	line := "microgateway_config_last_reload_success_timestamp_seconds " +
 		strconv.FormatFloat(float64(t0.Unix()), 'g', -1, 64)
 	if !metricsHasLine(metricsText(t, g), line) {
 		t.Fatalf("timestamp line %q missing after New", line)
