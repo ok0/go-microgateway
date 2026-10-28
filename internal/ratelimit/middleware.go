@@ -57,10 +57,19 @@ func routeKey(*http.Request) string {
 	return "route"
 }
 
+// Middleware enforces l on each request. The key function selects the rate
+// limit key, and onLimited, when non-nil, is called for each 429 response.
+// A Deny decision from the failure policy is answered with 503 and does not
+// call next or onLimited.
 func Middleware(l *Limiter, key KeyFunc, onLimited func()) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			res := l.Take(r.Context(), key(r))
+			if res.Policy == Deny {
+				w.Header().Set("Retry-After", strconv.FormatInt(max(1, ceilSeconds(l.p.DenyRetryAfter)), 10))
+				httperr.Write(w, r, http.StatusServiceUnavailable, httperr.CodeRateLimitUnavailable, httperr.Message(httperr.CodeRateLimitUnavailable))
+				return
+			}
 			if res.Degraded {
 				next.ServeHTTP(w, r)
 				return
