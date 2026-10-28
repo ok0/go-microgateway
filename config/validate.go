@@ -228,7 +228,12 @@ func checkHost(ck *checker, p string, h *Host) {
 	u, err := url.Parse(h.URL)
 	switch {
 	case err != nil:
-		ck.add(p+".url", fmt.Sprintf("invalid URL: %v", err))
+		detail := err
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			detail = ue.Err
+		}
+		ck.add(p+".url", fmt.Sprintf("invalid URL: %v", detail))
 	case u.Scheme != "http" && u.Scheme != "https":
 		ck.add(p+".url", "scheme must be http or https")
 	case u.Host == "":
@@ -249,7 +254,9 @@ func checkDNS(ck *checker, p string, d *DNS) {
 	if d.Scheme != "http" && d.Scheme != "https" {
 		ck.add(p+".scheme", "must be one of http, https")
 	}
-	requirePositive(ck, p+".refresh_interval", d.RefreshInterval)
+	if d.RefreshInterval < Duration(time.Second) {
+		ck.add(p+".refresh_interval", "must be at least 1s")
+	}
 }
 
 func checkLoadBalancer(ck *checker, p string, lb *LoadBalancer) {
@@ -300,8 +307,8 @@ func checkUpstreamHealth(ck *checker, p string, u *Upstream) {
 		if ph.MaxEjectionTime < ph.BaseEjectionTime {
 			ck.add(pp+".max_ejection_time", "must be >= base_ejection_time")
 		}
-		if ph.MaxEjectionPercent < 1 || ph.MaxEjectionPercent > 100 {
-			ck.add(pp+".max_ejection_percent", "must be between 1 and 100")
+		if v := ph.MaxEjectionPercent; v != nil && (*v < 0 || *v > 100) {
+			ck.add(pp+".max_ejection_percent", "must be between 0 and 100")
 		}
 	}
 	if ah := u.ActiveHealth; ah != nil {
@@ -311,7 +318,10 @@ func checkUpstreamHealth(ck *checker, p string, u *Upstream) {
 		}
 		requirePositive(ck, ap+".interval", ah.Interval)
 		requirePositive(ck, ap+".timeout", ah.Timeout)
-		if j := ah.Jitter; !(j >= 0 && j < 1) || math.IsInf(j, 0) {
+		if ah.Interval > 0 && ah.Timeout > 0 && ah.Timeout >= ah.Interval {
+			ck.add(ap+".timeout", "must be less than interval")
+		}
+		if j := ah.Jitter; j != nil && (!(*j >= 0 && *j < 1) || math.IsInf(*j, 0)) {
 			ck.add(ap+".jitter", "must be in [0, 1)")
 		}
 		if ah.HealthyThreshold < 1 {

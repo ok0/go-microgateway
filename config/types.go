@@ -132,7 +132,7 @@ type Host struct {
 	Weight *int `yaml:"weight" json:"weight"`
 }
 
-// DNS describes a backend discovered through DNS. Fields left at their zero value take the defaults noted on each field.
+// DNS describes a backend discovered through DNS; hosts get weight 1, A/AAAA only, at most 256 addresses. Fields left at their zero value take the defaults noted on each field.
 type DNS struct {
 	// Hostname is the name to resolve.
 	Hostname string `yaml:"hostname" json:"hostname"`
@@ -140,7 +140,7 @@ type DNS struct {
 	Port int `yaml:"port" json:"port"`
 	// Scheme is http or https. Default "http".
 	Scheme string `yaml:"scheme" json:"scheme"`
-	// RefreshInterval is how often the name is resolved again. Default 30s.
+	// RefreshInterval is how often the name is resolved again. Default 30s; minimum 1s.
 	RefreshInterval Duration `yaml:"refresh_interval" json:"refresh_interval"`
 }
 
@@ -192,8 +192,8 @@ type PassiveHealth struct {
 	BaseEjectionTime Duration `yaml:"base_ejection_time" json:"base_ejection_time"`
 	// MaxEjectionTime caps the ejection duration as it grows. Default 300s.
 	MaxEjectionTime Duration `yaml:"max_ejection_time" json:"max_ejection_time"`
-	// MaxEjectionPercent caps the share of backends that may be ejected at once. Default 50.
-	MaxEjectionPercent int `yaml:"max_ejection_percent" json:"max_ejection_percent"`
+	// MaxEjectionPercent caps the share of backends that may be ejected at once. Default 50 when absent; 0 disables ejection; must be 0..100.
+	MaxEjectionPercent *int `yaml:"max_ejection_percent" json:"max_ejection_percent"`
 }
 
 // ActiveHealth probes backends on a schedule. Fields left at their zero value take the defaults noted on each field.
@@ -202,8 +202,8 @@ type ActiveHealth struct {
 	Path string `yaml:"path" json:"path"`
 	// Interval is the time between probes. Default 10s.
 	Interval Duration `yaml:"interval" json:"interval"`
-	// Jitter randomizes probe timing by up to this fraction. Default 0.1.
-	Jitter float64 `yaml:"jitter" json:"jitter"`
+	// Jitter randomizes probe timing by up to this fraction. Default 0.1 when absent; 0 disables jitter; must be in [0, 1).
+	Jitter *float64 `yaml:"jitter" json:"jitter"`
 	// Timeout bounds a single probe. Default 2s.
 	Timeout Duration `yaml:"timeout" json:"timeout"`
 	// HealthyThreshold is the successes needed to mark a backend healthy. Default 2.

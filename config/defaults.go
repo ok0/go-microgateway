@@ -31,6 +31,10 @@ func defFloat(p *float64, v float64) {
 	}
 }
 
+func floatPtr(v float64) *float64 {
+	return &v
+}
+
 func defDur(p *Duration, v time.Duration) {
 	if *p == 0 {
 		*p = Duration(v)
@@ -102,12 +106,16 @@ func (c *Config) applyDefaults() {
 			defInt(&p.ConsecutiveFailures, 5)
 			defDur(&p.BaseEjectionTime, 30*time.Second)
 			defDur(&p.MaxEjectionTime, 300*time.Second)
-			defInt(&p.MaxEjectionPercent, 50)
+			if p.MaxEjectionPercent == nil {
+				p.MaxEjectionPercent = intPtr(50)
+			}
 		}
 		if a := u.ActiveHealth; a != nil {
 			defStr(&a.Path, "/health")
 			defDur(&a.Interval, 10*time.Second)
-			defFloat(&a.Jitter, 0.1)
+			if a.Jitter == nil {
+				a.Jitter = floatPtr(0.1)
+			}
 			defDur(&a.Timeout, 2*time.Second)
 			defInt(&a.HealthyThreshold, 2)
 			defInt(&a.UnhealthyThreshold, 3)

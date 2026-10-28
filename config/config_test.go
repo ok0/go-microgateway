@@ -416,6 +416,60 @@ func TestDefaults(t *testing.T) {
 	}
 }
 
+func TestHealthDefaultsKeepExplicitZero(t *testing.T) {
+	const explicit = `version: 1
+listeners:
+  - name: public
+    address: ":8080"
+upstreams:
+  - name: users
+    hosts:
+      - url: "http://127.0.0.1:9001"
+    passive_health:
+      max_ejection_percent: 0
+    active_health:
+      jitter: 0
+routes:
+  - name: all
+    upstream: users
+`
+	c, err := Parse([]byte(explicit))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ph := c.Upstreams[0].PassiveHealth; ph == nil || ph.MaxEjectionPercent == nil || *ph.MaxEjectionPercent != 0 {
+		t.Errorf("explicit max_ejection_percent 0 not kept: %+v", ph)
+	}
+	if ah := c.Upstreams[0].ActiveHealth; ah == nil || ah.Jitter == nil || *ah.Jitter != 0 {
+		t.Errorf("explicit jitter 0 not kept: %+v", ah)
+	}
+
+	const empty = `version: 1
+listeners:
+  - name: public
+    address: ":8080"
+upstreams:
+  - name: users
+    hosts:
+      - url: "http://127.0.0.1:9001"
+    passive_health: {}
+    active_health: {}
+routes:
+  - name: all
+    upstream: users
+`
+	c, err = Parse([]byte(empty))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ph := c.Upstreams[0].PassiveHealth; ph == nil || ph.MaxEjectionPercent == nil || *ph.MaxEjectionPercent != 50 {
+		t.Errorf("default max_ejection_percent not 50: %+v", ph)
+	}
+	if ah := c.Upstreams[0].ActiveHealth; ah == nil || ah.Jitter == nil || *ah.Jitter != 0.1 {
+		t.Errorf("default jitter not 0.1: %+v", ah)
+	}
+}
+
 func TestHostWeightZero(t *testing.T) {
 	src := strings.Replace(minimalYAML, "      - url: \"http://127.0.0.1:9001\"\n", "      - url: \"http://127.0.0.1:9001\"\n        weight: 0\n", 1)
 	c, err := Parse([]byte(src))

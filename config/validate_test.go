@@ -178,6 +178,46 @@ func TestSemanticChecks(t *testing.T) {
 		{"duplicate pipeline stage", func(c *Config) {
 			c.Routes[0].Pipeline = []string{"timeout", "timeout"}
 		}, "routes[0].pipeline[1]", "duplicate"},
+		{"passive max_ejection_percent above 100", func(c *Config) {
+			c.Upstreams[0].PassiveHealth = &PassiveHealth{MaxEjectionPercent: intPtr(101)}
+		}, "upstreams[0].passive_health.max_ejection_percent", "between 0 and 100"},
+		{"passive max_ejection_percent negative", func(c *Config) {
+			c.Upstreams[0].PassiveHealth = &PassiveHealth{MaxEjectionPercent: intPtr(-1)}
+		}, "upstreams[0].passive_health.max_ejection_percent", "between 0 and 100"},
+		{"active jitter of 1", func(c *Config) {
+			c.Upstreams[0].ActiveHealth = &ActiveHealth{Interval: Duration(10 * time.Second), Timeout: Duration(2 * time.Second), Jitter: floatPtr(1.0)}
+		}, "upstreams[0].active_health.jitter", "[0, 1)"},
+		{"active timeout equal to interval", func(c *Config) {
+			c.Upstreams[0].ActiveHealth = &ActiveHealth{Interval: Duration(10 * time.Second), Timeout: Duration(10 * time.Second)}
+		}, "upstreams[0].active_health.timeout", "less than interval"},
+		{"active path without slash", func(c *Config) {
+			c.Upstreams[0].ActiveHealth = &ActiveHealth{Path: "health", Interval: Duration(10 * time.Second), Timeout: Duration(2 * time.Second)}
+		}, "upstreams[0].active_health.path", "must start with"},
+		{"active negative healthy threshold", func(c *Config) {
+			c.Upstreams[0].ActiveHealth = &ActiveHealth{HealthyThreshold: -1, Interval: Duration(10 * time.Second), Timeout: Duration(2 * time.Second)}
+		}, "upstreams[0].active_health.healthy_threshold", "must be >= 1"},
+		{"active expected status class", func(c *Config) {
+			c.Upstreams[0].ActiveHealth = &ActiveHealth{ExpectedStatuses: []string{"2xx"}, Interval: Duration(10 * time.Second), Timeout: Duration(2 * time.Second)}
+		}, "upstreams[0].active_health.expected_statuses[0]", "invalid status range"},
+		{"dns refresh interval below one second", func(c *Config) {
+			c.Upstreams[0].Hosts = nil
+			c.Upstreams[0].DNS = &DNS{Hostname: "x.internal", Port: 80, RefreshInterval: Duration(500 * time.Millisecond)}
+		}, "upstreams[0].dns.refresh_interval", "at least 1s"},
+		{"negative host weight", func(c *Config) {
+			c.Upstreams[0].Hosts[0].Weight = intPtr(-1)
+		}, "upstreams[0].hosts[0].weight", "must not be negative"},
+		{"bounded load factor below one", func(c *Config) {
+			c.Upstreams[0].LoadBalancer = LoadBalancer{Algorithm: "consistent_hash", Hash: Hash{Source: "ip"}, BoundedLoadFactor: 0.5}
+		}, "upstreams[0].load_balancer.bounded_load_factor", "must be >= 1"},
+		{"negative virtual nodes", func(c *Config) {
+			c.Upstreams[0].LoadBalancer = LoadBalancer{Algorithm: "consistent_hash", Hash: Hash{Source: "ip"}, BoundedLoadFactor: 1.25, VirtualNodes: -1}
+		}, "upstreams[0].load_balancer.virtual_nodes", "must be >= 1"},
+		{"consistent hash header source without name", func(c *Config) {
+			c.Upstreams[0].LoadBalancer = LoadBalancer{Algorithm: "consistent_hash", Hash: Hash{Source: "header"}, BoundedLoadFactor: 1.25, VirtualNodes: 160}
+		}, "upstreams[0].load_balancer.hash.name", "is required"},
+		{"host url with credentials and invalid port", func(c *Config) {
+			c.Upstreams[0].Hosts[0].URL = "http://user:s3cret@h:bad"
+		}, "upstreams[0].hosts[0].url", "invalid URL"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -219,5 +259,89 @@ func TestAllErrorsInOnePass(t *testing.T) {
 	err := c.Validate()
 	if n := len(fieldErrors(t, err)); n < 3 {
 		t.Fatalf("got %d errors, want at least 3: %v", n, err)
+	}
+}
+
+func TestExplicitZeroHealthAccepted(t *testing.T) {
+	c := base()
+	c.Upstreams[0].PassiveHealth = &PassiveHealth{MaxEjectionPercent: intPtr(0)}
+	c.Upstreams[0].ActiveHealth = &ActiveHealth{Jitter: floatPtr(0), Interval: Duration(10 * time.Second), Timeout: Duration(2 * time.Second)}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUpstreamErrorsAllAtOnce(t *testing.T) {
+	src := `version: 1
+listeners:
+  - name: public
+    address: ":8080"
+upstreams:
+  - name: a
+    hosts:
+      - url: "http://a.internal:9001"
+        weight: -1
+    load_balancer:
+      algorithm: bogus
+    passive_health:
+      max_ejection_percent: 120
+    active_health:
+      interval: 1s
+      timeout: 2s
+  - name: b
+    hosts:
+      - url: "http://b.internal:9001"
+    dns:
+      hostname: b.internal
+      port: 9001
+    load_balancer:
+      algorithm: consistent_hash
+  - name: c
+    hosts: []
+    load_balancer:
+      algorithm: consistent_hash
+      hash:
+        source: ip
+      bounded_load_factor: 0.5
+      virtual_nodes: -1
+`
+	_, err := Parse([]byte(src))
+	errs := fieldErrors(t, err)
+	want := []string{
+		"upstreams[0].hosts[0].weight",
+		"upstreams[0].load_balancer.algorithm",
+		"upstreams[0].passive_health.max_ejection_percent",
+		"upstreams[0].active_health.timeout",
+		"upstreams[1]",
+		"upstreams[1].load_balancer.hash.source",
+		"upstreams[2]",
+		"upstreams[2].load_balancer.bounded_load_factor",
+		"upstreams[2].load_balancer.virtual_nodes",
+	}
+	for _, w := range want {
+		found := false
+		for _, fe := range errs {
+			if fe.Path == w {
+				found = true
+				if fe.Line <= 0 {
+					t.Errorf("%s has no line number", w)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("no error at %s; got %v", w, err)
+		}
+	}
+}
+
+func TestHostURLErrorOmitsCredentials(t *testing.T) {
+	c := base()
+	c.Upstreams[0].Hosts[0].URL = "http://user:s3cret@h:bad"
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("no error for invalid host URL")
+	}
+	if strings.Contains(err.Error(), "s3cret") {
+		t.Errorf("error leaks credential: %v", err)
 	}
 }
