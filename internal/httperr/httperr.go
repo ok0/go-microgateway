@@ -66,9 +66,12 @@ func Write(w http.ResponseWriter, r *http.Request, status int, code, msg string)
 // FromError maps err to an HTTP status and error code.
 func FromError(err error) (status int, code string) {
 	var ne net.Error
+	var oe *net.OpError
 	switch {
 	case errors.Is(err, context.Canceled):
 		return StatusClientClosed, CodeClientClosed
+	case errors.As(err, &oe) && oe.Op == "dial":
+		return http.StatusBadGateway, CodeBadGateway
 	case errors.Is(err, context.DeadlineExceeded):
 		return http.StatusGatewayTimeout, CodeGatewayTimeout
 	case errors.Is(err, ErrNoHealthyUpstream):
