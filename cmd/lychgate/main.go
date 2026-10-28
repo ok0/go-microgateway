@@ -16,6 +16,9 @@ import (
 
 	"github.com/ok0/lychgate"
 	"github.com/ok0/lychgate/config"
+	"github.com/ok0/lychgate/internal/clock"
+	internalhooks "github.com/ok0/lychgate/internal/hooks"
+	"github.com/ok0/lychgate/internal/reload"
 	"github.com/ok0/lychgate/internal/server"
 )
 
@@ -145,24 +148,25 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, hook
 	if err != nil {
 		return printLoadError(stderr, "run", *path, err)
 	}
+	logCfg := cfg.Global.Log
 	if set["log-level"] {
-		cfg.Global.Log.Level = *logLevel
+		logCfg.Level = *logLevel
 	}
 	if set["log-format"] {
-		cfg.Global.Log.Format = *logFormat
+		logCfg.Format = *logFormat
 	}
-	logger := newLogger(stderr, cfg.Global.Log)
+	logger := newLogger(stderr, logCfg)
 
-	g, err := lychgate.New(cfg, lychgate.WithLogger(logger))
+	certs := server.NewCertificates(logger, clock.Real())
+	g, err := lychgate.New(cfg, lychgate.WithLogger(logger), internalhooks.WithParticipant(certs).(lychgate.Option))
 	if err != nil {
-		fmt.Fprintf(stderr, "lychgate run: %v\n", err)
-		return 1
+		return printLoadError(stderr, "run", *path, err)
 	}
 	var admin http.Handler
 	if cfg.Admin.Enabled == nil || *cfg.Admin.Enabled {
 		admin = g.AdminHandler()
 	}
-	srv, err := server.New(cfg, g, admin, g.SetReady, logger)
+	srv, err := server.New(cfg, g, admin, g.SetReady, logger, server.WithCertificates(certs))
 	if err != nil {
 		fmt.Fprintf(stderr, "lychgate run: %v\n", err)
 		g.Close()
@@ -185,36 +189,81 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, hook
 		hooks.onReady(serveAddrs{Listeners: addrs, Admin: srv.AdminAddr()})
 	}
 
+	w := reload.New(reload.Options{
+		Paths:        func() []string { return watchPaths(*path, g.Config()) },
+		Debounce:     cfg.Global.Reload.Debounce.Std(),
+		PollInterval: cfg.Global.Reload.PollInterval.Std(),
+		Clock:        clock.Real(),
+		Logger:       logger,
+		Apply:        func() error { return applyReload(g, srv, *path, logger) },
+		Fatal:        func(err error) bool { return errors.Is(err, lychgate.ErrClosed) },
+	})
+	watchCtx, stopWatch := context.WithCancel(context.Background())
+	watchDone := make(chan error, 1)
+	go func() { watchDone <- w.Run(watchCtx) }()
+
 	sig := hooks.signals
 	if sig == nil {
 		ch := make(chan os.Signal, 2)
-		signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+		signal.Notify(ch, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 		defer signal.Stop(ch)
 		sig = ch
 	}
 
 	var ctxDone <-chan struct{} = ctx.Done()
 	code := 0
-	select {
-	case <-ctx.Done():
-		ctxDone = nil
-	case s := <-sig:
-		logger.Info("shutting down", "signal", s)
-	case err := <-srv.Errors():
-		logger.Error("listener failed", "error", err)
-		code = 1
+	var stopSig os.Signal
+wait:
+	for {
+		select {
+		case <-ctx.Done():
+			ctxDone = nil
+			break wait
+		case s := <-sig:
+			if s == syscall.SIGHUP {
+				logger.Info("reload requested", "signal", s)
+				w.Trigger()
+				continue
+			}
+			stopSig = s
+			break wait
+		case err := <-srv.Errors():
+			logger.Error("listener failed", "error", err)
+			code = 1
+			break wait
+		case err := <-watchDone:
+			logger.Error("configuration watch stopped; reload unavailable", "error", err)
+			watchDone = nil
+		}
+	}
+
+	stopWatch()
+	if watchDone != nil {
+		<-watchDone
+	}
+	if stopSig != nil {
+		logger.Info("shutting down", "signal", stopSig)
 	}
 
 	shCtx, force := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		select {
-		case s := <-sig:
-			logger.Warn("second signal; forcing shutdown", "signal", s)
-			force()
-		case <-ctxDone:
-			force()
-		case <-done:
+		for {
+			select {
+			case s := <-sig:
+				if s == syscall.SIGHUP {
+					logger.Info("reload ignored; shutting down")
+					continue
+				}
+				logger.Warn("second signal; forcing shutdown", "signal", s)
+				force()
+				return
+			case <-ctxDone:
+				force()
+				return
+			case <-done:
+				return
+			}
 		}
 	}()
 	err = srv.Shutdown(shCtx)
@@ -229,6 +278,115 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, hook
 	g.Close()
 	logger.Info("stopped")
 	return code
+}
+
+func watchPaths(configPath string, cfg *config.Config) []string {
+	paths := []string{configPath}
+	for _, l := range cfg.Listeners {
+		if l.TLS != nil {
+			paths = append(paths, l.TLS.CertFile, l.TLS.KeyFile)
+		}
+	}
+	return paths
+}
+
+func applyReload(g *lychgate.Gateway, srv *server.Server, path string, logger *slog.Logger) error {
+	prev := g.Config()
+	if err := g.ReloadFile(path); err != nil {
+		return err
+	}
+	cur := g.Config()
+	if cur == prev {
+		return nil
+	}
+	for _, f := range restartRequired(prev, cur) {
+		logger.Warn("restart required; change not applied", "field", f)
+	}
+	srv.SetShutdownTimings(cur.Global.ShutdownDelay.Std(), cur.Global.DrainTimeout.Std())
+	return nil
+}
+
+func restartRequired(old, cur *config.Config) []string {
+	var out []string
+	if listenerNamesDiffer(old.Listeners, cur.Listeners) {
+		out = append(out, "listeners")
+	}
+	for i := range min(len(old.Listeners), len(cur.Listeners)) {
+		a, b := old.Listeners[i], cur.Listeners[i]
+		field := func(name string) string { return fmt.Sprintf("listeners[%d].%s", i, name) }
+		if a.Name != b.Name {
+			out = append(out, field("name"))
+		}
+		if a.Address != b.Address {
+			out = append(out, field("address"))
+		}
+		switch {
+		case (a.TLS == nil) != (b.TLS == nil):
+			out = append(out, field("tls"))
+		case a.TLS != nil && a.TLS.MinVersion != b.TLS.MinVersion:
+			out = append(out, field("tls.min_version"))
+		}
+		if listenerHTTP2(a) != listenerHTTP2(b) {
+			out = append(out, field("http2"))
+		}
+		if a.H2C != b.H2C {
+			out = append(out, field("h2c"))
+		}
+		if a.ReadHeaderTimeout.Std() != b.ReadHeaderTimeout.Std() {
+			out = append(out, field("read_header_timeout"))
+		}
+		if a.ReadTimeout.Std() != b.ReadTimeout.Std() {
+			out = append(out, field("read_timeout"))
+		}
+		if a.WriteTimeout.Std() != b.WriteTimeout.Std() {
+			out = append(out, field("write_timeout"))
+		}
+		if a.IdleTimeout.Std() != b.IdleTimeout.Std() {
+			out = append(out, field("idle_timeout"))
+		}
+		if a.MaxHeaderBytes != b.MaxHeaderBytes {
+			out = append(out, field("max_header_bytes"))
+		}
+	}
+	if adminEnabled(old) != adminEnabled(cur) {
+		out = append(out, "admin.enabled")
+	}
+	if old.Admin.Address != cur.Admin.Address {
+		out = append(out, "admin.address")
+	}
+	if old.Global.Log.Level != cur.Global.Log.Level {
+		out = append(out, "global.log.level")
+	}
+	if old.Global.Log.Format != cur.Global.Log.Format {
+		out = append(out, "global.log.format")
+	}
+	if old.Global.Reload.Debounce.Std() != cur.Global.Reload.Debounce.Std() {
+		out = append(out, "global.reload.debounce")
+	}
+	if old.Global.Reload.PollInterval.Std() != cur.Global.Reload.PollInterval.Std() {
+		out = append(out, "global.reload.poll_interval")
+	}
+	return out
+}
+
+func listenerNamesDiffer(a, b []config.Listener) bool {
+	if len(a) != len(b) {
+		return true
+	}
+	for i := range a {
+		if a[i].Name != b[i].Name {
+			return true
+		}
+	}
+	return false
+}
+
+func listenerHTTP2(l config.Listener) bool {
+	return l.HTTP2 == nil || *l.HTTP2
+}
+
+func adminEnabled(c *config.Config) bool {
+	return c.Admin.Enabled == nil || *c.Admin.Enabled
 }
 
 func newLogger(w io.Writer, l config.Log) *slog.Logger {

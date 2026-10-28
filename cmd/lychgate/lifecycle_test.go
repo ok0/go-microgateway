@@ -335,8 +335,14 @@ routes:
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1; stderr:\n%s", code, errs)
 	}
-	if !strings.Contains(errs, `listener "secure"`) {
-		t.Errorf("stderr = %q, want it to contain %q", errs, `listener "secure"`)
+	if !strings.Contains(errs, "listeners[1].tls.cert_file (line 8): cannot read certificate") {
+		t.Errorf("stderr = %q, want it to contain %q", errs, "listeners[1].tls.cert_file (line 8): cannot read certificate")
+	}
+	if !strings.Contains(errs, "listeners[1].tls.key_file (line 9): cannot read key") {
+		t.Errorf("stderr = %q, want it to contain %q", errs, "listeners[1].tls.key_file (line 9): cannot read key")
+	}
+	if !strings.Contains(errs, ": 2 error(s)") {
+		t.Errorf("stderr = %q, want it to contain %q", errs, ": 2 error(s)")
 	}
 	ln, err := net.Listen("tcp", plain)
 	if err != nil {

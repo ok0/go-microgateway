@@ -29,7 +29,10 @@ type runHandle struct {
 	sig    chan os.Signal
 	done   chan int
 	cancel context.CancelFunc
-	errb   *bytes.Buffer
+	errb   interface {
+		io.Writer
+		String() string
+	}
 }
 
 func (h *runHandle) stop() int {
@@ -53,7 +56,10 @@ func startRun(t *testing.T, cfgPath string) *runHandle {
 	return startRunArgs(t, []string{"-config", cfgPath}, &bytes.Buffer{})
 }
 
-func startRunArgs(t *testing.T, args []string, errb *bytes.Buffer) *runHandle {
+func startRunArgs(t *testing.T, args []string, errb interface {
+	io.Writer
+	String() string
+}) *runHandle {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
