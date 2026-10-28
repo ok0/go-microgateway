@@ -55,9 +55,8 @@ func recordAttrs(r slog.Record) map[string]slog.Value {
 	return m
 }
 
-func wsEchoBackend(t *testing.T) *httptest.Server {
-	t.Helper()
-	be := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func wsEchoHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 			http.Error(w, "upgrade required", http.StatusBadRequest)
 			return
@@ -74,7 +73,12 @@ func wsEchoBackend(t *testing.T) *httptest.Server {
 			return
 		}
 		_, _ = io.Copy(conn, brw)
-	}))
+	})
+}
+
+func wsEchoBackend(t *testing.T) *httptest.Server {
+	t.Helper()
+	be := httptest.NewServer(wsEchoHandler())
 	t.Cleanup(be.Close)
 	return be
 }

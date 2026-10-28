@@ -41,9 +41,8 @@ type apiError struct {
 
 var hexID = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
-func backend(t *testing.T, name string) *httptest.Server {
-	t.Helper()
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func echoHandler(name string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(echo{
 			Backend: name,
@@ -52,7 +51,12 @@ func backend(t *testing.T, name string) *httptest.Server {
 			Host:    r.Host,
 			Headers: r.Header,
 		})
-	}))
+	})
+}
+
+func backend(t *testing.T, name string) *httptest.Server {
+	t.Helper()
+	s := httptest.NewServer(echoHandler(name))
 	t.Cleanup(s.Close)
 	return s
 }
