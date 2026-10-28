@@ -19,7 +19,7 @@ func (s adminSource) RedactedConfig() *config.Config {
 }
 
 func (s adminSource) Upstreams() []upstream.Status {
-	snap := s.g.snap.Load()
+	snap := s.g.cur.Load().snap
 	out := make([]upstream.Status, 0, len(snap.Config.Upstreams))
 	for _, u := range snap.Config.Upstreams {
 		out = append(out, upstream.Status{Name: u.Name, Hosts: snap.Upstreams[u.Name].Snapshot()})

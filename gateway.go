@@ -12,27 +12,54 @@ import (
 	"github.com/ok0/lychgate/config"
 	"github.com/ok0/lychgate/internal/admin"
 	"github.com/ok0/lychgate/internal/clock"
+	"github.com/ok0/lychgate/internal/hooks"
+	"github.com/ok0/lychgate/internal/httperr"
 	"github.com/ok0/lychgate/internal/metrics"
 	"github.com/ok0/lychgate/internal/middleware"
 	"github.com/ok0/lychgate/internal/runtime"
+	"github.com/ok0/lychgate/internal/state"
+	"github.com/ok0/lychgate/internal/upstream"
 )
 
+// ErrClosed is returned by Reload, ReloadYAML, ReloadFile and WatchFile after Close.
+var ErrClosed = errors.New("lychgate: gateway closed")
+
 type Gateway struct {
-	snap      atomic.Pointer[runtime.Snapshot]
-	closeOnce sync.Once
-	closeErr  error
-	metrics   *metrics.Registry
-	ready     atomic.Bool
-	admin     http.Handler
+	cur      atomic.Pointer[generation]
+	mu       sync.Mutex // serializes reloads and Close
+	closed   bool       // guarded by mu
+	isClosed atomic.Bool
+	closeErr error
+	state    *state.Registry
+	deps     runtime.Deps
+	parts    []hooks.Participant
+	lookup   func(string) (string, bool)
+	logger   *slog.Logger
+	clk      clock.Clock
+	metrics  *metrics.Registry
+	reloads  *reloadSeries
+	ready    atomic.Bool
+	admin    http.Handler
+	live     atomic.Int64 // generations whose resources are not yet released; observed by tests
 }
 
 type Option func(*options)
 
 type options struct {
-	logger      *slog.Logger
-	lookup      func(string) (string, bool)
-	clk         clock.Clock
-	middlewares []registration
+	logger       *slog.Logger
+	lookup       func(string) (string, bool)
+	clk          clock.Clock
+	middlewares  []registration
+	participants []hooks.Participant
+	dial         upstream.DialFunc
+}
+
+func init() {
+	hooks.WithParticipant = func(p hooks.Participant) any {
+		return Option(func(o *options) {
+			o.participants = append(o.participants, p)
+		})
+	}
 }
 
 func WithLogger(l *slog.Logger) Option {
@@ -47,6 +74,17 @@ func WithEnvLookup(f func(string) (string, bool)) Option {
 	}
 }
 
+func withClock(c clock.Clock) Option {
+	return func(o *options) {
+		o.clk = c
+	}
+}
+
+// withDialer makes upstream transports open connections through d instead of TCP.
+func withDialer(d upstream.DialFunc) Option {
+	return func(o *options) { o.dial = d }
+}
+
 func newOptions(opts []Option) options {
 	o := options{logger: slog.Default(), clk: clock.Real()}
 	for _, opt := range opts {
@@ -59,6 +97,7 @@ func New(cfg *config.Config, opts ...Option) (*Gateway, error) {
 	if cfg == nil {
 		return nil, errors.New("lychgate: nil config")
 	}
+	cfg = cfg.Clone()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -73,12 +112,30 @@ func New(cfg *config.Config, opts ...Option) (*Gateway, error) {
 		}
 	}
 	mreg := metrics.NewRegistry()
-	snap, err := runtime.Build(cfg, runtime.Deps{Logger: o.logger, Clock: o.clk, Metrics: mreg, Middlewares: reg})
+	rs, err := registerReloadSeries(mreg)
 	if err != nil {
 		return nil, err
 	}
-	g := &Gateway{metrics: mreg}
-	g.snap.Store(snap)
+	g := &Gateway{
+		state:   state.NewRegistry(o.logger),
+		deps:    runtime.Deps{Logger: o.logger, Clock: o.clk, Metrics: mreg, Middlewares: reg, Dial: o.dial},
+		parts:   o.participants,
+		lookup:  o.lookup,
+		logger:  o.logger,
+		clk:     o.clk,
+		metrics: mreg,
+		reloads: rs,
+	}
+	digest, applies, err := g.prepare(cfg)
+	if err != nil {
+		return nil, err
+	}
+	gen, err := g.build(cfg, combine(cfg.Fingerprint(), digest))
+	if err != nil {
+		return nil, err
+	}
+	g.install(gen, applies)
+	rs.lastSuccess.Set(float64(g.clk.Now().Unix()))
 	g.ready.Store(true)
 	g.admin = admin.Handler(adminSource{g})
 	return g, nil
@@ -100,12 +157,23 @@ func NewFromYAML(data []byte, opts ...Option) (*Gateway, error) {
 }
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	g.snap.Load().ServeHTTP(w, r)
+	for {
+		gen := g.cur.Load()
+		if gen.enter() {
+			defer gen.leave()
+			gen.snap.ServeHTTP(w, r)
+			return
+		}
+		if g.isClosed.Load() && g.cur.Load() == gen {
+			httperr.Write(w, r, http.StatusServiceUnavailable, httperr.CodeUnavailable, httperr.Message(httperr.CodeUnavailable))
+			return
+		}
+	}
 }
 
 // Config returns the configuration of the current snapshot. Treat it as read-only.
 func (g *Gateway) Config() *config.Config {
-	return g.snap.Load().Config
+	return g.cur.Load().snap.Config
 }
 
 // SetReady sets whether the readiness endpoint of the admin handler reports the gateway as ready.
@@ -123,9 +191,16 @@ func (g *Gateway) AdminHandler() http.Handler {
 	return g.admin
 }
 
+// Close stops reloads and releases the gateway's resources once requests in flight finish. Requests that arrive after Close receive 503. Close is idempotent.
 func (g *Gateway) Close() error {
-	g.closeOnce.Do(func() {
-		g.closeErr = g.snap.Load().Close()
-	})
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return g.closeErr
+	}
+	g.closed = true
+	g.isClosed.Store(true)
+	g.state.Close()
+	g.closeErr = g.cur.Load().retire()
 	return g.closeErr
 }
