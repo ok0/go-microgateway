@@ -679,3 +679,39 @@ func TestValidateAuthErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateRateLimitErrors(t *testing.T) {
+	code, _, errs := runCmd(t, "validate", "-config", "../../config/testdata/ratelimit_invalid.yaml")
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; stderr:\n%s", code, errs)
+	}
+	wants := []struct {
+		path string
+		line int
+		msg  string
+	}{
+		{"routes[0].rate_limit.idle_ttl", 17, `unknown field "idle_ttl"`},
+		{"routes[1].rate_limit.rate", 23, "must be >= 1"},
+		{"routes[2].rate_limit.rate", 28, "is required for token_bucket"},
+		{"routes[3].rate_limit.per", 36, "must be positive"},
+		{"routes[4].rate_limit.burst", 43, "must be >= 1"},
+		{"routes[5].rate_limit.max_keys", 50, "must be >= 1"},
+		{"routes[6].rate_limit.window", 58, "must be positive"},
+		{"routes[7].rate_limit.limit", 66, "is only valid with algorithm sliding_window"},
+		{"routes[8].rate_limit.rate", 74, "is only valid with algorithm token_bucket"},
+		{"routes[9].rate_limit.key.name", 81, "is required when key source is header"},
+		{"routes[10].rate_limit.key.name", 88, "is only valid with key source header"},
+		{"routes[11].rate_limit.algorithm", 94, "must be one of token_bucket, sliding_window"},
+		{"routes[12].rate_limit.key.source", 101, "must be one of ip, consumer, header, route"},
+		{"routes[13].rate_limit.rate", 107, "per/rate must be at least 1µs"},
+		{"routes[14].rate_limit.burst", 116, "burst × per/rate must not exceed 24h"},
+		{"routes[15].rate_limit.key.source", 123, "consumer requires route authentication"},
+		{"routes[16].pipeline", 130, `must include "rate_limit"`},
+	}
+	for _, w := range wants {
+		want := fmt.Sprintf("%s (line %d): %s", w.path, w.line, w.msg)
+		if !strings.Contains(errs, want) {
+			t.Errorf("stderr lacks %q\nstderr:\n%s", want, errs)
+		}
+	}
+}
