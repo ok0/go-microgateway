@@ -67,7 +67,7 @@ func TestAdminHandler(t *testing.T) {
 	if strings.Contains(rec.Body.String(), secret) {
 		t.Fatal("/config body leaks the JWT secret")
 	}
-	if got := g.Config().Auth.JWT[0].Keys[0].Secret; got != secret {
+	if got := g.Config().Auth.JWT[0].Keys[0].Secret.Reveal(); got != secret {
 		t.Fatalf("g.Config() secret = %q, want the original", got)
 	}
 

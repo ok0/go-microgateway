@@ -352,7 +352,7 @@ routes:
 				return strings.Replace(doc, "type: pass\n", "type: pass\n    params:\n      fail: true\n", 1)
 			},
 			wantPath: "middlewares[0]",
-			mutate:   func(c *config.Config) { c.Middlewares[0].Params = map[string]any{"fail": true} },
+			mutate:   func(c *config.Config) { c.Middlewares[0].Params = config.NewSecretParams(map[string]any{"fail": true}) },
 		},
 	}
 
@@ -549,7 +549,7 @@ routes:
 		t.Fatal(err)
 	}
 	cfg.Routes[0].Match.Path = "/mutated"
-	cfg.Upstreams[0].Hosts[0].URL = beOld.URL
+	cfg.Upstreams[0].Hosts[0].URL = config.NewSecretURL(beOld.URL)
 
 	if got := servedBy(g, "/orig"); got != "new" {
 		t.Fatalf("backend after caller mutation = %q, want new", got)
@@ -560,8 +560,40 @@ routes:
 	if got := g.Config().Routes[0].Match.Path; got != "/orig" {
 		t.Fatalf("Config() route path = %q, want /orig", got)
 	}
-	if got := g.Config().Upstreams[0].Hosts[0].URL; got != beNew.URL {
+	if got := g.Config().Upstreams[0].Hosts[0].URL.Reveal(); got != beNew.URL {
 		t.Fatalf("Config() host URL = %q, want %q", got, beNew.URL)
+	}
+}
+
+func TestReloadReportsHostURLCredentialChange(t *testing.T) {
+	n := newMemNetwork()
+	be := n.serve(t, echoHandler("cred"))
+	buf := &logBuf{}
+	doc := func(host string) string {
+		return "version: 1\n" + listenersYAML + fmt.Sprintf(`upstreams:
+  - name: up
+    hosts:
+      - url: %q
+routes:
+  - name: old
+    match:
+      path: /old
+    upstream: up
+`, host)
+	}
+	hostOld := strings.Replace(be.URL, "http://", "http://user:pw1@", 1)
+	hostNew := strings.Replace(be.URL, "http://", "http://user:pw2@", 1)
+	g := n.gateway(t, doc(hostOld), WithLogger(newJSONLogger(buf)))
+
+	if err := g.ReloadYAML([]byte(doc(hostNew))); err != nil {
+		t.Fatal(err)
+	}
+	recs := buf.records(t, "configuration reloaded")
+	if len(recs) != 1 {
+		t.Fatalf("reloaded records = %d, want 1", len(recs))
+	}
+	if recs[0]["upstreams_changed"] != float64(1) {
+		t.Fatalf("upstreams_changed = %v, want 1", recs[0]["upstreams_changed"])
 	}
 }
 
@@ -665,7 +697,7 @@ routes:
 	mu.Lock()
 	last := gens[len(gens)-1]
 	mu.Unlock()
-	if got := g.Config().Routes[0].ResponseHeaders.Set["X-Gen"]; got != last {
+	if got := g.Config().Routes[0].ResponseHeaders.Set["X-Gen"].Reveal(); got != last {
 		t.Fatalf("route header = %q, want last built gen %q", got, last)
 	}
 	resp, _ := serve(t, g, httptest.NewRequest(http.MethodGet, "/x", nil))
@@ -812,7 +844,9 @@ routes:
 		t.Fatalf("removed route series missing after reload\n%s", body)
 	}
 
-	var cfgBody config.Config
+	var cfgBody struct {
+		Routes []config.Route `json:"routes"`
+	}
 	if err := json.Unmarshal([]byte(adminBody(t, g, "/config")), &cfgBody); err != nil {
 		t.Fatal(err)
 	}

@@ -2,6 +2,7 @@ package lychgate
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/ok0/lychgate/config"
+	"github.com/ok0/lychgate/internal/leakcheck"
 )
 
 func gwWith(t *testing.T, doc string, opts ...Option) *Gateway {
@@ -113,7 +117,7 @@ func TestUserMiddlewareDecodeError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error")
 	}
-	for _, want := range []string{"middlewares[0]", "params.bogus", `unknown field "bogus"`} {
+	for _, want := range []string{"middlewares[0]", "params.bogus", `unknown key "bogus"`} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q does not contain %q", err, want)
 		}
@@ -316,4 +320,127 @@ func TestIdentityFromContextFalse(t *testing.T) {
 	if !slices.Equal(observed, []bool{false}) {
 		t.Fatalf("identity observed = %v, want [false]", observed)
 	}
+}
+
+func assertNoSecretForms(t *testing.T, text, secret string) {
+	t.Helper()
+	for _, f := range leakcheck.Forms(secret) {
+		if strings.Contains(text, f) {
+			t.Fatalf("output reveals a secret in form %q", f)
+		}
+	}
+}
+
+func TestUserMiddlewareParamsSecret(t *testing.T) {
+	const secret = "mt-LEAK-3c9"
+	env := WithEnvLookup(func(k string) (string, bool) {
+		if k == "MW_TOKEN" {
+			return secret, true
+		}
+		return "", false
+	})
+	be := backend(t, "b")
+	passthrough := func(next http.Handler) http.Handler { return next }
+
+	t.Run("factory decodes secret", func(t *testing.T) {
+		var revealed bool
+		factory := func(p MiddlewareParams) (Middleware, error) {
+			var c struct {
+				Token config.Secret `yaml:"token"`
+				N     int           `yaml:"n"`
+			}
+			if err := p.Decode(&c); err != nil {
+				return nil, err
+			}
+			revealed = c.Token.Reveal() == secret && c.N == 2
+			return passthrough, nil
+		}
+		doc := routeDoc(be.URL, "    middlewares: [m]\n") + "middlewares:\n  - name: m\n    type: tok\n    params:\n      token: \"${MW_TOKEN}\"\n      n: 2\n"
+		g := gwWith(t, doc, WithMiddleware("tok", factory), env)
+		if !revealed {
+			t.Fatal("factory did not receive the revealed token and integer")
+		}
+		out, err := json.Marshal(g.Config().Redacted())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(out), "token") {
+			t.Fatalf("redacted config %s does not contain the param key", out)
+		}
+		assertNoSecretForms(t, string(out), secret)
+	})
+
+	t.Run("type mismatch error is value-free", func(t *testing.T) {
+		factory := func(p MiddlewareParams) (Middleware, error) {
+			var c struct {
+				N int `yaml:"n"`
+			}
+			if err := p.Decode(&c); err != nil {
+				return nil, err
+			}
+			return passthrough, nil
+		}
+		doc := routeDoc(be.URL, "    middlewares: [m]\n") + "middlewares:\n  - name: m\n    type: tok\n    params:\n      n: \"${MW_TOKEN}\"\n"
+		_, err := NewFromYAML([]byte(doc), WithMiddleware("tok", factory), env)
+		if err == nil {
+			t.Fatal("expected an error")
+		}
+		if !strings.Contains(err.Error(), "middlewares[0]") {
+			t.Fatalf("error %q does not contain %q", err, "middlewares[0]")
+		}
+		assertNoSecretForms(t, err.Error(), secret)
+	})
+
+	t.Run("factory error is scrubbed", func(t *testing.T) {
+		factory := func(p MiddlewareParams) (Middleware, error) {
+			var c struct {
+				Token config.Secret `yaml:"token"`
+			}
+			if err := p.Decode(&c); err != nil {
+				return nil, err
+			}
+			tok := c.Token.Reveal()
+			return nil, fmt.Errorf("bad token %s / %x", tok, tok)
+		}
+		doc := routeDoc(be.URL, "    middlewares: [m]\n") + "middlewares:\n  - name: m\n    type: tok\n    params:\n      token: \"${MW_TOKEN}\"\n"
+		_, err := NewFromYAML([]byte(doc), WithMiddleware("tok", factory), env)
+		if err == nil {
+			t.Fatal("expected an error")
+		}
+		if !strings.Contains(err.Error(), "REDACTED") {
+			t.Fatalf("error %q does not contain REDACTED", err)
+		}
+		assertNoSecretForms(t, err.Error(), secret)
+	})
+
+	t.Run("formatted params hide secret", func(t *testing.T) {
+		leakcheck.Check(t, "MiddlewareParams", MiddlewareParams{Name: "m", Type: "t", params: config.NewSecretParams(map[string]any{"token": secret})}, secret)
+	})
+}
+
+func TestRouteHeaderSecretsNeverSurface(t *testing.T) {
+	const secret = "rh-LEAK-2a4"
+	be := backend(t, "b")
+	env := WithEnvLookup(func(k string) (string, bool) {
+		if k == "UP_TOKEN" {
+			return secret, true
+		}
+		return "", false
+	})
+	doc := routeDoc(be.URL, "    request_headers:\n      set:\n        Authorization: \"Bearer ${UP_TOKEN}\"\n")
+	g := gwWith(t, doc, env)
+
+	_, e := serve(t, g, httptest.NewRequest(http.MethodGet, "/x", nil))
+	if got := e.Headers.Get("Authorization"); got != "Bearer "+secret {
+		t.Fatal("backend did not receive the substituted Authorization header")
+	}
+
+	out, err := json.Marshal(adminSource{g}.RedactedConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "Authorization") {
+		t.Fatalf("redacted config %s does not contain the header name", out)
+	}
+	assertNoSecretForms(t, string(out), secret)
 }
