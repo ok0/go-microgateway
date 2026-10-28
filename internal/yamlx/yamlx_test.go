@@ -2,8 +2,10 @@ package yamlx
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -192,5 +194,150 @@ func TestValueErrorFormat(t *testing.T) {
 	e := &ValueError{Errors: []PathError{{"a", "x"}, {"", "y"}}}
 	if got := e.Error(); got != "a: x; y" {
 		t.Fatalf("Error() = %q, want %q", got, "a: x; y")
+	}
+}
+
+func TestDecodeStrictFloatIntoInteger(t *testing.T) {
+	type inner struct {
+		F int32 `yaml:"f"`
+	}
+	type emb struct {
+		M int `yaml:"m"`
+	}
+	type target struct {
+		A   int              `yaml:"a"`
+		B   *int64           `yaml:"b"`
+		C   []int            `yaml:"c"`
+		D   map[string]uint8 `yaml:"d"`
+		E   inner            `yaml:"e"`
+		G   any              `yaml:"g"`
+		H   time.Duration    `yaml:"h"`
+		X   float64          `yaml:"x"`
+		S   string           `yaml:"s"`
+		emb `yaml:",inline"`
+	}
+	tests := []struct {
+		name  string
+		in    string
+		want  []string
+		count int
+		check func(t *testing.T, v *target)
+	}{
+		{name: "int", in: "a: 3", check: func(t *testing.T, v *target) {
+			if v.A != 3 {
+				t.Errorf("A = %d, want 3", v.A)
+			}
+		}},
+		{name: "hex into pointer", in: "b: 0x10", check: func(t *testing.T, v *target) {
+			if v.B == nil || *v.B != 16 {
+				t.Errorf("B = %v, want 16", v.B)
+			}
+		}},
+		{name: "float into any", in: "g: 2.5", check: func(t *testing.T, v *target) {
+			if v.G != 2.5 {
+				t.Errorf("G = %v, want 2.5", v.G)
+			}
+		}},
+		{name: "float into float64", in: "x: 2.5"},
+		{name: "null into pointer", in: "b: ~", check: func(t *testing.T, v *target) {
+			if v.B != nil {
+				t.Errorf("B = %v, want nil", v.B)
+			}
+		}},
+		{name: "quoted float into string", in: `s: "2.5"`},
+		{name: "float into int", in: "a: 2.5", want: []string{"line 1: cannot unmarshal !!float `2.5` into int"}},
+		{name: "float 1.0 into int", in: "a: 1.0", want: []string{"line 1: cannot unmarshal !!float `1.0` into int"}},
+		{name: "float 1e3 into int", in: "a: 1e3", want: []string{"line 1: cannot unmarshal !!float `1e3` into int"}},
+		{name: "float .inf into int", in: "a: .inf", want: []string{"line 1: cannot unmarshal !!float `.inf` into int"}},
+		{name: "float .nan into int", in: "a: .nan", want: []string{"line 1: cannot unmarshal !!float `.nan` into int"}},
+		{name: "float into int64 pointer", in: "b: 2.5", want: []string{"line 1: cannot unmarshal !!float `2.5` into int64"}},
+		{name: "float in int slice", in: "c: [1, 2.5]", want: []string{"line 1: cannot unmarshal !!float `2.5` into int"}},
+		{name: "float in block int slice", in: "c:\n  - 1\n  - 2.5\n", want: []string{"line 3: cannot unmarshal !!float `2.5` into int"}},
+		{name: "float into uint8 map value", in: "d: {k: 0.5}", want: []string{"line 1: cannot unmarshal !!float `0.5` into uint8"}},
+		{name: "float into nested int32", in: "e: {f: 7.25}", want: []string{"line 1: cannot unmarshal !!float `7.25` into int32"}},
+		{name: "float into inline int", in: "m: 1.5", want: []string{"line 1: cannot unmarshal !!float `1.5` into int"}},
+		{name: "long float truncated in message", in: "a: 12345678901.5", want: []string{"line 1: cannot unmarshal !!float `1234567...` into int"}},
+		{name: "float through alias", in: "x: &v 2.5\na: *v\n", want: []string{"line 1: cannot unmarshal !!float `2.5` into int"}},
+		{name: "float through merge", in: "d:\n  <<: {k: 1.5}\n  j: 2\n", want: []string{"line 2: cannot unmarshal !!float `1.5` into uint8"}},
+		{name: "outer key wins over merge", in: "d:\n  <<: {k: 1.5}\n  k: 2\n"},
+		{name: "ordered by line", in: "a: 2.5\nb: str\n", want: []string{
+			"line 1: cannot unmarshal !!float `2.5` into int",
+			"line 2: cannot unmarshal !!str `str` into int64",
+		}},
+		{name: "no duplicate of yaml overflow", in: "b: 99999999999999999999\n", count: 1},
+		{name: "no duplicate of yaml duration", in: "h: 1.5\n", count: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var v target
+			err := DecodeStrict([]byte(tt.in), &v)
+			if tt.want == nil && tt.count == 0 {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if tt.check != nil {
+					tt.check(t, &v)
+				}
+				return
+			}
+			var te *yaml.TypeError
+			if !errors.As(err, &te) {
+				t.Fatalf("expected *yaml.TypeError, got %v", err)
+			}
+			if tt.count != 0 {
+				if len(te.Errors) != tt.count {
+					t.Fatalf("got %d entries, want %d: %v", len(te.Errors), tt.count, te.Errors)
+				}
+				return
+			}
+			if !slices.Equal(te.Errors, tt.want) {
+				t.Fatalf("Errors = %q, want %q", te.Errors, tt.want)
+			}
+		})
+	}
+}
+
+func TestDecodeStrictFloatIntoIntegerMultiDoc(t *testing.T) {
+	type target struct {
+		A int `yaml:"a"`
+	}
+	var v target
+	err := DecodeStrict([]byte("a: 2.5\n---\na: 1\n"), &v)
+	var te *yaml.TypeError
+	if !errors.As(err, &te) {
+		t.Fatalf("expected *yaml.TypeError in chain, got %v", err)
+	}
+	if !slices.Equal(te.Errors, []string{"line 1: cannot unmarshal !!float `2.5` into int"}) {
+		t.Fatalf("Errors = %q", te.Errors)
+	}
+	if !errors.Is(err, ErrMultipleDocuments) {
+		t.Fatalf("expected ErrMultipleDocuments in chain, got %v", err)
+	}
+}
+
+func TestDecodeValueFloatIntoInteger(t *testing.T) {
+	var v struct {
+		Max int64 `yaml:"max"`
+	}
+	err := DecodeValue(map[string]any{"max": 2.5}, &v)
+	var ve *ValueError
+	if !errors.As(err, &ve) {
+		t.Fatalf("expected *ValueError, got %T: %v", err, err)
+	}
+	want := []PathError{{Path: "max", Msg: "cannot unmarshal !!float `2.5` into int64"}}
+	if !slices.Equal(ve.Errors, want) {
+		t.Fatalf("Errors = %v, want %v", ve.Errors, want)
+	}
+
+	for _, val := range []any{3, 3.0} {
+		var ok struct {
+			Max int64 `yaml:"max"`
+		}
+		if err := DecodeValue(map[string]any{"max": val}, &ok); err != nil {
+			t.Fatalf("value %v: unexpected error: %v", val, err)
+		}
+		if ok.Max != 3 {
+			t.Fatalf("value %v: Max = %d, want 3", val, ok.Max)
+		}
 	}
 }
