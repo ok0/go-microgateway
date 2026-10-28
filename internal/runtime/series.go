@@ -13,6 +13,8 @@ type Series struct {
 	Upstream             *upstream.Metrics
 	Retries              *metrics.CounterVec
 	RetryBudgetExhausted *metrics.CounterVec
+	AuthFailures         *metrics.CounterVec
+	JWKSRefreshes        *metrics.CounterVec
 }
 
 // RegisterSeries registers (or, for an identical earlier registration, reuses) the series in r.
@@ -65,5 +67,13 @@ func RegisterSeries(r *metrics.Registry) (*Series, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Series{Requests: requests, Duration: duration, Attempts: attempts, Upstream: um, Retries: retries, RetryBudgetExhausted: exhausted}, nil
+	authFailures, err := r.Counter("lychgate_auth_failures_total", "Requests rejected by authentication or authorization, by route and reason.", "route", "reason")
+	if err != nil {
+		return nil, err
+	}
+	jwksRefreshes, err := r.Counter("lychgate_auth_jwks_refreshes_total", "JWKS fetch attempts, by provider and result.", "provider", "result")
+	if err != nil {
+		return nil, err
+	}
+	return &Series{Requests: requests, Duration: duration, Attempts: attempts, Upstream: um, Retries: retries, RetryBudgetExhausted: exhausted, AuthFailures: authFailures, JWKSRefreshes: jwksRefreshes}, nil
 }

@@ -9,6 +9,7 @@ import (
 	"slices"
 
 	"github.com/ok0/lychgate/config"
+	"github.com/ok0/lychgate/internal/auth"
 	"github.com/ok0/lychgate/internal/clock"
 	"github.com/ok0/lychgate/internal/httperr"
 	"github.com/ok0/lychgate/internal/metrics"
@@ -22,13 +23,14 @@ import (
 )
 
 type Deps struct {
-	Logger      *slog.Logger
-	Clock       clock.Clock
-	Rand        clock.Rand
-	Metrics     *metrics.Registry
-	Middlewares *middleware.Registry
-	Dial        upstream.DialFunc // nil dials TCP
-	Resolver    upstream.Resolver
+	Logger        *slog.Logger
+	Clock         clock.Clock
+	Rand          clock.Rand
+	Metrics       *metrics.Registry
+	Middlewares   *middleware.Registry
+	Dial          upstream.DialFunc // nil dials TCP
+	Resolver      upstream.Resolver
+	KeySetFetcher auth.Fetcher // nil uses auth.NewHTTPFetcher(nil)
 }
 
 type Snapshot struct {
@@ -78,6 +80,15 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 	}
 
 	series, err := RegisterSeries(mreg)
+	if err != nil {
+		return nil, err
+	}
+
+	fetcher := d.KeySetFetcher
+	if fetcher == nil {
+		fetcher = auth.NewHTTPFetcher(nil)
+	}
+	providers, strip, err := buildAuth(cfg, tx, fetcher, clk, logger, series)
 	if err != nil {
 		return nil, err
 	}
@@ -153,6 +164,21 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 		if cb {
 			stages[middleware.StageCircuitBreaker] = proxy.BreakerStage(up)
 		}
+		if a := r.Auth; a != nil && a.Mode != "none" {
+			ps := make([]auth.Authenticator, 0, len(a.Providers))
+			for _, pn := range a.Providers {
+				ps = append(ps, providers[pn])
+			}
+			name := r.Name
+			stages[middleware.StageAuth] = auth.Middleware(auth.RouteConfig{
+				Route:          r.Name,
+				Providers:      ps,
+				AllowAnonymous: a.AllowAnonymous,
+				Require:        auth.Requirements{Scopes: a.Require.Scopes, Roles: a.Require.Roles, Claims: a.Require.Claims},
+				Logger:         logger,
+				OnFailure:      func(reason auth.Reason) { series.AuthFailures.With(name, string(reason)).Inc() },
+			})
+		}
 		if r.Retry != nil && slices.Contains(order, middleware.StageRetry) {
 			b, err := retryBudget(tx, r.Name, *r.Retry, clk)
 			if err != nil {
@@ -206,13 +232,16 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 		series:      series,
 		retryRoutes: retryRoutes,
 	}
-	s.handler = middleware.Chain(
-		http.HandlerFunc(s.dispatch),
+	root := []middleware.Middleware{
 		middleware.RequestID(cfg.Global.RequestIDHeader),
 		middleware.ClientIP(trusted),
 		observe,
 		middleware.Recover(logger),
-	)
+	}
+	if len(strip) > 0 {
+		root = append(root, auth.Strip(strip))
+	}
+	s.handler = middleware.Chain(http.HandlerFunc(s.dispatch), root...)
 	return s, nil
 }
 
