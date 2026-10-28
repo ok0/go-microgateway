@@ -10,10 +10,10 @@ import (
 	"net"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/ok0/lychgate/config"
+	"github.com/ok0/lychgate/internal/clock"
 )
 
 // ErrForcedClose reports that connections were closed because they were still open after the drain timeout.
@@ -25,14 +25,6 @@ type listener struct {
 	srv     *http.Server
 	tls     bool
 	ln      net.Listener
-}
-
-type certificate struct {
-	cur atomic.Pointer[tls.Certificate]
-}
-
-func (c *certificate) get(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-	return c.cur.Load(), nil
 }
 
 type inflight struct {
@@ -89,23 +81,59 @@ type Server struct {
 	mu        sync.Mutex
 	addrs     map[string]net.Addr
 	adminAddr net.Addr
+	// shutdownDelay and drainTimeout are guarded by mu.
+	shutdownDelay time.Duration
+	drainTimeout  time.Duration
+}
+
+// Option configures a Server created by New.
+type Option func(*options)
+
+type options struct {
+	certs *Certificates
+}
+
+// WithCertificates makes TLS listeners present the certificates held by c, which must already hold one for every TLS listener.
+func WithCertificates(c *Certificates) Option {
+	return func(o *options) { o.certs = c }
 }
 
 // New prepares a server for every listener in cfg. The data handler h serves the listeners and the admin handler
 // serves the admin listener when it is enabled in cfg. ready is called with false when shutdown begins. A nil
 // logger discards log output and a nil ready callback does nothing.
-func New(cfg *config.Config, h http.Handler, admin http.Handler, ready func(bool), logger *slog.Logger) (*Server, error) {
+func New(cfg *config.Config, h http.Handler, admin http.Handler, ready func(bool), logger *slog.Logger, opts ...Option) (*Server, error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	if ready == nil {
 		ready = func(bool) {}
 	}
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+	certs := o.certs
+	if certs == nil {
+		certs = NewCertificates(logger, clock.Real())
+		_, next, errs := certs.load(cfg)
+		if len(errs) > 0 {
+			return nil, fmt.Errorf("listener %q: load certificate: %s", cfg.Listeners[errs[0].listener].Name, errs[0].fe.Msg)
+		}
+		certs.install(next)
+	} else {
+		for _, l := range cfg.Listeners {
+			if l.TLS != nil && !certs.loaded(l.Name) {
+				return nil, fmt.Errorf("listener %q: no certificate loaded", l.Name)
+			}
+		}
+	}
 	s := &Server{
-		cfg:    cfg,
-		logger: logger,
-		ready:  ready,
-		addrs:  make(map[string]net.Addr),
+		cfg:           cfg,
+		logger:        logger,
+		ready:         ready,
+		addrs:         make(map[string]net.Addr),
+		shutdownDelay: cfg.Global.ShutdownDelay.Std(),
+		drainTimeout:  cfg.Global.DrainTimeout.Std(),
 	}
 	s.base, s.cancel = context.WithCancel(context.Background())
 	errLog := slog.NewLogLogger(logger.Handler(), slog.LevelWarn)
@@ -124,17 +152,11 @@ func New(cfg *config.Config, h http.Handler, admin http.Handler, ready func(bool
 		}
 		ll := &listener{name: l.Name, address: l.Address, srv: srv}
 		if l.TLS != nil {
-			kp, err := tls.LoadX509KeyPair(l.TLS.CertFile, l.TLS.KeyFile)
-			if err != nil {
-				return nil, fmt.Errorf("listener %q: load certificate: %w", l.Name, err)
-			}
-			c := &certificate{}
-			c.cur.Store(&kp)
 			minVersion := uint16(tls.VersionTLS12)
 			if l.TLS.MinVersion == "1.3" {
 				minVersion = tls.VersionTLS13
 			}
-			srv.TLSConfig = &tls.Config{MinVersion: minVersion, GetCertificate: c.get}
+			srv.TLSConfig = &tls.Config{MinVersion: minVersion, GetCertificate: certs.getter(l.Name)}
 			p.SetHTTP2(l.HTTP2 == nil || *l.HTTP2)
 			ll.tls = true
 		} else {
@@ -254,15 +276,18 @@ func (s *Server) Errors() <-chan error {
 // ErrForcedClose when connections had to be closed forcibly.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.ready(false)
-	if d := s.cfg.Global.ShutdownDelay.Std(); d > 0 {
-		t := time.NewTimer(d)
+	s.mu.Lock()
+	delay, drain := s.shutdownDelay, s.drainTimeout
+	s.mu.Unlock()
+	if delay > 0 {
+		t := time.NewTimer(delay)
 		select {
 		case <-t.C:
 		case <-ctx.Done():
 		}
 		t.Stop()
 	}
-	drainCtx, cancel := context.WithTimeout(ctx, s.cfg.Global.DrainTimeout.Std())
+	drainCtx, cancel := context.WithTimeout(ctx, drain)
 	errs := make([]error, len(s.data))
 	var wg sync.WaitGroup
 	for i, l := range s.data {
@@ -291,6 +316,14 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	s.logger.Info("drain complete")
 	return errors.Join(errs...)
+}
+
+// SetShutdownTimings changes the shutdown delay and drain timeout used by the next Shutdown.
+func (s *Server) SetShutdownTimings(delay, drain time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.shutdownDelay = delay
+	s.drainTimeout = drain
 }
 
 func isContextErr(err error) bool {
