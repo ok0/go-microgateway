@@ -3,6 +3,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -32,9 +33,11 @@ type RouteSpec struct {
 }
 
 type Deps struct {
-	Logger   *slog.Logger
-	Attempts *metrics.CounterVec
-	Clock    clock.Clock
+	Logger       *slog.Logger
+	Attempts     *metrics.CounterVec
+	Clock        clock.Clock
+	Rand         clock.Rand
+	HostBreakers bool
 }
 
 func New(spec RouteSpec, up *upstream.Upstream, deps Deps) http.Handler {
@@ -43,8 +46,14 @@ func New(spec RouteSpec, up *upstream.Upstream, deps Deps) http.Handler {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	return &httputil.ReverseProxy{
-		Rewrite:        rewrite(spec),
-		Transport:      &AttemptTransport{Upstream: up, Attempts: deps.Attempts, Clock: deps.Clock},
+		Rewrite: rewrite(spec),
+		Transport: &AttemptTransport{
+			Upstream:     up,
+			Attempts:     deps.Attempts,
+			Clock:        deps.Clock,
+			Rand:         deps.Rand,
+			HostBreakers: deps.HostBreakers,
+		},
 		ModifyResponse: modifyResponse(spec),
 		ErrorHandler:   errorHandler(logger, up.Name),
 		ErrorLog:       slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
@@ -159,6 +168,9 @@ func modifyResponse(spec RouteSpec) func(resp *http.Response) error {
 
 func errorHandler(logger *slog.Logger, upstreamName string) func(w http.ResponseWriter, r *http.Request, err error) {
 	return func(w http.ResponseWriter, r *http.Request, err error) {
+		if errors.Is(err, upstream.ErrAllOpen) {
+			markCircuitOpen(r.Context())
+		}
 		status, code := httperr.FromError(err)
 		switch r.Context().Err() {
 		case context.Canceled:

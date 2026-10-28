@@ -3,21 +3,25 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ok0/lychgate/config"
+	"github.com/ok0/lychgate/internal/breaker"
 	"github.com/ok0/lychgate/internal/clock"
 	"github.com/ok0/lychgate/internal/httperr"
 	"github.com/ok0/lychgate/internal/metrics"
+	"github.com/ok0/lychgate/internal/reqctx"
 	"github.com/ok0/lychgate/internal/state"
 	"github.com/ok0/lychgate/internal/upstream"
 )
@@ -430,5 +434,356 @@ func TestHeaderTimerStopped(t *testing.T) {
 	}
 	if string(body) != "ok" {
 		t.Errorf("body = %q, want %q", body, "ok")
+	}
+}
+
+func intP(v int) *int { return &v }
+
+func floatP(v float64) *float64 { return &v }
+
+func cbConfig(consecutive int) *config.CircuitBreaker {
+	return &config.CircuitBreaker{
+		Window:              config.Duration(10 * time.Second),
+		Buckets:             intP(10),
+		MinRequests:         intP(100),
+		FailureRatio:        floatP(1),
+		ConsecutiveFailures: intP(consecutive),
+		OpenTimeout:         config.Duration(30 * time.Second),
+		HalfOpenProbes:      intP(1),
+		SuccessThreshold:    intP(1),
+	}
+}
+
+func upstreamMetrics(t *testing.T) *upstream.Metrics {
+	t.Helper()
+	reg := metrics.NewRegistry()
+	var (
+		m   upstream.Metrics
+		err error
+	)
+	if m.Attempts, err = reg.Counter("t_upstream_attempts_total", "h", "upstream", "host", "outcome"); err != nil {
+		t.Fatal(err)
+	}
+	if m.Ejections, err = reg.Counter("t_upstream_ejections_total", "h", "upstream", "host"); err != nil {
+		t.Fatal(err)
+	}
+	if m.EjectionsRefused, err = reg.Counter("t_upstream_ejections_refused_total", "h", "upstream"); err != nil {
+		t.Fatal(err)
+	}
+	if m.DNSRefresh, err = reg.Counter("t_upstream_dns_refresh_total", "h", "upstream", "result"); err != nil {
+		t.Fatal(err)
+	}
+	if m.ActiveChecks, err = reg.Counter("t_upstream_active_checks_total", "h", "upstream", "host", "result"); err != nil {
+		t.Fatal(err)
+	}
+	if m.HostHealthy, err = reg.Gauge("t_upstream_host_healthy", "h", "upstream", "host"); err != nil {
+		t.Fatal(err)
+	}
+	if m.PanicMode, err = reg.Gauge("t_upstream_panic_mode", "h", "upstream"); err != nil {
+		t.Fatal(err)
+	}
+	if m.BreakerState, err = reg.Gauge("t_circuit_breaker_state", "h", "upstream", "host"); err != nil {
+		t.Fatal(err)
+	}
+	if m.BreakerTransitions, err = reg.Counter("t_circuit_breaker_transitions_total", "h", "upstream", "host", "from", "to"); err != nil {
+		t.Fatal(err)
+	}
+	if m.BreakerRejected, err = reg.Counter("t_circuit_breaker_rejected_total", "h", "upstream", "host"); err != nil {
+		t.Fatal(err)
+	}
+	return &m
+}
+
+func assertBreakerSnapshot(t *testing.T, b *breaker.Breaker, wantRequests, wantFailures int64) {
+	t.Helper()
+	s := b.Snapshot()
+	if s.Requests != wantRequests || s.Failures != wantFailures {
+		t.Errorf("breaker requests/failures = %d/%d, want %d/%d", s.Requests, s.Failures, wantRequests, wantFailures)
+	}
+	if s.InFlight != 0 {
+		t.Errorf("breaker InFlight = %d, want 0", s.InFlight)
+	}
+}
+
+func TestBreakerStageRejects(t *testing.T) {
+	um := upstreamMetrics(t)
+	up := newUpstreamWith(t, config.Upstream{
+		Name:           "u",
+		Hosts:          []config.Host{{URL: "http://127.0.0.1:9001"}},
+		CircuitBreaker: cbConfig(1),
+	}, upstream.Deps{Clock: clock.NewFake(time.Unix(0, 0)), Metrics: um})
+
+	tok, err := up.AllowAggregate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok.Done(breaker.Failure)
+	if got := up.Breaker.State(); got != breaker.Open {
+		t.Fatalf("state = %v, want open", got)
+	}
+
+	called := false
+	h := BreakerStage(up)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(reqctx.WithRequestID(context.Background(), "rid-1"))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if called {
+		t.Error("next handler was called while the circuit is open")
+	}
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	var body struct {
+		Error struct {
+			Code      string `json:"code"`
+			RequestID string `json:"request_id"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Error.Code != httperr.CodeCircuitOpen {
+		t.Errorf("code = %q, want %q", body.Error.Code, httperr.CodeCircuitOpen)
+	}
+	if body.Error.RequestID != "rid-1" {
+		t.Errorf("request_id = %q, want rid-1", body.Error.RequestID)
+	}
+	if got := um.BreakerRejected.With("u", "").Value(); got != 1 {
+		t.Errorf("rejected = %v, want 1", got)
+	}
+}
+
+func TestBreakerStageOutcomes(t *testing.T) {
+	tests := []struct {
+		name         string
+		status       int
+		write        bool
+		markOpen     bool
+		canceled     bool
+		wantRequests int64
+		wantFailures int64
+	}{
+		{name: "200 success", status: http.StatusOK, wantRequests: 1},
+		{name: "302 success", status: http.StatusFound, wantRequests: 1},
+		{name: "404 ignored", status: http.StatusNotFound},
+		{name: "499 ignored", status: 499},
+		{name: "500 failure", status: http.StatusInternalServerError, wantRequests: 1, wantFailures: 1},
+		{name: "502 failure", status: http.StatusBadGateway, wantRequests: 1, wantFailures: 1},
+		{name: "503 failure", status: http.StatusServiceUnavailable, wantRequests: 1, wantFailures: 1},
+		{name: "504 failure", status: http.StatusGatewayTimeout, wantRequests: 1, wantFailures: 1},
+		{name: "marked circuit open 503 ignored", status: http.StatusServiceUnavailable, markOpen: true},
+		{name: "write without status success", write: true, wantRequests: 1},
+		{name: "canceled without write ignored", canceled: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			up := newUpstreamWith(t, config.Upstream{
+				Name:           "u",
+				Hosts:          []config.Host{{URL: "http://127.0.0.1:9001"}},
+				CircuitBreaker: cbConfig(0),
+			}, upstream.Deps{Clock: clock.NewFake(time.Unix(0, 0))})
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tt.markOpen {
+					markCircuitOpen(r.Context())
+				}
+				if tt.canceled {
+					cancel()
+				}
+				if tt.status != 0 {
+					w.WriteHeader(tt.status)
+				}
+				if tt.write {
+					_, _ = w.Write([]byte("ok"))
+				}
+			})
+			req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+			BreakerStage(up)(next).ServeHTTP(httptest.NewRecorder(), req)
+
+			assertBreakerSnapshot(t, up.Breaker, tt.wantRequests, tt.wantFailures)
+		})
+	}
+
+	t.Run("hijack success", func(t *testing.T) {
+		up := newUpstreamWith(t, config.Upstream{
+			Name:           "u",
+			Hosts:          []config.Host{{URL: "http://127.0.0.1:9001"}},
+			CircuitBreaker: cbConfig(0),
+		}, upstream.Deps{Clock: clock.NewFake(time.Unix(0, 0))})
+		srv := httptest.NewServer(BreakerStage(up)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			_ = conn.Close()
+		})))
+		t.Cleanup(srv.Close)
+		conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		if _, err := io.WriteString(conn, "GET / HTTP/1.1\r\nHost: gateway.test\r\n\r\n"); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.ReadAll(conn)
+		assertBreakerSnapshot(t, up.Breaker, 1, 0)
+	})
+
+	t.Run("panic re-panics and is ignored", func(t *testing.T) {
+		up := newUpstreamWith(t, config.Upstream{
+			Name:           "u",
+			Hosts:          []config.Host{{URL: "http://127.0.0.1:9001"}},
+			CircuitBreaker: cbConfig(0),
+		}, upstream.Deps{Clock: clock.NewFake(time.Unix(0, 0))})
+		h := BreakerStage(up)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			panic("boom")
+		}))
+		func() {
+			defer func() {
+				if got := recover(); got != "boom" {
+					t.Errorf("recover = %v, want boom", got)
+				}
+			}()
+			h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+		}()
+		assertBreakerSnapshot(t, up.Breaker, 0, 0)
+	})
+}
+
+func TestAttemptTokenCompleted(t *testing.T) {
+	refused := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	refusedURL := refused.URL
+	refused.Close()
+
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	t.Cleanup(ok.Close)
+
+	unavailable := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(unavailable.Close)
+
+	upgrade := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("response writer cannot hijack")
+			return
+		}
+		conn, buf, err := hj.Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close()
+		if _, err := io.WriteString(conn, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: test\r\n\r\n"); err != nil {
+			return
+		}
+		for {
+			line, err := buf.ReadString('\n')
+			if line != "" {
+				if _, werr := io.WriteString(conn, line); werr != nil {
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(upgrade.Close)
+
+	tests := []struct {
+		name          string
+		url           string
+		upgrade       bool
+		canceled      bool
+		headerTimeout bool
+		wantRequests  int64
+		wantFailures  int64
+	}{
+		{name: "dial refused", url: refusedURL, wantRequests: 1, wantFailures: 1},
+		{name: "response header timeout", url: "http://127.0.0.1:9001", headerTimeout: true, wantRequests: 1, wantFailures: 1},
+		{name: "client canceled", url: ok.URL, canceled: true},
+		{name: "200", url: ok.URL, wantRequests: 1},
+		{name: "503", url: unavailable.URL, wantRequests: 1, wantFailures: 1},
+		{name: "101 upgrade", url: upgrade.URL, upgrade: true, wantRequests: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := clock.NewFake(time.Unix(0, 0))
+			cfg := config.Upstream{
+				Name:           "u",
+				Hosts:          []config.Host{{URL: tt.url}},
+				CircuitBreaker: cbConfig(0),
+			}
+			deps := upstream.Deps{Clock: fake}
+			if tt.headerTimeout {
+				cfg.Timeouts = config.Timeouts{ResponseHeader: config.Duration(time.Hour)}
+				deps.Dial = silentDial(t)
+			}
+			up := newUpstreamWith(t, cfg, deps)
+			tr := &AttemptTransport{Upstream: up, Clock: fake, HostBreakers: true}
+
+			req, err := http.NewRequest(http.MethodGet, "http://upstream.invalid/", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.upgrade {
+				req.Header.Set("Connection", "Upgrade")
+				req.Header.Set("Upgrade", "test")
+			}
+			if tt.canceled {
+				ctx, cancel := context.WithCancel(req.Context())
+				cancel()
+				req = req.WithContext(ctx)
+			}
+
+			type result struct {
+				resp *http.Response
+				err  error
+			}
+			ch := make(chan result, 1)
+			go func() {
+				resp, err := tr.RoundTrip(req)
+				ch <- result{resp, err}
+			}()
+			if tt.headerTimeout {
+				fake.BlockUntilDue(1, time.Hour)
+				fake.Advance(time.Hour)
+			}
+			var got result
+			select {
+			case got = <-ch:
+			case <-time.After(5 * time.Second):
+				t.Fatal("RoundTrip did not return")
+			}
+			if got.resp != nil && got.resp.Body != nil {
+				_ = got.resp.Body.Close()
+			}
+
+			assertBreakerSnapshot(t, up.Hosts()[0].Breaker, tt.wantRequests, tt.wantFailures)
+		})
+	}
+}
+
+func TestDepsFields(t *testing.T) {
+	typ := reflect.TypeOf(Deps{})
+	var names []string
+	for i := range typ.NumField() {
+		names = append(names, typ.Field(i).Name)
+	}
+	if want := []string{"Logger", "Attempts", "Clock", "Rand", "HostBreakers"}; !slices.Equal(names, want) {
+		t.Errorf("Deps fields = %v, want %v", names, want)
+	}
+	stage := reflect.TypeOf(BreakerStage)
+	if stage.NumIn() != 1 || stage.In(0) != reflect.TypeOf((*upstream.Upstream)(nil)) {
+		t.Errorf("BreakerStage signature = %v, want a single *upstream.Upstream input", stage)
 	}
 }

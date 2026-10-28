@@ -2,16 +2,20 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptrace"
 	"strings"
 	"sync"
 	"sync/atomic"
 
+	"github.com/ok0/lychgate/internal/breaker"
 	"github.com/ok0/lychgate/internal/clock"
 	"github.com/ok0/lychgate/internal/health"
 	"github.com/ok0/lychgate/internal/metrics"
+	"github.com/ok0/lychgate/internal/retry"
 	"github.com/ok0/lychgate/internal/upstream"
 )
 
@@ -30,36 +34,135 @@ const (
 )
 
 type AttemptTransport struct {
-	Upstream *upstream.Upstream
-	Attempts *metrics.CounterVec
-	Clock    clock.Clock
+	Upstream     *upstream.Upstream
+	Attempts     *metrics.CounterVec
+	Clock        clock.Clock
+	Rand         clock.Rand
+	HostBreakers bool
 }
 
 func (t *AttemptTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	h, err := t.Upstream.Acquire(req, nil)
-	if err != nil {
-		return nil, err
-	}
 	clk := t.Clock
 	if clk == nil {
 		clk = clock.Real()
 	}
+	rr := retry.FromContext(req.Context())
+	h, tok, err := t.Upstream.Acquire(req, nil, t.HostBreakers)
+	if err != nil {
+		return nil, err
+	}
+	if rr == nil {
+		res := t.attempt(req, h, tok, clk, nil)
+		return res.resp, res.err
+	}
+	rnd := t.Rand
+	if rnd == nil {
+		rnd = clock.NewRand(1)
+	}
+	var tried map[*upstream.Host]bool
+	for n := 1; ; n++ {
+		res := t.attempt(req, h, tok, clk, rr)
+		if tried == nil {
+			tried = make(map[*upstream.Host]bool)
+		}
+		tried[h] = true
+		status := 0
+		if res.resp != nil {
+			status = res.resp.StatusCode
+		}
+		if !rr.Policy.ShouldRetry(retry.Attempt{
+			N:             n,
+			Method:        req.Method,
+			Status:        status,
+			HasIdemKey:    rr.HasIdemKey,
+			Replayable:    rr.Replayable,
+			Sent:          res.sent,
+			ConnectErr:    res.connectErr,
+			HeaderTimeout: res.headerTimeout,
+			Canceled:      req.Context().Err() != nil,
+		}) {
+			return res.resp, res.err
+		}
+		d := rr.Policy.Backoff(n+1, rnd)
+		if !retry.Fits(req.Context(), clk, d) {
+			return res.resp, res.err
+		}
+		slot, ok := rr.Budget.Withdraw()
+		if !ok {
+			rr.Exhausted()
+			return res.resp, res.err
+		}
+		if err := retry.Sleep(req.Context(), clk, d); err != nil {
+			rr.Budget.Refund(slot)
+			discard(res.resp)
+			return nil, err
+		}
+		next, nextTok, err := t.Upstream.Acquire(req, tried, t.HostBreakers)
+		if err != nil {
+			rr.Budget.Refund(slot)
+			return res.resp, res.err
+		}
+		discard(res.resp)
+		rr.Retried()
+		h, tok = next, nextTok
+	}
+}
+
+type attemptResult struct {
+	resp          *http.Response
+	err           error
+	sent          bool
+	connectErr    bool
+	headerTimeout bool
+}
+
+type countingBody struct {
+	r io.ReadCloser
+	n atomic.Int64
+}
+
+func (b *countingBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	b.n.Add(int64(n))
+	return n, err
+}
+
+func (b *countingBody) Close() error { return nil }
+
+func (t *AttemptTransport) attempt(req *http.Request, h *upstream.Host, tok breaker.Token, clk clock.Clock, rr *retry.Request) attemptResult {
 	out := attemptRequest(req, h)
+	var cb *countingBody
+	if rr != nil && req.Body != nil {
+		if rr.Replayable {
+			if body := rr.NewBody(); body != nil {
+				out.Body = body
+			}
+		} else {
+			cb = &countingBody{r: req.Body}
+			out.Body = cb
+		}
+	}
 	ctx, cancel := context.WithCancelCause(req.Context())
 
 	var (
 		state atomic.Int32
 		mu    sync.Mutex
 		timer clock.Timer
+		wrote atomic.Bool
 	)
 	fire := func() {
 		if state.CompareAndSwap(headerWaiting, headerFired) {
 			cancel(ErrResponseHeaderTimeout)
 		}
 	}
-	if rh := t.Upstream.ResponseHeaderTimeout; rh > 0 {
-		trace := &httptrace.ClientTrace{
-			WroteRequest: func(httptrace.WroteRequestInfo) {
+	rh := t.Upstream.ResponseHeaderTimeout
+	if rh > 0 || rr != nil {
+		trace := &httptrace.ClientTrace{}
+		if rr != nil {
+			trace.WroteHeaders = func() { wrote.Store(true) }
+		}
+		if rh > 0 {
+			trace.WroteRequest = func(httptrace.WroteRequestInfo) {
 				mu.Lock()
 				defer mu.Unlock()
 				if state.Load() != headerWaiting {
@@ -69,7 +172,7 @@ func (t *AttemptTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 					timer.Stop()
 				}
 				timer = clk.AfterFunc(rh, fire)
-			},
+			}
 		}
 		ctx = httptrace.WithClientTrace(ctx, trace)
 	}
@@ -90,8 +193,15 @@ func (t *AttemptTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		resp, err = nil, ErrResponseHeaderTimeout
 	}
 
+	res := attemptResult{
+		sent:          wrote.Load() || (cb != nil && cb.n.Load() > 0),
+		headerTimeout: err == ErrResponseHeaderTimeout,
+	}
+	var oe *net.OpError
+	res.connectErr = errors.As(err, &oe) && oe.Op == "dial"
+
 	o := health.Classify(req.Context(), resp, err)
-	t.Upstream.Record(h, o)
+	t.Upstream.Record(h, tok, o)
 	t.record(h, o.String())
 
 	done := func() {
@@ -100,11 +210,13 @@ func (t *AttemptTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 	if err != nil {
 		done()
-		return nil, err
+		res.err = err
+		return res
 	}
 	if resp.Body == nil {
 		done()
-		return resp, nil
+		res.resp = resp
+		return res
 	}
 	once := new(sync.Once)
 	if rwc, ok := resp.Body.(io.ReadWriteCloser); ok && resp.StatusCode == http.StatusSwitchingProtocols {
@@ -112,7 +224,18 @@ func (t *AttemptTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	} else {
 		resp.Body = &body{ReadCloser: resp.Body, once: once, done: done}
 	}
-	return resp, nil
+	res.resp = resp
+	return res
+}
+
+func discard(resp *http.Response) {
+	if resp == nil || resp.Body == nil {
+		return
+	}
+	if 0 <= resp.ContentLength && resp.ContentLength <= 4096 {
+		_, _ = io.CopyN(io.Discard, resp.Body, 4096)
+	}
+	_ = resp.Body.Close()
 }
 
 func (t *AttemptTransport) record(h *upstream.Host, outcome string) {
