@@ -78,6 +78,30 @@ func TestWriteUnavailable(t *testing.T) {
 	}
 }
 
+func TestWriteRateLimitUnavailable(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req = req.WithContext(reqctx.WithRequestID(req.Context(), "rid-1"))
+	rec := httptest.NewRecorder()
+	Write(rec, req, http.StatusServiceUnavailable, CodeRateLimitUnavailable, Message(CodeRateLimitUnavailable))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", rec.Code)
+	}
+	var out struct {
+		Error struct {
+			Status    int    `json:"status"`
+			Code      string `json:"code"`
+			RequestID string `json:"request_id"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if out.Error.Code != "rate_limit_unavailable" || out.Error.Status != 503 || out.Error.RequestID != "rid-1" {
+		t.Errorf("body = %+v", out.Error)
+	}
+}
+
 func TestMessages(t *testing.T) {
 	codes := []string{
 		CodeRouteNotFound,
@@ -85,6 +109,7 @@ func TestMessages(t *testing.T) {
 		CodeForbidden,
 		CodePayloadTooLarge,
 		CodeRateLimited,
+		CodeRateLimitUnavailable,
 		CodeBadGateway,
 		CodeCircuitOpen,
 		CodeNoHealthyUpstream,

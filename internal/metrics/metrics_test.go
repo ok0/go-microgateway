@@ -558,3 +558,64 @@ func TestHandler(t *testing.T) {
 		t.Fatalf("handler body differs from WriteText output\n%s\nvs\n%s", rec.Body.String(), buf.String())
 	}
 }
+
+func TestGaugeDeleteFunc(t *testing.T) {
+	r := metrics.NewRegistry()
+	g, err := r.Gauge("g", "h", "a", "b")
+	must(t, err)
+	for _, v := range [][]string{{"x", "1"}, {"x", "2"}, {"y", "1"}} {
+		g.With(v...).Set(5)
+	}
+
+	if n := g.DeleteFunc(func(v []string) bool { return v[0] == "x" }); n != 2 {
+		t.Fatalf("DeleteFunc removed %d series, want 2", n)
+	}
+
+	var buf bytes.Buffer
+	must(t, r.WriteText(&buf))
+	want := "# HELP g h\n# TYPE g gauge\ng{a=\"y\",b=\"1\"} 5\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("exposition after delete\n--- got\n%s--- want\n%s", got, want)
+	}
+
+	if v := g.With("x", "1").Value(); v != 0 {
+		t.Fatalf("recreated series value = %v, want 0", v)
+	}
+	buf.Reset()
+	must(t, r.WriteText(&buf))
+	want = "# HELP g h\n# TYPE g gauge\ng{a=\"x\",b=\"1\"} 0\ng{a=\"y\",b=\"1\"} 5\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("exposition after recreate\n--- got\n%s--- want\n%s", got, want)
+	}
+}
+
+func TestGaugeDeleteFuncConcurrent(t *testing.T) {
+	r := metrics.NewRegistry()
+	g, err := r.Gauge("gc", "h", "a", "b")
+	must(t, err)
+	for _, v := range [][]string{{"x", "1"}, {"x", "2"}} {
+		g.With(v...).Set(1)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := range 1000 {
+			g.With("y", "1").Set(float64(i))
+		}
+	}()
+	deleted := 0
+	for range 100 {
+		deleted += g.DeleteFunc(func(v []string) bool { return v[0] == "x" })
+		g.With("x", "1").Set(1)
+	}
+	wg.Wait()
+
+	if deleted < 1 {
+		t.Fatalf("DeleteFunc removed %d series, want at least 1", deleted)
+	}
+	if v := g.With("y", "1").Value(); v != 999 {
+		t.Fatalf("y series = %v, want 999", v)
+	}
+}

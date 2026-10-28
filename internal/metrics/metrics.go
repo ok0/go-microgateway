@@ -233,6 +233,21 @@ func (v *GaugeVec) With(values ...string) *Gauge {
 	return &Gauge{s: v.f.with(values)}
 }
 
+// DeleteFunc removes every series whose label values satisfy del and returns the number removed.
+// Deleted series disappear from the exposition, and a later With creates a new series at 0.
+// Handles obtained earlier keep pointing at the orphaned series.
+func (v *GaugeVec) DeleteFunc(del func(values []string) bool) int {
+	n := 0
+	v.f.series.Range(func(key, val any) bool {
+		if del(slices.Clone(val.(*series).values)) {
+			v.f.series.Delete(key)
+			n++
+		}
+		return true
+	})
+	return n
+}
+
 // HistogramVec is a histogram family; With selects the series for one label-value combination.
 type HistogramVec struct{ f *family }
 

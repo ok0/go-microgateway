@@ -12,20 +12,21 @@ import (
 )
 
 const (
-	CodeRouteNotFound     = "route_not_found"
-	CodeUnauthorized      = "unauthorized"
-	CodeForbidden         = "forbidden"
-	CodePayloadTooLarge   = "payload_too_large"
-	CodeRateLimited       = "rate_limited"
-	CodeBadGateway        = "bad_gateway"
-	CodeCircuitOpen       = "circuit_open"
-	CodeNoHealthyUpstream = "no_healthy_upstream"
-	CodeGatewayTimeout    = "gateway_timeout"
-	CodeInternal          = "internal_error"
-	CodeClientClosed      = "client_closed_request"
-	CodeNotFound          = "not_found"
-	CodeMethodNotAllowed  = "method_not_allowed"
-	CodeUnavailable       = "service_unavailable"
+	CodeRouteNotFound        = "route_not_found"
+	CodeUnauthorized         = "unauthorized"
+	CodeForbidden            = "forbidden"
+	CodePayloadTooLarge      = "payload_too_large"
+	CodeRateLimited          = "rate_limited"
+	CodeRateLimitUnavailable = "rate_limit_unavailable"
+	CodeBadGateway           = "bad_gateway"
+	CodeCircuitOpen          = "circuit_open"
+	CodeNoHealthyUpstream    = "no_healthy_upstream"
+	CodeGatewayTimeout       = "gateway_timeout"
+	CodeInternal             = "internal_error"
+	CodeClientClosed         = "client_closed_request"
+	CodeNotFound             = "not_found"
+	CodeMethodNotAllowed     = "method_not_allowed"
+	CodeUnavailable          = "service_unavailable"
 )
 
 const StatusClientClosed = 499
@@ -108,6 +109,8 @@ func Message(code string) string {
 		return "request body too large"
 	case CodeRateLimited:
 		return "rate limit exceeded"
+	case CodeRateLimitUnavailable:
+		return "rate limiting is temporarily unavailable"
 	case CodeClientClosed:
 		return "client closed request"
 	case CodeNotFound:
