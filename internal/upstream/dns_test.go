@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ok0/lychgate/config"
+	"github.com/ok0/lychgate/internal/breaker"
 	"github.com/ok0/lychgate/internal/clock"
 	"github.com/ok0/lychgate/internal/health"
 	"github.com/ok0/lychgate/internal/state"
@@ -87,7 +88,7 @@ func TestDNSRefresh(t *testing.T) {
 	b := hostByURL(t, u, "http://10.0.0.2:8080")
 	b.Begin()
 	a.Begin()
-	u.Record(b, health.Failure)
+	u.Record(b, breaker.Token{}, health.Failure)
 	if !b.Ejected() {
 		t.Fatal("setup: host b not ejected")
 	}
@@ -157,7 +158,7 @@ func TestDNSFirstLookupFails(t *testing.T) {
 	res := &fakeResolver{err: errors.New("nxdomain")}
 	u, _ := buildDeps(t, reg, dnsUpstream(), Deps{Clock: fake, Resolver: res})
 
-	if _, err := u.Acquire(nil, nil); !errors.Is(err, ErrNoHosts) {
+	if _, _, err := u.Acquire(nil, nil, false); !errors.Is(err, ErrNoHosts) {
 		t.Fatalf("Acquire before first success: err = %v, want ErrNoHosts", err)
 	}
 
@@ -168,7 +169,7 @@ func TestDNSFirstLookupFails(t *testing.T) {
 	if got := hostURLs(u); !slices.Equal(got, []string{"http://10.0.0.7:8080"}) {
 		t.Fatalf("hosts = %v, want 10.0.0.7", got)
 	}
-	if _, err := u.Acquire(nil, nil); err != nil {
+	if _, _, err := u.Acquire(nil, nil, false); err != nil {
 		t.Fatalf("Acquire after recovery: %v", err)
 	}
 }
@@ -286,5 +287,44 @@ func TestDNSWatcherCloseStopsTimer(t *testing.T) {
 	}
 	if n := fake.Waiters(); n != 0 {
 		t.Fatalf("Waiters() = %d after Close, want 0", n)
+	}
+}
+
+func TestDNSBreakerMembership(t *testing.T) {
+	fake := clock.NewFake(testStart)
+	reg := state.NewRegistry(nil)
+	t.Cleanup(reg.Close)
+	cb := cbCfg()
+	cb.OpenTimeout = dur(time.Hour)
+	cfg := dnsUpstream()
+	cfg.CircuitBreaker = &cb
+	res := &fakeResolver{answers: []string{"10.0.0.1", "10.0.0.2"}}
+	u, _ := buildDeps(t, reg, cfg, Deps{Clock: fake, Resolver: res})
+
+	kept := hostByURL(t, u, "http://10.0.0.2:8080")
+	trip(t, u, kept)
+	keptBreaker := kept.Breaker
+
+	res.set([]string{"10.0.0.2", "10.0.0.3"}, nil)
+	fake.BlockUntil(1)
+	fake.Advance(30 * time.Second)
+	want := []string{"http://10.0.0.2:8080", "http://10.0.0.3:8080"}
+	eventually(t, "refreshed host set", func() bool { return slices.Equal(hostURLs(u), want) })
+
+	if got := hostByURL(t, u, "http://10.0.0.2:8080").Breaker; got != keptBreaker {
+		t.Fatal("kept address got a new breaker")
+	}
+	if st := keptBreaker.State(); st != breaker.Open {
+		t.Errorf("kept address breaker state = %v, want open", st)
+	}
+	added := hostByURL(t, u, "http://10.0.0.3:8080").Breaker
+	if added == nil || added.State() != breaker.Closed {
+		t.Errorf("new address breaker = %v, want a closed breaker", added)
+	}
+	u.brk.mu.Lock()
+	_, stale := u.brk.byKey["http://10.0.0.1:8080"]
+	u.brk.mu.Unlock()
+	if stale {
+		t.Error("removed address kept its breaker")
 	}
 }

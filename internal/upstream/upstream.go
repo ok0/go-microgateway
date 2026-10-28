@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ok0/lychgate/config"
+	"github.com/ok0/lychgate/internal/breaker"
 	"github.com/ok0/lychgate/internal/clock"
 	"github.com/ok0/lychgate/internal/health"
 	"github.com/ok0/lychgate/internal/httperr"
@@ -52,13 +53,16 @@ type Deps struct {
 
 // Metrics are the upstream series. They are registered by the owner of the registry.
 type Metrics struct {
-	Attempts         *metrics.CounterVec
-	Ejections        *metrics.CounterVec
-	EjectionsRefused *metrics.CounterVec
-	DNSRefresh       *metrics.CounterVec
-	ActiveChecks     *metrics.CounterVec
-	HostHealthy      *metrics.GaugeVec
-	PanicMode        *metrics.GaugeVec
+	Attempts           *metrics.CounterVec
+	Ejections          *metrics.CounterVec
+	EjectionsRefused   *metrics.CounterVec
+	DNSRefresh         *metrics.CounterVec
+	ActiveChecks       *metrics.CounterVec
+	HostHealthy        *metrics.GaugeVec
+	PanicMode          *metrics.GaugeVec
+	BreakerState       *metrics.GaugeVec
+	BreakerTransitions *metrics.CounterVec
+	BreakerRejected    *metrics.CounterVec
 }
 
 func newMetrics(r *metrics.Registry) (*Metrics, error) {
@@ -85,6 +89,15 @@ func newMetrics(r *metrics.Registry) (*Metrics, error) {
 		return nil, err
 	}
 	if m.PanicMode, err = r.Gauge("lychgate_upstream_panic_mode", "Whether an upstream is in panic mode.", "upstream"); err != nil {
+		return nil, err
+	}
+	if m.BreakerState, err = r.Gauge("lychgate_circuit_breaker_state", "Circuit breaker state (0 closed, 1 half-open, 2 open); host is empty for the upstream aggregate.", "upstream", "host"); err != nil {
+		return nil, err
+	}
+	if m.BreakerTransitions, err = r.Counter("lychgate_circuit_breaker_transitions_total", "Circuit breaker state transitions.", "upstream", "host", "from", "to"); err != nil {
+		return nil, err
+	}
+	if m.BreakerRejected, err = r.Counter("lychgate_circuit_breaker_rejected_total", "Requests or attempts rejected by an open circuit breaker.", "upstream", "host"); err != nil {
 		return nil, err
 	}
 	return &m, nil
@@ -134,6 +147,7 @@ type Host struct {
 	state   *hostState
 	passive *health.Record
 	active  *health.Status
+	Breaker *breaker.Breaker
 }
 
 func (h *Host) InFlight() int64 {
@@ -193,6 +207,8 @@ type Upstream struct {
 	rnd     clock.Rand
 	logger  *slog.Logger
 	set     atomic.Pointer[hostSet]
+	Breaker *breaker.Breaker
+	brk     *hostBreakers
 }
 
 func TransportFingerprint(cfg config.Upstream) string {
@@ -311,6 +327,25 @@ func Build(cfg config.Upstream, d Deps) (*Upstream, error) {
 		}
 	}
 
+	var agg *breaker.Breaker
+	var brk *hostBreakers
+	if cfg.CircuitBreaker != nil {
+		cb := *cfg.CircuitBreaker
+		cbFP := fingerprint(cb)
+		agg, err = state.Get(d.State, KindBreaker, cfg.Name, cbFP, func() (*breaker.Breaker, error) {
+			return newAggregate(cfg.Name, cb, d.Clock, pl)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("upstream %q: circuit_breaker: %w", cfg.Name, err)
+		}
+		brk, err = state.Get(d.State, KindBreakerHosts, cfg.Name, cbFP, func() (*hostBreakers, error) {
+			return newHostBreakers(cfg.Name, cb, d.Clock, pl)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("upstream %q: circuit_breaker: %w", cfg.Name, err)
+		}
+	}
+
 	return &Upstream{
 		Name:                  cfg.Name,
 		Algorithm:             algo,
@@ -324,6 +359,8 @@ func Build(cfg config.Upstream, d Deps) (*Upstream, error) {
 		dns:                   dns,
 		rnd:                   d.Rand,
 		logger:                d.Logger,
+		Breaker:               agg,
+		brk:                   brk,
 	}, nil
 }
 
@@ -368,7 +405,7 @@ func dnsSpecs(res dnsResult) []hostSpec {
 	return specs
 }
 
-// applyLocked must be called with pool.mu held.
+// applyLocked must be called with pool.mu held. It mutates no shared state until lb.New has succeeded.
 func (u *Upstream) applyLocked(specs []hostSpec, dns bool) {
 	p := u.pool
 	states := make(map[string]*hostState, len(specs))
@@ -379,33 +416,13 @@ func (u *Upstream) applyLocked(specs []hostSpec, dns bool) {
 		}
 		states[s.key] = st
 	}
-	p.states = states
-
-	members := make([]health.Member, 0, len(specs))
-	targets := make([]health.Target, 0, len(specs))
-	for _, s := range specs {
-		members = append(members, health.Member{Key: s.key, Weight: s.weight})
-		targets = append(targets, health.Target{Key: s.key, URL: s.url})
-	}
-	if u.passive != nil {
-		u.passive.SetMembers(members)
-	}
-	if u.active != nil {
-		u.active.SetTargets(targets, u.Transport)
-	}
 
 	hosts := make([]*Host, 0, len(specs))
 	byKey := make(map[string]*Host, len(specs))
 	eps := make([]lb.Endpoint, 0, len(specs))
 	usable := false
 	for _, s := range specs {
-		h := &Host{URL: s.url, Weight: s.weight, key: s.key, display: s.display, state: p.states[s.key]}
-		if u.passive != nil {
-			h.passive = u.passive.Record(s.key)
-		}
-		if u.active != nil {
-			h.active = u.active.Status(s.key)
-		}
+		h := &Host{URL: s.url, Weight: s.weight, key: s.key, display: s.display, state: states[s.key]}
 		hosts = append(hosts, h)
 		byKey[s.key] = h
 		eps = append(eps, lb.Endpoint{ID: s.key, Weight: s.weight, InFlight: h.InFlight})
@@ -418,6 +435,38 @@ func (u *Upstream) applyLocked(specs []hostSpec, dns bool) {
 		u.logger.Error("upstream host set not applied", "upstream", u.Name, "error", err)
 		return
 	}
+
+	p.states = states
+	var bm map[string]*breaker.Breaker
+	if u.brk != nil {
+		keys := make([]string, 0, len(specs))
+		for _, s := range specs {
+			keys = append(keys, s.key)
+		}
+		bm = u.brk.sync(keys)
+	}
+	members := make([]health.Member, 0, len(specs))
+	targets := make([]health.Target, 0, len(specs))
+	for _, s := range specs {
+		members = append(members, health.Member{Key: s.key, Weight: s.weight})
+		targets = append(targets, health.Target{Key: s.key, URL: s.url})
+	}
+	if u.passive != nil {
+		u.passive.SetMembers(members)
+	}
+	if u.active != nil {
+		u.active.SetTargets(targets, u.Transport)
+	}
+	for _, h := range hosts {
+		h.Breaker = bm[h.key]
+		if u.passive != nil {
+			h.passive = u.passive.Record(h.key)
+		}
+		if u.active != nil {
+			h.active = u.active.Status(h.key)
+		}
+	}
+
 	next := &hostSet{
 		hosts:   hosts,
 		byKey:   byKey,
@@ -437,6 +486,8 @@ func (u *Upstream) applyLocked(specs []hostSpec, dns bool) {
 			u.logger.Info("upstream dns host set changed", "upstream", u.Name, "added", added, "removed", removed, "hosts", len(hosts))
 		}
 	}
+	p.brkHosts.Store(u.brk)
+	p.brkAgg.Store(u.Breaker)
 	p.prefill(u, next)
 }
 
@@ -467,44 +518,147 @@ func (u *Upstream) Hosts() []*Host {
 	return s.hosts
 }
 
-func (u *Upstream) Acquire(r *http.Request, tried map[*Host]bool) (*Host, error) {
+// beforeAllow is a test seam. When non-nil it runs before each breaker admission check.
+var beforeAllow func(*Host)
+
+const (
+	flagBaseSet uint8 = 1 << iota
+	flagBase
+	flagBrkSet
+	flagBrk
+	flagExcluded
+)
+
+// hostView memoizes the eligibility answers of one Acquire call, so each host is evaluated at most once per call.
+type hostView struct {
+	set        *hostSet
+	useBreaker bool
+	flags      []uint8
+	inline     [64]uint8
+}
+
+func newHostView(s *hostSet, useBreaker bool) *hostView {
+	v := &hostView{set: s, useBreaker: useBreaker}
+	if n := len(s.hosts); n <= len(v.inline) {
+		v.flags = v.inline[:n]
+	} else {
+		v.flags = make([]uint8, n)
+	}
+	return v
+}
+
+func (v *hostView) base(i int) bool {
+	f := &v.flags[i]
+	if *f&flagBaseSet == 0 {
+		*f |= flagBaseSet
+		if v.set.isEligible(i) {
+			*f |= flagBase
+		}
+	}
+	return *f&flagBase != 0
+}
+
+// brk reads the breaker without taking a probe slot: an open breaker is not ready, a half-open one is ready while a slot is free.
+func (v *hostView) brk(i int) bool {
+	f := &v.flags[i]
+	if *f&flagBrkSet == 0 {
+		*f |= flagBrkSet
+		if h := v.set.hosts[i]; !v.useBreaker || h.Breaker == nil || h.Breaker.Ready() {
+			*f |= flagBrk
+		}
+	}
+	return *f&flagBrk != 0
+}
+
+func (v *hostView) excluded(i int) bool { return v.flags[i]&flagExcluded != 0 }
+
+func (v *hostView) exclude(i int) { v.flags[i] |= flagExcluded }
+
+func (v *hostView) admits(i, phase int, tried map[*Host]bool) bool {
+	h := v.set.hosts[i]
+	if v.excluded(i) || h.Weight <= 0 || !v.brk(i) {
+		return false
+	}
+	switch phase {
+	case 1:
+		return !tried[h] && v.base(i)
+	case 2:
+		return v.base(i)
+	case 3:
+		return !tried[h]
+	}
+	return true
+}
+
+// Acquire picks a host for one attempt. When useBreaker is set, the picked host's breaker admits the attempt and the returned token must be completed with Record.
+// Eligibility is read once per host per call and breaker reads never take probe slots; only the picked host's slot is taken.
+func (u *Upstream) Acquire(r *http.Request, tried map[*Host]bool, useBreaker bool) (*Host, breaker.Token, error) {
 	s := u.set.Load()
 	if s == nil || !s.usable {
-		return nil, ErrNoHosts
+		return nil, breaker.Token{}, ErrNoHosts
 	}
 	var in lb.Input
 	if u.Algorithm == "consistent_hash" {
 		in.Key, in.HasKey = u.hashKey(r)
 	}
-	if len(tried) > 0 {
-		in.Eligible = func(i int) bool {
-			return s.eligible(i) && !tried[s.hosts[i]]
+	v := newHostView(s, useBreaker)
+	for phase := 1; phase <= 4; phase++ {
+		if (phase == 1 || phase == 3) && len(tried) == 0 {
+			continue
 		}
-		if i, ok := s.bal.Pick(in); ok {
-			u.pool.leaveIfPanic()
-			return s.hosts[i], nil
+		in.Eligible = func(i int) bool { return v.admits(i, phase, tried) }
+		for {
+			i, ok := s.bal.Pick(in)
+			if !ok {
+				break
+			}
+			h := s.hosts[i]
+			var tok breaker.Token
+			if useBreaker && h.Breaker != nil {
+				if beforeAllow != nil {
+					beforeAllow(h)
+				}
+				t, err := h.Breaker.Allow()
+				if err != nil {
+					v.exclude(i)
+					u.pool.metrics.BreakerRejected.With(u.Name, h.URL.Host).Inc()
+					continue
+				}
+				tok = t
+			}
+			if phase <= 2 {
+				u.pool.leaveIfPanic()
+			} else {
+				u.pool.enterPanic()
+			}
+			return h, tok, nil
 		}
 	}
-	in.Eligible = s.eligible
-	if i, ok := s.bal.Pick(in); ok {
-		u.pool.leaveIfPanic()
-		return s.hosts[i], nil
-	}
-	if len(tried) > 0 {
-		in.Eligible = func(i int) bool {
-			return !tried[s.hosts[i]]
+	if useBreaker {
+		for i, h := range s.hosts {
+			if h.Weight > 0 && !v.brk(i) {
+				u.pool.metrics.BreakerRejected.With(u.Name, h.URL.Host).Inc()
+			}
 		}
-		if i, ok := s.bal.Pick(in); ok {
-			u.pool.enterPanic()
-			return s.hosts[i], nil
-		}
+		return nil, breaker.Token{}, ErrAllOpen
 	}
-	in.Eligible = nil
-	if i, ok := s.bal.Pick(in); ok {
-		u.pool.enterPanic()
-		return s.hosts[i], nil
+	return nil, breaker.Token{}, ErrNoHosts
+}
+
+// HasBreaker reports whether the upstream defines circuit_breaker.
+func (u *Upstream) HasBreaker() bool { return u.Breaker != nil }
+
+// AllowAggregate admits a request through the upstream aggregate breaker. Without a breaker it admits with a zero token.
+func (u *Upstream) AllowAggregate() (breaker.Token, error) {
+	if u.Breaker == nil {
+		return breaker.Token{}, nil
 	}
-	return nil, ErrNoHosts
+	tok, err := u.Breaker.Allow()
+	if err != nil {
+		u.pool.metrics.BreakerRejected.With(u.Name, "").Inc()
+		return breaker.Token{}, ErrAllOpen
+	}
+	return tok, nil
 }
 
 func (u *Upstream) hashKey(r *http.Request) (string, bool) {
@@ -537,8 +691,9 @@ func (u *Upstream) hashKey(r *http.Request) (string, bool) {
 	return ip.String(), true
 }
 
-// Record reports the outcome of an attempt to the passive ejector of the generation that built h.
-func (u *Upstream) Record(h *Host, o health.Outcome) {
+// Record completes the breaker token of an attempt and reports its outcome to the passive ejector of the generation that built h.
+func (u *Upstream) Record(h *Host, tok breaker.Token, o health.Outcome) {
+	tok.Done(BreakerOutcome(o))
 	if h == nil || h.passive == nil {
 		return
 	}
@@ -547,11 +702,17 @@ func (u *Upstream) Record(h *Host, o health.Outcome) {
 
 // RefreshHealth evaluates ejection expiry for every current host and updates the health gauges.
 func (u *Upstream) RefreshHealth() {
+	if u.Breaker != nil {
+		u.pool.metrics.BreakerState.With(u.Name, "").Set(float64(u.Breaker.State()))
+	}
 	s := u.set.Load()
 	if s == nil {
 		return
 	}
 	for _, h := range s.hosts {
 		u.pool.setHealthGauge(h)
+		if h.Breaker != nil {
+			u.pool.metrics.BreakerState.With(u.Name, h.URL.Host).Set(float64(h.Breaker.State()))
+		}
 	}
 }

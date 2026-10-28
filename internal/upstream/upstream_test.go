@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ok0/lychgate/config"
+	"github.com/ok0/lychgate/internal/breaker"
 	"github.com/ok0/lychgate/internal/clock"
 	"github.com/ok0/lychgate/internal/health"
 	"github.com/ok0/lychgate/internal/httperr"
@@ -136,7 +138,7 @@ func pickCounts(t *testing.T, u *Upstream, r *http.Request, n int) map[*Host]int
 	t.Helper()
 	counts := make(map[*Host]int)
 	for i := 0; i < n; i++ {
-		h, err := u.Acquire(r, nil)
+		h, _, err := u.Acquire(r, nil, false)
 		if err != nil {
 			t.Fatalf("pick %d: %v", i, err)
 		}
@@ -155,7 +157,7 @@ func TestRoundRobin(t *testing.T) {
 	}})
 	want := []string{"a:1", "b:1", "a:1", "b:1", "a:1", "b:1"}
 	for i, wantHost := range want {
-		h, err := u.Acquire(nil, nil)
+		h, _, err := u.Acquire(nil, nil, false)
 		if err != nil {
 			t.Fatalf("call %d: %v", i, err)
 		}
@@ -186,7 +188,7 @@ func TestAcquireSkipsTried(t *testing.T) {
 	}})
 	a, b := u.Hosts()[0], u.Hosts()[1]
 
-	h, err := u.Acquire(nil, map[*Host]bool{a: true})
+	h, _, err := u.Acquire(nil, map[*Host]bool{a: true}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +196,7 @@ func TestAcquireSkipsTried(t *testing.T) {
 		t.Errorf("host = %s, want b:1", h.URL.Host)
 	}
 
-	h, err = u.Acquire(nil, map[*Host]bool{a: true, b: true})
+	h, _, err = u.Acquire(nil, map[*Host]bool{a: true, b: true}, false)
 	if err != nil {
 		t.Fatalf("all tried: unexpected error %v", err)
 	}
@@ -208,7 +210,7 @@ func TestNoEligibleHosts(t *testing.T) {
 		{URL: "http://a:1", Weight: w(0)},
 		{URL: "http://b:1", Weight: w(0)},
 	}})
-	_, err := u.Acquire(nil, nil)
+	_, _, err := u.Acquire(nil, nil, false)
 	if !errors.Is(err, ErrNoHosts) {
 		t.Errorf("err = %v, want ErrNoHosts", err)
 	}
@@ -225,7 +227,7 @@ func TestAllWeightZeroNoHosts(t *testing.T) {
 				{URL: "http://b:1", Weight: w(0)},
 			}})
 			for i := 0; i < 100; i++ {
-				if _, err := u.Acquire(nil, nil); !errors.Is(err, ErrNoHosts) {
+				if _, _, err := u.Acquire(nil, nil, false); !errors.Is(err, ErrNoHosts) {
 					t.Fatalf("pick %d: err = %v, want ErrNoHosts", i, err)
 				}
 			}
@@ -252,14 +254,14 @@ func TestWeightZeroNeverSelected(t *testing.T) {
 				}
 				u := build(t, cfg)
 				if panicMode {
-					u.Record(hostByURL(t, u, "http://a:1"), health.Failure)
-					u.Record(hostByURL(t, u, "http://c:1"), health.Failure)
+					u.Record(hostByURL(t, u, "http://a:1"), breaker.Token{}, health.Failure)
+					u.Record(hostByURL(t, u, "http://c:1"), breaker.Token{}, health.Failure)
 				}
 				zero := hostByURL(t, u, "http://b:1")
 				for i := 0; i < 1000; i++ {
 					r := httptest.NewRequest(http.MethodGet, "/", nil)
 					r.Header.Set("X-K", fmt.Sprintf("key-%d", i))
-					h, err := u.Acquire(r, nil)
+					h, _, err := u.Acquire(r, nil, false)
 					if err != nil {
 						t.Fatalf("pick %d: %v", i, err)
 					}
@@ -283,7 +285,7 @@ func TestPassiveEjectionAcquire(t *testing.T) {
 	}}, Deps{Clock: fake})
 	a := hostByURL(t, u, "http://a:1")
 	for i := 0; i < 3; i++ {
-		u.Record(a, health.Failure)
+		u.Record(a, breaker.Token{}, health.Failure)
 	}
 	if got := pickCounts(t, u, nil, 1000)[a]; got != 0 {
 		t.Fatalf("ejected host picked %d times, want 0", got)
@@ -321,8 +323,8 @@ func TestPanicMode(t *testing.T) {
 	})
 	a, b, c := hostByURL(t, u, "http://a:1"), hostByURL(t, u, "http://b:1"), hostByURL(t, u, "http://c:1")
 	eject := func() {
-		u.Record(a, health.Failure)
-		u.Record(b, health.Failure)
+		u.Record(a, breaker.Token{}, health.Failure)
+		u.Record(b, breaker.Token{}, health.Failure)
 	}
 
 	eject()
@@ -374,10 +376,10 @@ func TestExclusionFallback(t *testing.T) {
 		MaxEjectionPercent:  intp(100),
 	}})
 	c := hostByURL(t, u, "http://c:1")
-	u.Record(c, health.Failure)
+	u.Record(c, breaker.Token{}, health.Failure)
 	a, b := hostByURL(t, u, "http://a:1"), hostByURL(t, u, "http://b:1")
 	for i := 0; i < 100; i++ {
-		h, err := u.Acquire(nil, map[*Host]bool{a: true, b: true})
+		h, _, err := u.Acquire(nil, map[*Host]bool{a: true, b: true}, false)
 		if err != nil {
 			t.Fatalf("pick %d: %v", i, err)
 		}
@@ -442,7 +444,7 @@ func TestHashKeySources(t *testing.T) {
 		}, Hosts: hosts("http://a:1", "http://b:1", "http://c:1")}, Deps{Rand: clock.NewRand(7)})
 		out := make([]int, 0, 50)
 		for i := 0; i < 50; i++ {
-			h, err := u.Acquire(noIP(), nil)
+			h, _, err := u.Acquire(noIP(), nil, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -899,10 +901,10 @@ func TestCarryOverHealth(t *testing.T) {
 
 	fake.BlockUntil(5)
 	for i := 0; i < 3; i++ {
-		u1.Record(a, health.Failure)
+		u1.Record(a, breaker.Token{}, health.Failure)
 	}
 	for i := 0; i < 2; i++ {
-		u1.Record(b, health.Failure)
+		u1.Record(b, breaker.Token{}, health.Failure)
 	}
 	d.Begin()
 	fake.Advance(10 * time.Second)
@@ -974,9 +976,9 @@ func TestHealthDefinitionChange(t *testing.T) {
 	pair := func() []config.Host { return hosts("http://a:1", "http://b:1") }
 
 	u1, _ := buildDeps(t, reg, healthUpstream(pair()...), deps)
-	u1.Record(u1.Hosts()[0], health.Failure)
-	u1.Record(u1.Hosts()[0], health.Failure)
-	u1.Record(u1.Hosts()[0], health.Failure)
+	u1.Record(u1.Hosts()[0], breaker.Token{}, health.Failure)
+	u1.Record(u1.Hosts()[0], breaker.Token{}, health.Failure)
+	u1.Record(u1.Hosts()[0], breaker.Token{}, health.Failure)
 	if !u1.Hosts()[0].Ejected() {
 		t.Fatal("setup: host a not ejected")
 	}
@@ -993,10 +995,10 @@ func TestHealthDefinitionChange(t *testing.T) {
 	if u2.Hosts()[0].Ejected() {
 		t.Error("passive definition change kept the ejection")
 	}
-	u2.Record(u2.Hosts()[0], health.Failure)
-	u2.Record(u2.Hosts()[0], health.Failure)
-	u2.Record(u2.Hosts()[0], health.Failure)
-	u2.Record(u2.Hosts()[0], health.Failure)
+	u2.Record(u2.Hosts()[0], breaker.Token{}, health.Failure)
+	u2.Record(u2.Hosts()[0], breaker.Token{}, health.Failure)
+	u2.Record(u2.Hosts()[0], breaker.Token{}, health.Failure)
+	u2.Record(u2.Hosts()[0], breaker.Token{}, health.Failure)
 
 	activeChanged := healthUpstream(pair()...)
 	activeChanged.PassiveHealth.ConsecutiveFailures = 4
@@ -1031,9 +1033,9 @@ func TestFailedBuildTouchesNothing(t *testing.T) {
 	u, _ := buildDeps(t, reg, healthUpstream(hosts("http://a:1", "http://b:1")...), deps)
 	before := u.Hosts()
 	beforeStates := len(u.pool.states)
-	u.Record(before[0], health.Failure)
-	u.Record(before[0], health.Failure)
-	u.Record(before[0], health.Failure)
+	u.Record(before[0], breaker.Token{}, health.Failure)
+	u.Record(before[0], breaker.Token{}, health.Failure)
+	u.Record(before[0], breaker.Token{}, health.Failure)
 
 	changed := healthUpstream(hosts("http://a:1", "http://z:1")...)
 	changed.PassiveHealth.ConsecutiveFailures = 9
@@ -1104,7 +1106,7 @@ func TestConcurrentInvariants(t *testing.T) {
 				for j, h := range hs {
 					before[j] = h.Ejected()
 				}
-				h, err := u.Acquire(nil, nil)
+				h, _, err := u.Acquire(nil, nil, false)
 				if err != nil {
 					t.Errorf("acquire: %v", err)
 					return
@@ -1120,7 +1122,7 @@ func TestConcurrentInvariants(t *testing.T) {
 				if rnd.Int64N(2) == 0 {
 					outcome = health.Failure
 				}
-				u.Record(h, outcome)
+				u.Record(h, breaker.Token{}, outcome)
 				h.Done()
 				if h.InFlight() < 0 {
 					t.Errorf("in-flight of %s is negative", h.URL.Host)
@@ -1192,7 +1194,7 @@ func TestHostCredentialsNotSurfaced(t *testing.T) {
 		t.Errorf("host URL still carries userinfo: %s", h.URL)
 	}
 	h.Begin()
-	u.Record(h, health.Failure)
+	u.Record(h, breaker.Token{}, health.Failure)
 	if !h.Ejected() {
 		t.Fatal("host not ejected after failure")
 	}
@@ -1222,5 +1224,510 @@ func TestHostCredentialsNotSurfaced(t *testing.T) {
 	u2, _ := buildDeps(t, reg, cfg, deps)
 	if got := u2.Hosts()[0].InFlight(); got != 1 {
 		t.Errorf("in-flight after rebuild with identical URL = %d, want 1", got)
+	}
+
+	cb := cbCfg()
+	reg2 := state.NewRegistry(nil)
+	t.Cleanup(reg2.Close)
+	bcfg := config.Upstream{
+		Name:           "u",
+		Hosts:          hosts("http://user:pw@a:1/?token=tok"),
+		CircuitBreaker: &cb,
+	}
+	bu, _ := buildDeps(t, reg2, bcfg, deps)
+	bh := bu.Hosts()[0]
+	trip(t, bu, bh)
+	if bh.Breaker.State() != breaker.Open {
+		t.Fatal("breaker not open after failure")
+	}
+	var bout strings.Builder
+	if err := mreg.WriteText(&bout); err != nil {
+		t.Fatal(err)
+	}
+	statusJSON, err := json.Marshal(bu.Status())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, text := range map[string]string{"logs": logs.String(), "metrics": bout.String(), "status": string(statusJSON)} {
+		for _, secret := range []string{"pw", "=tok"} {
+			if strings.Contains(text, secret) {
+				t.Errorf("%s contain %q", name, secret)
+			}
+		}
+	}
+}
+
+func cbCfg() config.CircuitBreaker {
+	return config.CircuitBreaker{
+		Window:              dur(10 * time.Second),
+		Buckets:             intp(10),
+		MinRequests:         intp(100),
+		FailureRatio:        floatp(1),
+		ConsecutiveFailures: intp(1),
+		OpenTimeout:         dur(30 * time.Second),
+		HalfOpenProbes:      intp(1),
+		SuccessThreshold:    intp(1),
+	}
+}
+
+func rrBreakerCfg(hs ...config.Host) config.Upstream {
+	cb := cbCfg()
+	return config.Upstream{
+		Name:           "u",
+		LoadBalancer:   config.LoadBalancer{Algorithm: "round_robin"},
+		Hosts:          hs,
+		CircuitBreaker: &cb,
+	}
+}
+
+func trip(t *testing.T, u *Upstream, h *Host) {
+	t.Helper()
+	tok, err := h.Breaker.Allow()
+	if err != nil {
+		t.Fatalf("trip %s: %v", h.URL.Host, err)
+	}
+	u.Record(h, tok, health.Failure)
+}
+
+func TestBreakerExcludesOpenHost(t *testing.T) {
+	fake := clock.NewFake(testStart)
+	reg := state.NewRegistry(nil)
+	t.Cleanup(reg.Close)
+	u, _ := buildDeps(t, reg, rrBreakerCfg(hosts("http://a:1", "http://b:1")...), Deps{Clock: fake})
+	a, b := hostByURL(t, u, "http://a:1"), hostByURL(t, u, "http://b:1")
+	trip(t, u, a)
+	for i := 0; i < 100; i++ {
+		h, tok, err := u.Acquire(nil, nil, true)
+		if err != nil {
+			t.Fatalf("pick %d: %v", i, err)
+		}
+		if h != b {
+			t.Fatalf("pick %d: host = %s, want b:1", i, h.URL.Host)
+		}
+		u.Record(h, tok, health.Success)
+	}
+	seen := map[*Host]bool{}
+	for i := 0; i < 4; i++ {
+		h, _, err := u.Acquire(nil, nil, false)
+		if err != nil {
+			t.Fatalf("unchecked pick %d: %v", i, err)
+		}
+		seen[h] = true
+	}
+	if !seen[a] || !seen[b] {
+		t.Fatal("useBreaker=false did not pick both hosts")
+	}
+}
+
+func TestEligibilityDoesNotConsumeProbes(t *testing.T) {
+	fake := clock.NewFake(testStart)
+	reg := state.NewRegistry(nil)
+	t.Cleanup(reg.Close)
+	cfg := rrBreakerCfg(hosts("http://a:1", "http://b:1", "http://c:1")...)
+	cfg.LoadBalancer.Algorithm = "p2c"
+	u, _ := buildDeps(t, reg, cfg, Deps{Clock: fake, Rand: clock.NewRand(5)})
+	a := hostByURL(t, u, "http://a:1")
+	trip(t, u, a)
+	fake.Advance(30 * time.Second)
+
+	type held struct {
+		h   *Host
+		tok breaker.Token
+	}
+	var toks []held
+	for i := 0; i < 50; i++ {
+		h, tok, err := u.Acquire(nil, nil, true)
+		if err != nil {
+			t.Fatalf("pick %d: %v", i, err)
+		}
+		toks = append(toks, held{h, tok})
+	}
+	if p := a.Breaker.Snapshot().Probes; p > 1 {
+		t.Fatalf("probes in flight = %d, want <= 1", p)
+	}
+	for _, x := range toks {
+		if x.h == a {
+			u.Record(x.h, x.tok, health.Ignored)
+		} else {
+			u.Record(x.h, x.tok, health.Success)
+		}
+	}
+	tok, err := a.Breaker.Allow()
+	if err != nil {
+		t.Fatalf("first probe after completion: %v", err)
+	}
+	if _, err := a.Breaker.Allow(); !errors.Is(err, breaker.ErrOpen) {
+		t.Fatalf("second probe: err = %v, want breaker.ErrOpen", err)
+	}
+	u.Record(a, tok, health.Ignored)
+}
+
+func TestProbeExhaustionRepicks(t *testing.T) {
+	fake := clock.NewFake(testStart)
+	m := newTestMetrics(t)
+	reg := state.NewRegistry(nil)
+	t.Cleanup(reg.Close)
+	u, _ := buildDeps(t, reg, rrBreakerCfg(hosts("http://a:1", "http://b:1")...), Deps{Clock: fake, Metrics: m})
+	control := build(t, config.Upstream{Name: "u", LoadBalancer: config.LoadBalancer{Algorithm: "round_robin"}, Hosts: hosts("http://a:1", "http://b:1")})
+	a, b := hostByURL(t, u, "http://a:1"), hostByURL(t, u, "http://b:1")
+	trip(t, u, a)
+	fake.Advance(30 * time.Second)
+
+	calls := 0
+	beforeAllow = func(h *Host) {
+		if h != a {
+			return
+		}
+		calls++
+		if _, err := a.Breaker.Allow(); err != nil {
+			t.Errorf("slot take inside hook: %v", err)
+		}
+	}
+	t.Cleanup(func() { beforeAllow = nil })
+
+	h, tok, err := u.Acquire(nil, nil, true)
+	beforeAllow = nil
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h != b {
+		t.Fatalf("host = %s, want b:1", h.URL.Host)
+	}
+	if calls != 1 {
+		t.Fatalf("beforeAllow calls for a = %d, want 1", calls)
+	}
+	if got := m.BreakerRejected.With("u", "a:1").Value(); got != 1 {
+		t.Errorf("rejected for a = %v, want 1", got)
+	}
+	u.Record(h, tok, health.Success)
+
+	control.Acquire(nil, nil, false)
+	control.Acquire(nil, nil, false)
+	for i := 0; i < 4; i++ {
+		got, _, err := u.Acquire(nil, nil, false)
+		if err != nil {
+			t.Fatalf("pick %d: %v", i, err)
+		}
+		want, _, _ := control.Acquire(nil, nil, false)
+		if got.URL.Host != want.URL.Host {
+			t.Fatalf("pick %d: host = %s, control = %s", i, got.URL.Host, want.URL.Host)
+		}
+	}
+}
+
+func TestPanicModeHonorsBreakers(t *testing.T) {
+	fake := clock.NewFake(testStart)
+	m := newTestMetrics(t)
+	reg := state.NewRegistry(nil)
+	t.Cleanup(reg.Close)
+	cfg := rrBreakerCfg(
+		config.Host{URL: "http://a:1", Weight: w(1)},
+		config.Host{URL: "http://b:1", Weight: w(1)},
+		config.Host{URL: "http://c:1", Weight: w(0)},
+	)
+	cfg.PassiveHealth = &config.PassiveHealth{
+		ConsecutiveFailures: 1,
+		BaseEjectionTime:    dur(time.Hour),
+		MaxEjectionTime:     dur(time.Hour),
+		MaxEjectionPercent:  intp(100),
+	}
+	u, _ := buildDeps(t, reg, cfg, Deps{Clock: fake, Metrics: m})
+	a, b, c := hostByURL(t, u, "http://a:1"), hostByURL(t, u, "http://b:1"), hostByURL(t, u, "http://c:1")
+	u.Record(a, breaker.Token{}, health.Failure)
+	u.Record(b, breaker.Token{}, health.Failure)
+	if !a.Ejected() || !b.Ejected() {
+		t.Fatal("setup: a and b not ejected")
+	}
+
+	for i := 0; i < 1000; i++ {
+		var tried map[*Host]bool
+		if i%2 == 1 {
+			tried = map[*Host]bool{a: true}
+		}
+		h, tok, err := u.Acquire(nil, tried, true)
+		if err != nil {
+			t.Fatalf("pick %d: %v", i, err)
+		}
+		if h == c {
+			t.Fatalf("pick %d: weight-0 host selected", i)
+		}
+		u.Record(h, tok, health.Success)
+	}
+
+	trip(t, u, a)
+	h, tok, err := u.Acquire(nil, nil, true)
+	if err != nil || h != b {
+		t.Fatalf("with a open: host = %v, err = %v; want b:1", h, err)
+	}
+	u.Record(h, tok, health.Success)
+	if got := gaugeValue(m.PanicMode, "u"); got != 1 {
+		t.Errorf("panic gauge = %v, want 1", got)
+	}
+
+	trip(t, u, b)
+	if _, _, err := u.Acquire(nil, nil, true); !errors.Is(err, ErrAllOpen) {
+		t.Fatalf("all open: err = %v, want ErrAllOpen", err)
+	}
+	for _, x := range []*Host{a, b} {
+		if got := m.BreakerRejected.With("u", x.URL.Host).Value(); got < 1 {
+			t.Errorf("rejected for %s = %v, want >= 1", x.URL.Host, got)
+		}
+	}
+}
+
+func TestAllOpenVsNoHosts(t *testing.T) {
+	fake := clock.NewFake(testStart)
+	reg := state.NewRegistry(nil)
+	t.Cleanup(reg.Close)
+
+	zero, _ := buildDeps(t, reg, rrBreakerCfg(
+		config.Host{URL: "http://a:1", Weight: w(0)},
+		config.Host{URL: "http://b:1", Weight: w(0)},
+	), Deps{Clock: fake})
+	if _, _, err := zero.Acquire(nil, nil, true); !errors.Is(err, ErrNoHosts) || errors.Is(err, ErrAllOpen) {
+		t.Fatalf("all weight zero: err = %v, want ErrNoHosts", err)
+	}
+
+	open, _ := buildDeps(t, reg, rrBreakerCfg(hosts("http://c:1", "http://d:1")...), Deps{Clock: fake})
+	trip(t, open, hostByURL(t, open, "http://c:1"))
+	trip(t, open, hostByURL(t, open, "http://d:1"))
+	if _, _, err := open.Acquire(nil, nil, true); !errors.Is(err, httperr.ErrCircuitOpen) {
+		t.Fatalf("all open: err = %v, want httperr.ErrCircuitOpen", err)
+	}
+}
+
+func TestRetryExclusionWithBreakers(t *testing.T) {
+	fake := clock.NewFake(testStart)
+	reg := state.NewRegistry(nil)
+	t.Cleanup(reg.Close)
+	u, _ := buildDeps(t, reg, rrBreakerCfg(hosts("http://a:1", "http://b:1", "http://c:1")...), Deps{Clock: fake})
+	a, b, c := hostByURL(t, u, "http://a:1"), hostByURL(t, u, "http://b:1"), hostByURL(t, u, "http://c:1")
+	trip(t, u, b)
+
+	for i := 0; i < 20; i++ {
+		h, tok, err := u.Acquire(nil, map[*Host]bool{a: true}, true)
+		if err != nil || h != c {
+			t.Fatalf("tried {a}: host = %v, err = %v; want c:1", h, err)
+		}
+		u.Record(h, tok, health.Success)
+	}
+	for i := 0; i < 20; i++ {
+		h, tok, err := u.Acquire(nil, map[*Host]bool{a: true, c: true}, true)
+		if err != nil {
+			t.Fatalf("tried {a, c}: %v", err)
+		}
+		if h == b {
+			t.Fatal("open host b returned")
+		}
+		if h != a && h != c {
+			t.Fatalf("tried {a, c}: host = %s", h.URL.Host)
+		}
+		u.Record(h, tok, health.Success)
+	}
+}
+
+func TestBreakerRetainedAcrossBuilds(t *testing.T) {
+	fake := clock.NewFake(testStart)
+	reg := state.NewRegistry(nil)
+	t.Cleanup(reg.Close)
+	cfg := rrBreakerCfg(hosts("http://a:1", "http://b:1")...)
+	u1, _ := buildDeps(t, reg, cfg, Deps{Clock: fake})
+	trip(t, u1, hostByURL(t, u1, "http://a:1"))
+	before := hostByURL(t, u1, "http://a:1").Breaker
+
+	weighted := cfg
+	weighted.Hosts = hosts("http://a:1", "http://b:1")
+	weighted.Hosts[1].Weight = w(2)
+	u2, _ := buildDeps(t, reg, weighted, Deps{Clock: fake})
+	if got := hostByURL(t, u2, "http://a:1").Breaker; got != before {
+		t.Fatal("breaker of a was not retained across a same-fingerprint build")
+	}
+	if st := before.Snapshot(); st.State != breaker.Open || st.UntilHalfOpen != 30*time.Second {
+		t.Fatalf("retained breaker: state %v, until half-open %v", st.State, st.UntilHalfOpen)
+	}
+
+	cb3 := cbCfg()
+	cb3.OpenTimeout = dur(60 * time.Second)
+	changed := weighted
+	changed.CircuitBreaker = &cb3
+
+	tx := reg.Begin()
+	if _, err := Build(changed, Deps{State: tx, Clock: fake}); err != nil {
+		tx.Abort()
+		t.Fatal(err)
+	}
+	tx.Abort()
+	if got := hostByURL(t, u2, "http://a:1").Breaker; got != before || before.State() != breaker.Open {
+		t.Fatal("aborted build changed the breakers of the active generation")
+	}
+
+	u3, _ := buildDeps(t, reg, changed, Deps{Clock: fake})
+	if got := hostByURL(t, u3, "http://a:1").Breaker; got == before || got.State() != breaker.Closed {
+		t.Fatal("changed circuit_breaker did not produce a fresh closed breaker")
+	}
+}
+
+func TestBreakerMetricsAndLogs(t *testing.T) {
+	var logs syncBuf
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	mreg := metrics.NewRegistry()
+	m, err := newMetrics(mreg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := clock.NewFake(testStart)
+	reg := state.NewRegistry(nil)
+	t.Cleanup(reg.Close)
+	u, _ := buildDeps(t, reg, rrBreakerCfg(hosts("http://a:1", "http://b:1")...), Deps{Clock: fake, Metrics: m, Logger: logger})
+
+	var out strings.Builder
+	if err := mreg.WriteText(&out); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		`lychgate_circuit_breaker_state{upstream="u",host="a:1"} 0`,
+		`lychgate_circuit_breaker_state{upstream="u",host=""} 0`,
+		`lychgate_circuit_breaker_transitions_total{upstream="u",host="a:1",from="closed",to="open"} 0`,
+		`lychgate_circuit_breaker_transitions_total{upstream="u",host="a:1",from="open",to="half_open"} 0`,
+		`lychgate_circuit_breaker_transitions_total{upstream="u",host="a:1",from="half_open",to="open"} 0`,
+		`lychgate_circuit_breaker_transitions_total{upstream="u",host="a:1",from="half_open",to="closed"} 0`,
+		`lychgate_circuit_breaker_rejected_total{upstream="u",host="a:1"} 0`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing series %s", want)
+		}
+	}
+
+	trip(t, u, hostByURL(t, u, "http://a:1"))
+	if got := gaugeValue(m.BreakerState, "u", "a:1"); got != 2 {
+		t.Errorf("state gauge = %v, want 2", got)
+	}
+	if got := m.BreakerTransitions.With("u", "a:1", "closed", "open").Value(); got != 1 {
+		t.Errorf("closed->open transitions = %v, want 1", got)
+	}
+	line := logs.String()
+	for _, want := range []string{
+		"level=WARN",
+		`msg="circuit breaker state changed"`,
+		"upstream=u",
+		"host=a:1",
+		"scope=host",
+		"from=closed",
+		"to=open",
+		"reason=consecutive",
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("log missing %q: %s", want, line)
+		}
+	}
+}
+
+func TestBreakerStatus(t *testing.T) {
+	fake := clock.NewFake(testStart)
+	reg := state.NewRegistry(nil)
+	t.Cleanup(reg.Close)
+	u, _ := buildDeps(t, reg, rrBreakerCfg(hosts("http://a:1", "http://b:1")...), Deps{Clock: fake})
+	trip(t, u, hostByURL(t, u, "http://a:1"))
+
+	st := u.Status()
+	if len(st.Hosts) != 2 {
+		t.Fatalf("hosts = %d, want 2", len(st.Hosts))
+	}
+	if st.Hosts[0].BreakerState != "open" || st.Hosts[0].Breaker == nil || st.Hosts[0].Breaker.HalfOpenInSeconds != 30 {
+		t.Errorf("host a status = %+v, want open with 30s to half-open", st.Hosts[0])
+	}
+	if st.Hosts[1].BreakerState != "closed" || st.Hosts[1].Breaker == nil {
+		t.Errorf("host b status = %+v, want closed", st.Hosts[1])
+	}
+	if st.BreakerState != "closed" || st.Breaker == nil {
+		t.Errorf("aggregate status = %q / %v, want closed with a breaker", st.BreakerState, st.Breaker)
+	}
+
+	plain := build(t, config.Upstream{Name: "n", Hosts: hosts("http://c:1")})
+	ps := plain.Status()
+	if ps.BreakerState != "closed" || ps.Breaker != nil {
+		t.Errorf("upstream without circuit_breaker: state %q, breaker %v", ps.BreakerState, ps.Breaker)
+	}
+	if ps.Hosts[0].BreakerState != "closed" || ps.Hosts[0].Breaker != nil {
+		t.Errorf("host without circuit_breaker: %+v", ps.Hosts[0])
+	}
+}
+
+func TestRecordCompletesToken(t *testing.T) {
+	fake := clock.NewFake(testStart)
+	reg := state.NewRegistry(nil)
+	t.Cleanup(reg.Close)
+	u, _ := buildDeps(t, reg, rrBreakerCfg(hosts("http://a:1")...), Deps{Clock: fake})
+	a := hostByURL(t, u, "http://a:1")
+	tok, err := a.Breaker.Allow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := a.Breaker.Snapshot().InFlight; got != 1 {
+		t.Fatalf("in-flight after Allow = %d, want 1", got)
+	}
+	u.Record(a, tok, health.Success)
+	if got := a.Breaker.Snapshot().InFlight; got != 0 {
+		t.Errorf("in-flight after Record = %d, want 0", got)
+	}
+	u.Record(a, breaker.Token{}, health.Failure)
+	if got := a.Breaker.Snapshot().Failures; got != 0 {
+		t.Errorf("zero token recorded a failure: %d", got)
+	}
+}
+
+func TestActivateFailureMutatesNothing(t *testing.T) {
+	var logs syncBuf
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	fake := clock.NewFake(testStart)
+	reg := state.NewRegistry(nil)
+	t.Cleanup(reg.Close)
+	cfg := rrBreakerCfg(hosts("http://a:1", "http://b:1")...)
+	cfg.PassiveHealth = &config.PassiveHealth{ConsecutiveFailures: 1, MaxEjectionPercent: intp(100)}
+	u1, _ := buildDeps(t, reg, cfg, Deps{Clock: fake, Logger: logger})
+	a1 := hostByURL(t, u1, "http://a:1")
+	trip(t, u1, a1)
+	before := u1.pool.current.Load()
+
+	cfg2 := rrBreakerCfg(hosts("http://a:1", "http://c:1")...)
+	cfg2.PassiveHealth = cfg.PassiveHealth
+	tx := reg.Begin()
+	u2, err := Build(cfg2, Deps{State: tx, Clock: fake, Logger: logger})
+	if err != nil {
+		tx.Abort()
+		t.Fatal(err)
+	}
+	lease := tx.Commit()
+	t.Cleanup(func() { _ = lease.Release() })
+	u2.lbCfg.Algorithm = "bogus"
+	u2.Activate()
+
+	if u1.pool.current.Load() != before {
+		t.Error("failed activation replaced the published host set")
+	}
+	if len(u1.brk.byKey) != 2 || u1.brk.byKey["http://a:1"] != a1.Breaker || u1.brk.byKey["http://b:1"] == nil {
+		t.Error("failed activation changed the host breakers")
+	}
+	if a1.Breaker.State() != breaker.Open {
+		t.Error("failed activation changed the state of a's breaker")
+	}
+	if len(u1.pool.states) != 2 || u1.pool.states["http://a:1"] == nil || u1.pool.states["http://b:1"] == nil {
+		t.Errorf("pool states keys changed after a failed activation: %d entries", len(u1.pool.states))
+	}
+	if got := strings.Count(logs.String(), "upstream host set not applied"); got != 1 {
+		t.Errorf("host set failure logged %d times, want 1", got)
+	}
+
+	u2.lbCfg.Algorithm = "round_robin"
+	u2.Activate()
+	if got := hostByURL(t, u2, "http://a:1").Breaker; got != a1.Breaker || got.State() != breaker.Open {
+		t.Error("retained host a lost its open breaker")
+	}
+	if _, ok := u2.brk.byKey["http://b:1"]; ok {
+		t.Error("removed host b kept its breaker")
+	}
+	if c := hostByURL(t, u2, "http://c:1").Breaker; c == nil || c.State() != breaker.Closed {
+		t.Error("added host c did not get a closed breaker")
 	}
 }

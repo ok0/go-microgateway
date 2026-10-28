@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ok0/lychgate/config"
+	"github.com/ok0/lychgate/internal/breaker"
 	"github.com/ok0/lychgate/internal/clock"
 	"github.com/ok0/lychgate/internal/health"
 )
@@ -28,6 +29,8 @@ type pool struct {
 	logger       *slog.Logger
 	metrics      *Metrics
 	clk          clock.Clock
+	brkHosts     atomic.Pointer[hostBreakers]
+	brkAgg       atomic.Pointer[breaker.Breaker]
 }
 
 func newPool(name string, d Deps) *pool {
@@ -95,12 +98,62 @@ func (p *pool) prefill(u *Upstream, s *hostSet) {
 				p.metrics.ActiveChecks.With(p.name, host, r)
 			}
 		}
+		if h.Breaker != nil {
+			p.prefillBreaker(host, h.Breaker)
+		}
+	}
+	if u.Breaker != nil {
+		p.prefillBreaker("", u.Breaker)
 	}
 	if u.dns != nil {
 		for _, r := range [...]string{"success", "error", "empty"} {
 			p.metrics.DNSRefresh.With(p.name, r)
 		}
 	}
+}
+
+var breakerTransitionPairs = [...][2]breaker.State{
+	{breaker.Closed, breaker.Open},
+	{breaker.Open, breaker.HalfOpen},
+	{breaker.HalfOpen, breaker.Open},
+	{breaker.HalfOpen, breaker.Closed},
+}
+
+func (p *pool) prefillBreaker(host string, b *breaker.Breaker) {
+	p.metrics.BreakerState.With(p.name, host).Set(float64(b.State()))
+	for _, pair := range breakerTransitionPairs {
+		p.metrics.BreakerTransitions.With(p.name, host, pair[0].String(), pair[1].String())
+	}
+	p.metrics.BreakerRejected.With(p.name, host)
+}
+
+func (p *pool) onHostBreaker(hb *hostBreakers, key string, from, to breaker.State, reason breaker.Reason) {
+	host := p.hostLabel(key)
+	p.logBreaker(host, "host", from, to, reason)
+	if p.brkHosts.Load() == hb && p.currentHost(key) != nil {
+		p.recordBreakerTransition(host, from, to)
+	}
+}
+
+func (p *pool) onAggregateBreaker(b *breaker.Breaker, from, to breaker.State, reason breaker.Reason) {
+	p.logBreaker("", "aggregate", from, to, reason)
+	if p.brkAgg.Load() == b {
+		p.recordBreakerTransition("", from, to)
+	}
+}
+
+func (p *pool) recordBreakerTransition(host string, from, to breaker.State) {
+	p.metrics.BreakerTransitions.With(p.name, host, from.String(), to.String()).Inc()
+	p.metrics.BreakerState.With(p.name, host).Set(float64(to))
+}
+
+func (p *pool) logBreaker(host, scope string, from, to breaker.State, reason breaker.Reason) {
+	attrs := []any{"upstream", p.name, "host", host, "scope", scope, "from", from.String(), "to", to.String(), "reason", string(reason)}
+	if to == breaker.Open {
+		p.logger.Warn("circuit breaker state changed", attrs...)
+		return
+	}
+	p.logger.Info("circuit breaker state changed", attrs...)
 }
 
 func (p *pool) onEjected(key string, d time.Duration, count int) {
