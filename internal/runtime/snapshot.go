@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"slices"
 
 	"github.com/ok0/lychgate/config"
 	"github.com/ok0/lychgate/internal/clock"
@@ -14,6 +15,7 @@ import (
 	"github.com/ok0/lychgate/internal/middleware"
 	"github.com/ok0/lychgate/internal/proxy"
 	"github.com/ok0/lychgate/internal/reqctx"
+	"github.com/ok0/lychgate/internal/retry"
 	"github.com/ok0/lychgate/internal/router"
 	"github.com/ok0/lychgate/internal/state"
 	"github.com/ok0/lychgate/internal/upstream"
@@ -35,8 +37,10 @@ type Snapshot struct {
 	Router      *router.Router
 	Upstreams   map[string]*upstream.Upstream
 
-	handler  http.Handler
-	notFound http.Handler
+	handler     http.Handler
+	notFound    http.Handler
+	series      *Series
+	retryRoutes []string
 }
 
 type routeEntry struct {
@@ -118,8 +122,12 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 	accessLog := cfg.Global.Log.AccessLog == nil || *cfg.Global.Log.AccessLog
 
 	entries := make([]router.Entry, 0, len(cfg.Routes))
+	var retryRoutes []string
 	for i := range cfg.Routes {
 		r := &cfg.Routes[i]
+		up := ups[r.Upstream]
+		order := middleware.Order(r.Middlewares, r.Pipeline)
+		cb := breakerEnabled(r, up, order)
 		spec := proxy.RouteSpec{
 			Name:            r.Name,
 			StripPrefix:     r.Rewrite.StripPrefix,
@@ -131,7 +139,7 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 			RequestIDHeader: cfg.Global.RequestIDHeader,
 			Trusted:         trusted,
 		}
-		px := proxy.New(spec, ups[r.Upstream], proxy.Deps{Logger: logger, Attempts: series.Attempts, Clock: clk})
+		px := proxy.New(spec, up, proxy.Deps{Logger: logger, Attempts: series.Attempts, Clock: clk, Rand: rnd, HostBreakers: cb})
 		terminal := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			if in := reqctx.InfoFrom(req.Context()); in != nil {
 				in.Upstream = r.Upstream
@@ -142,9 +150,24 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 		if t := middleware.Timeout(r.Timeout.Std()); t != nil {
 			stages[middleware.StageTimeout] = t
 		}
+		if cb {
+			stages[middleware.StageCircuitBreaker] = proxy.BreakerStage(up)
+		}
+		if r.Retry != nil && slices.Contains(order, middleware.StageRetry) {
+			b, err := retryBudget(tx, r.Name, *r.Retry, clk)
+			if err != nil {
+				return nil, err
+			}
+			name := r.Name
+			stages[middleware.StageRetry] = retry.Middleware(retryPolicy(*r.Retry), b, retry.Hooks{
+				OnRetry:     func() { series.Retries.With(name).Inc() },
+				OnExhausted: func() { series.RetryBudgetExhausted.With(name).Inc() },
+			})
+			retryRoutes = append(retryRoutes, name)
+		}
 		h := middleware.Chain(
 			terminal,
-			middleware.Pipeline(middleware.Order(r.Middlewares, r.Pipeline), stages)...,
+			middleware.Pipeline(order, stages)...,
 		)
 		entries = append(entries, router.Entry{
 			Matcher: router.Matcher{
@@ -180,6 +203,8 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 		Router:      rt,
 		Upstreams:   ups,
 		notFound:    notFound,
+		series:      series,
+		retryRoutes: retryRoutes,
 	}
 	s.handler = middleware.Chain(
 		http.HandlerFunc(s.dispatch),
@@ -213,6 +238,10 @@ func (s *Snapshot) dispatch(w http.ResponseWriter, r *http.Request) {
 func (s *Snapshot) Activate() {
 	for i := range s.Config.Upstreams {
 		s.Upstreams[s.Config.Upstreams[i].Name].Activate()
+	}
+	for _, n := range s.retryRoutes {
+		s.series.Retries.With(n)
+		s.series.RetryBudgetExhausted.With(n)
 	}
 }
 

@@ -15,9 +15,11 @@ import (
 	"time"
 
 	"github.com/ok0/lychgate/config"
+	"github.com/ok0/lychgate/internal/clock"
 	"github.com/ok0/lychgate/internal/metrics"
 	"github.com/ok0/lychgate/internal/middleware"
 	"github.com/ok0/lychgate/internal/reqctx"
+	"github.com/ok0/lychgate/internal/retry"
 	"github.com/ok0/lychgate/internal/router"
 	"github.com/ok0/lychgate/internal/state"
 )
@@ -494,5 +496,130 @@ routes:
 		if _, _, err := build(t, cfg, Deps{Metrics: reg}); err != nil {
 			t.Fatalf("Build %d: %v", i, err)
 		}
+	}
+}
+
+func TestResilienceSeriesPresentAtStartup(t *testing.T) {
+	cfg := mustParse(t, `version: 1
+listeners:
+  - name: public
+    address: ":8080"
+upstreams:
+  - name: users
+    hosts:
+      - url: "http://127.0.0.1:9001"
+    circuit_breaker: {}
+routes:
+  - name: api
+    match:
+      path: /api
+    upstream: users
+    retry: {}
+`)
+	reg := metrics.NewRegistry()
+	if _, _, err := build(t, cfg, Deps{Metrics: reg}); err != nil {
+		t.Fatal(err)
+	}
+	var sb strings.Builder
+	if err := reg.WriteText(&sb); err != nil {
+		t.Fatal(err)
+	}
+	text := sb.String()
+	for _, want := range []string{
+		`lychgate_circuit_breaker_state{upstream="users",host="127.0.0.1:9001"} 0`,
+		`lychgate_circuit_breaker_state{upstream="users",host=""} 0`,
+		`lychgate_circuit_breaker_transitions_total{upstream="users",host="",from="closed",to="open"} 0`,
+		`lychgate_circuit_breaker_rejected_total{upstream="users",host=""} 0`,
+		`lychgate_retries_total{route="api"} 0`,
+		`lychgate_retry_budget_exhausted_total{route="api"} 0`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("metrics text lacks %q", want)
+		}
+	}
+
+	bad := mustParse(t, `version: 1
+listeners:
+  - name: public
+    address: ":8080"
+upstreams:
+  - name: users
+    hosts:
+      - url: "http://127.0.0.1:9001"
+middlewares:
+  - name: a
+    type: nope
+routes:
+  - name: fresh
+    match:
+      path: /fresh
+    upstream: users
+    retry: {}
+`)
+	if _, _, err := build(t, bad, Deps{Metrics: reg}); err == nil {
+		t.Fatal("Build with unknown middleware type succeeded")
+	}
+	sb.Reset()
+	if err := reg.WriteText(&sb); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(sb.String(), `route="fresh"`) {
+		t.Error("failed build left a retry series for its route")
+	}
+}
+
+func TestBudgetStateRetention(t *testing.T) {
+	reg := state.NewRegistry(nil)
+	t.Cleanup(reg.Close)
+	budgetFor := func(t *testing.T, doc string) *retry.Budget {
+		t.Helper()
+		cfg := mustParse(t, doc)
+		tx := reg.Begin()
+		if _, err := Build(cfg, Deps{}, tx); err != nil {
+			tx.Abort()
+			t.Fatal(err)
+		}
+		b, err := retryBudget(tx, "api", *cfg.Routes[0].Retry, clock.Real())
+		if err != nil {
+			tx.Abort()
+			t.Fatal(err)
+		}
+		lease := tx.Commit()
+		t.Cleanup(func() { _ = lease.Release() })
+		return b
+	}
+	const doc = `version: 1
+listeners:
+  - name: public
+    address: ":8080"
+upstreams:
+  - name: users
+    hosts:
+      - url: "http://127.0.0.1:9001"
+routes:
+  - name: api
+    match:
+      path: /api
+    upstream: users
+    retry:
+      attempts: %d
+`
+
+	b1 := budgetFor(t, fmt.Sprintf(doc, 3))
+	b1.Deposit()
+	b2 := budgetFor(t, fmt.Sprintf(doc, 3))
+	if b2 != b1 {
+		t.Fatal("budget was rebuilt for an unchanged retry block")
+	}
+	if requests, _ := b2.Stats(); requests != 1 {
+		t.Errorf("requests = %d after reuse, want 1", requests)
+	}
+
+	b3 := budgetFor(t, fmt.Sprintf(doc, 2))
+	if b3 == b1 {
+		t.Fatal("budget was reused after attempts changed")
+	}
+	if requests, _ := b3.Stats(); requests != 0 {
+		t.Errorf("requests = %d for a new budget, want 0", requests)
 	}
 }

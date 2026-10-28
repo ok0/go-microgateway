@@ -7,10 +7,12 @@ import (
 
 // Series are the request and upstream metric families recorded by a snapshot.
 type Series struct {
-	Requests *metrics.CounterVec
-	Duration *metrics.HistogramVec
-	Attempts *metrics.CounterVec
-	Upstream *upstream.Metrics
+	Requests             *metrics.CounterVec
+	Duration             *metrics.HistogramVec
+	Attempts             *metrics.CounterVec
+	Upstream             *upstream.Metrics
+	Retries              *metrics.CounterVec
+	RetryBudgetExhausted *metrics.CounterVec
 }
 
 // RegisterSeries registers (or, for an identical earlier registration, reuses) the series in r.
@@ -46,5 +48,22 @@ func RegisterSeries(r *metrics.Registry) (*Series, error) {
 	if um.PanicMode, err = r.Gauge("lychgate_upstream_panic_mode", "Whether an upstream is in panic mode.", "upstream"); err != nil {
 		return nil, err
 	}
-	return &Series{Requests: requests, Duration: duration, Attempts: attempts, Upstream: um}, nil
+	if um.BreakerState, err = r.Gauge("lychgate_circuit_breaker_state", "Circuit breaker state (0 closed, 1 half-open, 2 open); host is empty for the upstream aggregate.", "upstream", "host"); err != nil {
+		return nil, err
+	}
+	if um.BreakerTransitions, err = r.Counter("lychgate_circuit_breaker_transitions_total", "Circuit breaker state transitions.", "upstream", "host", "from", "to"); err != nil {
+		return nil, err
+	}
+	if um.BreakerRejected, err = r.Counter("lychgate_circuit_breaker_rejected_total", "Requests or attempts rejected by an open circuit breaker.", "upstream", "host"); err != nil {
+		return nil, err
+	}
+	retries, err := r.Counter("lychgate_retries_total", "Retry attempts sent, by route.", "route")
+	if err != nil {
+		return nil, err
+	}
+	exhausted, err := r.Counter("lychgate_retry_budget_exhausted_total", "Retries skipped because the route retry budget was exhausted.", "route")
+	if err != nil {
+		return nil, err
+	}
+	return &Series{Requests: requests, Duration: duration, Attempts: attempts, Upstream: um, Retries: retries, RetryBudgetExhausted: exhausted}, nil
 }
