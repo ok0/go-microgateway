@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/ok0/lychgate/config"
+	"github.com/ok0/lychgate/internal/clock"
 	"github.com/ok0/lychgate/internal/httperr"
 	"github.com/ok0/lychgate/internal/metrics"
 	"github.com/ok0/lychgate/internal/reqctx"
@@ -33,6 +34,7 @@ type RouteSpec struct {
 type Deps struct {
 	Logger   *slog.Logger
 	Attempts *metrics.CounterVec
+	Clock    clock.Clock
 }
 
 func New(spec RouteSpec, up *upstream.Upstream, deps Deps) http.Handler {
@@ -42,7 +44,7 @@ func New(spec RouteSpec, up *upstream.Upstream, deps Deps) http.Handler {
 	}
 	return &httputil.ReverseProxy{
 		Rewrite:        rewrite(spec),
-		Transport:      &AttemptTransport{Upstream: up, Attempts: deps.Attempts},
+		Transport:      &AttemptTransport{Upstream: up, Attempts: deps.Attempts, Clock: deps.Clock},
 		ModifyResponse: modifyResponse(spec),
 		ErrorHandler:   errorHandler(logger, up.Name),
 		ErrorLog:       slog.NewLogLogger(logger.Handler(), slog.LevelWarn),

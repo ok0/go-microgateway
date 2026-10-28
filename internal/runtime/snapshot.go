@@ -22,9 +22,11 @@ import (
 type Deps struct {
 	Logger      *slog.Logger
 	Clock       clock.Clock
+	Rand        clock.Rand
 	Metrics     *metrics.Registry
 	Middlewares *middleware.Registry
 	Dial        upstream.DialFunc // nil dials TCP
+	Resolver    upstream.Resolver
 }
 
 type Snapshot struct {
@@ -52,6 +54,10 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 	if clk == nil {
 		clk = clock.Real()
 	}
+	rnd := d.Rand
+	if rnd == nil {
+		rnd = clock.NewRand(1)
+	}
 
 	mreg := d.Metrics
 	if mreg == nil {
@@ -74,7 +80,15 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 
 	ups := make(map[string]*upstream.Upstream, len(cfg.Upstreams))
 	for i := range cfg.Upstreams {
-		u, err := upstream.Build(cfg.Upstreams[i], upstream.Deps{State: tx, Dial: d.Dial})
+		u, err := upstream.Build(cfg.Upstreams[i], upstream.Deps{
+			State:    tx,
+			Dial:     d.Dial,
+			Clock:    clk,
+			Rand:     rnd,
+			Logger:   logger,
+			Metrics:  series.Upstream,
+			Resolver: d.Resolver,
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -117,7 +131,7 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 			RequestIDHeader: cfg.Global.RequestIDHeader,
 			Trusted:         trusted,
 		}
-		px := proxy.New(spec, ups[r.Upstream], proxy.Deps{Logger: logger, Attempts: series.Attempts})
+		px := proxy.New(spec, ups[r.Upstream], proxy.Deps{Logger: logger, Attempts: series.Attempts, Clock: clk})
 		terminal := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			if in := reqctx.InfoFrom(req.Context()); in != nil {
 				in.Upstream = r.Upstream
@@ -192,6 +206,14 @@ func (s *Snapshot) dispatch(w http.ResponseWriter, r *http.Request) {
 		ctx = reqctx.WithParams(ctx, params)
 	}
 	re.handler.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// Activate publishes the host sets of the upstreams. Call it once, after the state transaction
+// that built the snapshot commits and before the snapshot serves requests.
+func (s *Snapshot) Activate() {
+	for i := range s.Config.Upstreams {
+		s.Upstreams[s.Config.Upstreams[i].Name].Activate()
+	}
 }
 
 func (s *Snapshot) ServeHTTP(w http.ResponseWriter, r *http.Request) {

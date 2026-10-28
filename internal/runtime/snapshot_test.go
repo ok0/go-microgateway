@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -41,10 +43,19 @@ func build(t *testing.T, cfg *config.Config, d Deps) (*Snapshot, *state.Registry
 	}
 	lease := tx.Commit()
 	t.Cleanup(func() { _ = lease.Release() })
+	s.Activate()
 	return s, reg, nil
 }
 
-func TestBuildDNSFails(t *testing.T) {
+type fakeResolver struct {
+	answers []string
+}
+
+func (f fakeResolver) LookupHost(ctx context.Context, host string) ([]string, error) {
+	return f.answers, nil
+}
+
+func TestBuildDNSUpstream(t *testing.T) {
 	cfg := mustParse(t, `version: 1
 listeners:
   - name: public
@@ -58,12 +69,53 @@ routes:
   - name: all
     upstream: users
 `)
-	s, _, err := build(t, cfg, Deps{})
-	if err == nil || !strings.Contains(err.Error(), "not yet supported") {
-		t.Fatalf("Build error = %v, want not yet supported", err)
+	s, _, err := build(t, cfg, Deps{Resolver: fakeResolver{answers: []string{"10.0.0.2", "10.0.0.1"}}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if s != nil {
-		t.Errorf("snapshot = %v, want nil", s)
+	var got []string
+	for _, h := range s.Upstreams["users"].Hosts() {
+		got = append(got, h.URL.String())
+	}
+	want := []string{"http://10.0.0.1:8080", "http://10.0.0.2:8080"}
+	if !slices.Equal(got, want) {
+		t.Errorf("hosts = %v, want %v", got, want)
+	}
+}
+
+func TestUpstreamSeriesPresentAtStartup(t *testing.T) {
+	cfg := mustParse(t, `version: 1
+listeners:
+  - name: public
+    address: ":8080"
+upstreams:
+  - name: users
+    hosts:
+      - url: "http://127.0.0.1:9001"
+routes:
+  - name: api
+    match:
+      path: /api
+    upstream: users
+`)
+	reg := metrics.NewRegistry()
+	if _, _, err := build(t, cfg, Deps{Metrics: reg}); err != nil {
+		t.Fatal(err)
+	}
+	var sb strings.Builder
+	if err := reg.WriteText(&sb); err != nil {
+		t.Fatal(err)
+	}
+	text := sb.String()
+	for _, want := range []string{
+		`lychgate_upstream_host_healthy{upstream="users",host="127.0.0.1:9001"} 1`,
+		`lychgate_upstream_panic_mode{upstream="users"} 0`,
+		`lychgate_upstream_ejections_refused_total{upstream="users"} 0`,
+		`lychgate_upstream_attempts_total{upstream="users",host="127.0.0.1:9001",outcome="success"} 0`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("metrics text lacks %q", want)
+		}
 	}
 }
 

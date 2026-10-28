@@ -2,20 +2,37 @@ package proxy
 
 import (
 	"context"
-	"errors"
 	"io"
-	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"sync"
+	"sync/atomic"
 
+	"github.com/ok0/lychgate/internal/clock"
+	"github.com/ok0/lychgate/internal/health"
 	"github.com/ok0/lychgate/internal/metrics"
 	"github.com/ok0/lychgate/internal/upstream"
+)
+
+type headerTimeoutError struct{}
+
+func (headerTimeoutError) Error() string   { return "upstream response header timeout" }
+func (headerTimeoutError) Timeout() bool   { return true }
+func (headerTimeoutError) Temporary() bool { return true }
+
+var ErrResponseHeaderTimeout error = headerTimeoutError{}
+
+const (
+	headerWaiting int32 = iota
+	headerReceived
+	headerFired
 )
 
 type AttemptTransport struct {
 	Upstream *upstream.Upstream
 	Attempts *metrics.CounterVec
+	Clock    clock.Clock
 }
 
 func (t *AttemptTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -23,23 +40,77 @@ func (t *AttemptTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	if err != nil {
 		return nil, err
 	}
+	clk := t.Clock
+	if clk == nil {
+		clk = clock.Real()
+	}
 	out := attemptRequest(req, h)
+	ctx, cancel := context.WithCancelCause(req.Context())
+
+	var (
+		state atomic.Int32
+		mu    sync.Mutex
+		timer clock.Timer
+	)
+	fire := func() {
+		if state.CompareAndSwap(headerWaiting, headerFired) {
+			cancel(ErrResponseHeaderTimeout)
+		}
+	}
+	if rh := t.Upstream.ResponseHeaderTimeout; rh > 0 {
+		trace := &httptrace.ClientTrace{
+			WroteRequest: func(httptrace.WroteRequestInfo) {
+				mu.Lock()
+				defer mu.Unlock()
+				if state.Load() != headerWaiting {
+					return
+				}
+				if timer != nil {
+					timer.Stop()
+				}
+				timer = clk.AfterFunc(rh, fire)
+			},
+		}
+		ctx = httptrace.WithClientTrace(ctx, trace)
+	}
+
 	h.Begin()
-	resp, err := t.Upstream.Transport.RoundTrip(out)
-	t.record(h, attemptOutcome(req, resp, err))
-	if err != nil {
+	resp, err := t.Upstream.Transport.RoundTrip(out.WithContext(ctx))
+
+	mu.Lock()
+	if timer != nil {
+		timer.Stop()
+	}
+	fired := !state.CompareAndSwap(headerWaiting, headerReceived)
+	mu.Unlock()
+	if fired && req.Context().Err() == nil {
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		resp, err = nil, ErrResponseHeaderTimeout
+	}
+
+	o := health.Classify(req.Context(), resp, err)
+	t.Upstream.Record(h, o)
+	t.record(h, o.String())
+
+	done := func() {
+		cancel(nil)
 		h.Done()
+	}
+	if err != nil {
+		done()
 		return nil, err
 	}
 	if resp.Body == nil {
-		h.Done()
+		done()
 		return resp, nil
 	}
 	once := new(sync.Once)
 	if rwc, ok := resp.Body.(io.ReadWriteCloser); ok && resp.StatusCode == http.StatusSwitchingProtocols {
-		resp.Body = &rwcBody{ReadWriteCloser: rwc, once: once, done: h.Done}
+		resp.Body = &rwcBody{ReadWriteCloser: rwc, once: once, done: done}
 	} else {
-		resp.Body = &body{ReadCloser: resp.Body, once: once, done: h.Done}
+		resp.Body = &body{ReadCloser: resp.Body, once: once, done: done}
 	}
 	return resp, nil
 }
@@ -48,32 +119,6 @@ func (t *AttemptTransport) record(h *upstream.Host, outcome string) {
 	if t.Attempts != nil {
 		t.Attempts.With(t.Upstream.Name, h.URL.Host, outcome).Inc()
 	}
-}
-
-func attemptOutcome(req *http.Request, resp *http.Response, err error) string {
-	if err == nil {
-		if resp.StatusCode >= 500 {
-			return "status_5xx"
-		}
-		return "success"
-	}
-	switch req.Context().Err() {
-	case context.Canceled:
-		return "canceled"
-	case context.DeadlineExceeded:
-		return "timeout"
-	}
-	if errors.Is(err, context.Canceled) {
-		return "canceled"
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return "timeout"
-	}
-	var ne net.Error
-	if errors.As(err, &ne) && ne.Timeout() {
-		return "timeout"
-	}
-	return "error"
 }
 
 func attemptRequest(req *http.Request, h *upstream.Host) *http.Request {

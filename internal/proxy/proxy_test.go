@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -14,6 +15,8 @@ import (
 	"time"
 
 	"github.com/ok0/lychgate/config"
+	"github.com/ok0/lychgate/internal/clock"
+	"github.com/ok0/lychgate/internal/httperr"
 	"github.com/ok0/lychgate/internal/metrics"
 	"github.com/ok0/lychgate/internal/state"
 	"github.com/ok0/lychgate/internal/upstream"
@@ -21,13 +24,20 @@ import (
 
 func newUpstream(t *testing.T, rawURL string) *upstream.Upstream {
 	t.Helper()
+	return newUpstreamWith(t, config.Upstream{Name: "u", Hosts: []config.Host{{URL: rawURL}}}, upstream.Deps{})
+}
+
+func newUpstreamWith(t *testing.T, cfg config.Upstream, d upstream.Deps) *upstream.Upstream {
+	t.Helper()
 	reg := state.NewRegistry(nil)
 	tx := reg.Begin()
-	up, err := upstream.Build(config.Upstream{Name: "u", Hosts: []config.Host{{URL: rawURL}}}, upstream.Deps{State: tx})
+	d.State = tx
+	up, err := upstream.Build(cfg, d)
 	if err != nil {
 		t.Fatal(err)
 	}
 	lease := tx.Commit()
+	up.Activate()
 	t.Cleanup(func() {
 		reg.Close()
 		_ = lease.Release()
@@ -218,12 +228,12 @@ func TestInFlightUpgrade(t *testing.T) {
 	if line != "ping\n" {
 		t.Errorf("echo = %q, want %q", line, "ping\n")
 	}
-	if got := up.Hosts[0].InFlight(); got != 1 {
+	if got := up.Hosts()[0].InFlight(); got != 1 {
 		t.Errorf("InFlight while open = %d, want 1", got)
 	}
 
 	_ = conn.Close()
-	eventually(t, func() bool { return up.Hosts[0].InFlight() == 0 })
+	eventually(t, func() bool { return up.Hosts()[0].InFlight() == 0 })
 }
 
 func TestInFlightNormal(t *testing.T) {
@@ -248,7 +258,7 @@ func TestInFlightNormal(t *testing.T) {
 	if string(body) != "ok" {
 		t.Errorf("body = %q, want %q", body, "ok")
 	}
-	eventually(t, func() bool { return up.Hosts[0].InFlight() == 0 })
+	eventually(t, func() bool { return up.Hosts()[0].InFlight() == 0 })
 }
 
 func blockUntilDone(t *testing.T, started chan<- struct{}) string {
@@ -291,15 +301,23 @@ func TestAttemptOutcomes(t *testing.T) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	t.Cleanup(unavailable.Close)
-	t.Run("status_5xx", func(t *testing.T) {
-		runAttempt(t, context.Background(), attempts, unavailable.URL, "status_5xx")
+	t.Run("status_5xx_failure", func(t *testing.T) {
+		runAttempt(t, context.Background(), attempts, unavailable.URL, "failure")
+	})
+
+	notFound := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(notFound.Close)
+	t.Run("status_404_ignored", func(t *testing.T) {
+		runAttempt(t, context.Background(), attempts, notFound.URL, "ignored")
 	})
 
 	closed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	closedURL := closed.URL
 	closed.Close()
 	t.Run("error", func(t *testing.T) {
-		runAttempt(t, context.Background(), attempts, closedURL, "error")
+		runAttempt(t, context.Background(), attempts, closedURL, "failure")
 	})
 
 	t.Run("canceled", func(t *testing.T) {
@@ -314,13 +332,103 @@ func TestAttemptOutcomes(t *testing.T) {
 			case <-ctx.Done():
 			}
 		}()
-		runAttempt(t, ctx, attempts, backend, "canceled")
+		runAttempt(t, ctx, attempts, backend, "ignored")
 	})
 
 	t.Run("timeout", func(t *testing.T) {
 		backend := blockUntilDone(t, nil)
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
-		runAttempt(t, ctx, attempts, backend, "timeout")
+		runAttempt(t, ctx, attempts, backend, "failure")
 	})
+}
+
+func silentDial(t *testing.T) upstream.DialFunc {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		client, server := net.Pipe()
+		t.Cleanup(func() { _ = server.Close() })
+		go func() { _, _ = io.Copy(io.Discard, server) }()
+		return client, nil
+	}
+}
+
+func TestResponseHeaderTimeoutFakeClock(t *testing.T) {
+	fake := clock.NewFake(time.Unix(0, 0))
+	up := newUpstreamWith(t, config.Upstream{
+		Name:          "u",
+		Hosts:         []config.Host{{URL: "http://127.0.0.1:9001"}},
+		Timeouts:      config.Timeouts{ResponseHeader: config.Duration(time.Hour)},
+		PassiveHealth: &config.PassiveHealth{},
+	}, upstream.Deps{Dial: silentDial(t), Clock: fake})
+	tr := &AttemptTransport{Upstream: up, Clock: fake}
+	req, err := http.NewRequest(http.MethodGet, "http://upstream.invalid/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	errc := make(chan error, 1)
+	go func() {
+		resp, err := tr.RoundTrip(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		errc <- err
+	}()
+	fake.BlockUntil(1)
+	fake.Advance(time.Hour)
+
+	var got error
+	select {
+	case got = <-errc:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RoundTrip did not return after the response header timeout")
+	}
+	if !errors.Is(got, ErrResponseHeaderTimeout) {
+		t.Fatalf("err = %v, want ErrResponseHeaderTimeout", got)
+	}
+	if status, _ := httperr.FromError(got); status != http.StatusGatewayTimeout {
+		t.Errorf("status = %d, want 504", status)
+	}
+	if n := up.Hosts()[0].InFlight(); n != 0 {
+		t.Errorf("InFlight = %d, want 0", n)
+	}
+	if n := up.Status().Hosts[0].ConsecutiveFailures; n != 1 {
+		t.Errorf("ConsecutiveFailures = %d, want 1", n)
+	}
+}
+
+func TestHeaderTimerStopped(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	t.Cleanup(backend.Close)
+
+	fake := clock.NewFake(time.Unix(0, 0))
+	up := newUpstreamWith(t, config.Upstream{
+		Name:     "u",
+		Hosts:    []config.Host{{URL: backend.URL}},
+		Timeouts: config.Timeouts{ResponseHeader: config.Duration(time.Hour)},
+	}, upstream.Deps{Clock: fake})
+	tr := &AttemptTransport{Upstream: up, Clock: fake}
+	req, err := http.NewRequest(http.MethodGet, "http://upstream.invalid/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := fake.Waiters(); n != 0 {
+		t.Fatalf("Waiters = %d after response headers, want 0", n)
+	}
+	fake.Advance(2 * time.Hour)
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "ok" {
+		t.Errorf("body = %q, want %q", body, "ok")
+	}
 }
