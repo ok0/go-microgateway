@@ -8,7 +8,6 @@ import (
 	"io"
 	"reflect"
 	"regexp"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,9 +26,13 @@ type PathError struct{ Path, Msg string }
 type ValueError struct{ Errors []PathError }
 
 var (
-	lineEntryPattern    = regexp.MustCompile(`^line (\d+): (.*)$`)
-	unknownFieldPattern = regexp.MustCompile(`^field (\S+) not found in type`)
+	lineEntryPattern     = regexp.MustCompile(`^line (\d+): (.*)$`)
+	unknownFieldPattern  = regexp.MustCompile(`^field (\S+) not found in type`)
+	customDecoderPrefix  = regexp.MustCompile(`^column \d+: type \S+: `)
+	customDecoderPattern = regexp.MustCompile(`^column (\d+): type \S+: `)
 )
+
+type pos struct{ line, col int }
 
 // Error implements error.
 func (e *ValueError) Error() string {
@@ -99,13 +102,19 @@ func mergeFloatIntoInt(data []byte, v any, err error) error {
 	var typeErr *yaml.TypeError
 	errors.As(err, &typeErr)
 	var entries []string
+	have := map[string]int{}
 	if typeErr != nil {
 		entries = append(entries, typeErr.Errors...)
+		for _, e := range typeErr.Errors {
+			have[e]++
+		}
 	}
 	for _, e := range extra {
-		if !slices.Contains(entries, e) {
-			entries = append(entries, e)
+		if have[e] > 0 {
+			have[e]--
+			continue
 		}
+		entries = append(entries, e)
 	}
 	sort.SliceStable(entries, func(i, j int) bool {
 		return entryLine(entries[i]) < entryLine(entries[j])
@@ -324,6 +333,8 @@ func DecodeValue(src, v any) (err error) {
 	}
 	lines := make(map[int]string)
 	indexLines(&root, "", lines)
+	at := make(map[pos]string)
+	indexPositions(&root, "", at)
 	err = DecodeStrict(b, v)
 	if err == nil {
 		return nil
@@ -340,13 +351,49 @@ func DecodeValue(src, v any) (err error) {
 			continue
 		}
 		line, _ := strconv.Atoi(m[1])
-		msg := m[2]
+		path := lines[line]
+		if c := customDecoderPattern.FindStringSubmatch(m[2]); c != nil {
+			col, _ := strconv.Atoi(c[1])
+			if p, ok := at[pos{line, col}]; ok {
+				path = p
+			}
+		}
+		msg := customDecoderPrefix.ReplaceAllString(m[2], "")
 		if f := unknownFieldPattern.FindStringSubmatch(msg); f != nil {
 			msg = fmt.Sprintf("unknown field %q", f[1])
 		}
-		ve.Errors = append(ve.Errors, PathError{Path: lines[line], Msg: msg})
+		ve.Errors = append(ve.Errors, PathError{Path: path, Msg: msg})
 	}
 	return ve
+}
+
+func indexPositions(n *yaml.Node, path string, at map[pos]string) {
+	switch n.Kind {
+	case yaml.DocumentNode:
+		if len(n.Content) > 0 {
+			indexPositions(n.Content[0], path, at)
+		}
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			key, val := n.Content[i], n.Content[i+1]
+			p := key.Value
+			if path != "" {
+				p = path + "." + key.Value
+			}
+			if _, ok := at[pos{val.Line, val.Column}]; !ok {
+				at[pos{val.Line, val.Column}] = p
+			}
+			indexPositions(val, p, at)
+		}
+	case yaml.SequenceNode:
+		for i, item := range n.Content {
+			p := fmt.Sprintf("%s[%d]", path, i)
+			if _, ok := at[pos{item.Line, item.Column}]; !ok {
+				at[pos{item.Line, item.Column}] = p
+			}
+			indexPositions(item, p, at)
+		}
+	}
 }
 
 func indexLines(n *yaml.Node, path string, lines map[int]string) {

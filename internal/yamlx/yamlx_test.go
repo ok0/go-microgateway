@@ -2,6 +2,7 @@ package yamlx
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -339,5 +340,99 @@ func TestDecodeValueFloatIntoInteger(t *testing.T) {
 		if ok.Max != 3 {
 			t.Fatalf("value %v: Max = %d, want 3", val, ok.Max)
 		}
+	}
+}
+
+func TestDecodeStrictRepeatedFloatErrors(t *testing.T) {
+	var v struct {
+		A int `yaml:"a"`
+		B int `yaml:"b"`
+	}
+	err := DecodeStrict([]byte("{a: 1.5, b: 1.5}"), &v)
+	var te *yaml.TypeError
+	if !errors.As(err, &te) {
+		t.Fatalf("DecodeStrict() = %v, want *yaml.TypeError", err)
+	}
+	if len(te.Errors) != 2 {
+		t.Fatalf("got %d entries, want 2: %v", len(te.Errors), te.Errors)
+	}
+	if te.Errors[0] != te.Errors[1] {
+		t.Errorf("entries differ: %q and %q", te.Errors[0], te.Errors[1])
+	}
+	if !strings.Contains(te.Errors[0], "into int") {
+		t.Errorf("entry %q does not report the integer field", te.Errors[0])
+	}
+}
+
+type positionedDecoder struct{}
+
+func (p *positionedDecoder) UnmarshalYAML(*yaml.Node) error {
+	return &yaml.TypeError{Errors: []string{"line 1: column 4: type x.T: bad"}}
+}
+
+type scalarOnly struct{}
+
+func (*scalarOnly) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.ScalarNode {
+		return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: column %d: type x.S: must be a string", n.Line, n.Column)}}
+	}
+	return nil
+}
+
+func TestDecodeValueCustomErrorAtFailingNode(t *testing.T) {
+	type target struct {
+		A struct {
+			B scalarOnly `yaml:"b"`
+			C scalarOnly `yaml:"c"`
+		} `yaml:"a"`
+	}
+	tests := []struct {
+		name string
+		src  any
+		want []PathError
+	}{
+		{
+			name: "sequence value",
+			src:  map[string]any{"a": map[string]any{"b": []any{"x"}}},
+			want: []PathError{{Path: "a.b", Msg: "must be a string"}},
+		},
+		{
+			name: "mapping value",
+			src:  map[string]any{"a": map[string]any{"b": map[string]any{"k": "x"}}},
+			want: []PathError{{Path: "a.b", Msg: "must be a string"}},
+		},
+		{
+			name: "sequence after scalar sibling",
+			src:  map[string]any{"a": map[string]any{"b": "ok", "c": []any{"x", "y"}}},
+			want: []PathError{{Path: "a.c", Msg: "must be a string"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var v target
+			err := DecodeValue(tt.src, &v)
+			var ve *ValueError
+			if !errors.As(err, &ve) {
+				t.Fatalf("expected *ValueError, got %T: %v", err, err)
+			}
+			if !slices.Equal(ve.Errors, tt.want) {
+				t.Fatalf("Errors = %v, want %v", ve.Errors, tt.want)
+			}
+		})
+	}
+}
+
+func TestDecodeValueHidesDecoderPosition(t *testing.T) {
+	var v struct {
+		H positionedDecoder `yaml:"h"`
+	}
+	err := DecodeValue(map[string]any{"h": "x"}, &v)
+	var ve *ValueError
+	if !errors.As(err, &ve) {
+		t.Fatalf("expected *ValueError, got %T: %v", err, err)
+	}
+	want := []PathError{{Path: "h", Msg: "bad"}}
+	if !slices.Equal(ve.Errors, want) {
+		t.Fatalf("Errors = %v, want %v", ve.Errors, want)
 	}
 }
