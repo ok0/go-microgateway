@@ -7,6 +7,25 @@ import (
 	"reflect"
 )
 
+// Clone returns a deep copy of c that shares no mutable data with c. Source line information is kept.
+func (c *Config) Clone() *Config {
+	if c == nil {
+		return nil
+	}
+	n := deepCopy(reflect.ValueOf(c)).Interface().(*Config)
+	n.lines = c.lines
+	return n
+}
+
+// Line returns the 1-based source line of the field at path, such as "listeners[0].tls.cert_file", or of its
+// nearest enclosing field, in the document c was parsed from. It returns 0 when c was not parsed from a document.
+func (c *Config) Line(path string) int {
+	if c == nil || c.lines == nil {
+		return 0
+	}
+	return c.lines.lineFor(path)
+}
+
 // Redacted returns a deep copy of c in which every non-empty JWT key secret and every API key hash
 // is replaced by "REDACTED". c itself is not modified.
 func (c *Config) Redacted() *Config {
@@ -53,6 +72,9 @@ func deepCopy(v reflect.Value) reflect.Value {
 	case reflect.Struct:
 		n := reflect.New(v.Type()).Elem()
 		for i := 0; i < v.NumField(); i++ {
+			if !v.Type().Field(i).IsExported() {
+				continue
+			}
 			n.Field(i).Set(deepCopy(v.Field(i)))
 		}
 		return n

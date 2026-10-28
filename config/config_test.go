@@ -272,7 +272,7 @@ func TestFullSchemaAccepted(t *testing.T) {
 	}
 }
 
-func collectSchema(t reflect.Type, prefix string, keys, mapLeaves map[string]bool) {
+func collectSchema(tb testing.TB, t reflect.Type, prefix string, keys, mapLeaves map[string]bool) {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
@@ -280,7 +280,18 @@ func collectSchema(t reflect.Type, prefix string, keys, mapLeaves map[string]boo
 	case reflect.Struct:
 		for i := 0; i < t.NumField(); i++ {
 			f := t.Field(i)
-			name, _, _ := strings.Cut(f.Tag.Get("yaml"), ",")
+			if !f.IsExported() {
+				continue
+			}
+			tag := f.Tag.Get("yaml")
+			if tag == "-" {
+				continue
+			}
+			name, opts, _ := strings.Cut(tag, ",")
+			if name == "" || strings.Contains(","+opts+",", ",inline,") {
+				tb.Errorf("field %s.%s has no explicit yaml key", t.Name(), f.Name)
+				continue
+			}
 			p := name
 			if prefix != "" {
 				p = prefix + "." + name
@@ -293,10 +304,10 @@ func collectSchema(t reflect.Type, prefix string, keys, mapLeaves map[string]boo
 			if ft.Kind() == reflect.Map {
 				mapLeaves[p] = true
 			}
-			collectSchema(f.Type, p, keys, mapLeaves)
+			collectSchema(tb, f.Type, p, keys, mapLeaves)
 		}
 	case reflect.Slice:
-		collectSchema(t.Elem(), prefix+"[]", keys, mapLeaves)
+		collectSchema(tb, t.Elem(), prefix+"[]", keys, mapLeaves)
 	}
 }
 
@@ -328,7 +339,7 @@ func collectNodeKeys(n *yaml.Node, prefix string, mapLeaves, out map[string]bool
 func TestSchemaKeysComplete(t *testing.T) {
 	schema := map[string]bool{}
 	mapLeaves := map[string]bool{}
-	collectSchema(reflect.TypeOf(Config{}), "", schema, mapLeaves)
+	collectSchema(t, reflect.TypeOf(Config{}), "", schema, mapLeaves)
 
 	want := map[string]bool{}
 	for _, k := range wantKeys {

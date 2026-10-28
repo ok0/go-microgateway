@@ -112,6 +112,7 @@ func load(data []byte, dir string, opts []ParseOption) (*Config, error) {
 	if len(errs) > 0 {
 		return nil, newValidationError(errs)
 	}
+	cfg.lines = idx
 	return cfg, nil
 }
 

@@ -18,7 +18,8 @@ type Config struct {
 	// Middlewares are named middleware instances referenced by routes.
 	Middlewares []Middleware `yaml:"middlewares" json:"middlewares"`
 	// Routes map incoming requests to upstreams.
-	Routes []Route `yaml:"routes" json:"routes"`
+	Routes []Route    `yaml:"routes" json:"routes"`
+	lines  *lineIndex // source line index of the parsed document; nil for configurations built in Go
 }
 
 // Global holds process-wide settings. Fields left at their zero value take the defaults noted on each field.
