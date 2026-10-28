@@ -85,7 +85,7 @@ func (m Middleware) BuiltinParams() (any, error) {
 	switch m.Type {
 	case "cors":
 		p := &CORSParams{}
-		derr := DecodeParams(m.Params, p)
+		derr := DecodeParams(m.Params.Reveal(), p)
 		if wholeParamsFailure(derr) {
 			return nil, derr
 		}
@@ -98,7 +98,7 @@ func (m Middleware) BuiltinParams() (any, error) {
 		return p, nil
 	case "headers":
 		p := &HeadersParams{}
-		derr := DecodeParams(m.Params, p)
+		derr := DecodeParams(m.Params.Reveal(), p)
 		if wholeParamsFailure(derr) {
 			return nil, derr
 		}
@@ -110,7 +110,7 @@ func (m Middleware) BuiltinParams() (any, error) {
 		return p, nil
 	case "request_size_limit":
 		p := &RequestSizeLimitParams{}
-		derr := DecodeParams(m.Params, p)
+		derr := DecodeParams(m.Params.Reveal(), p)
 		if wholeParamsFailure(derr) {
 			return nil, derr
 		}

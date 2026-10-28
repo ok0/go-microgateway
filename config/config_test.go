@@ -107,6 +107,36 @@ var wantKeys = []string{
 	"upstreams[].circuit_breaker.open_timeout",
 	"upstreams[].circuit_breaker.half_open_probes",
 	"upstreams[].circuit_breaker.success_threshold",
+	"stores",
+	"stores[].name",
+	"stores[].type",
+	"stores[].redis",
+	"stores[].redis.mode",
+	"stores[].redis.addresses",
+	"stores[].redis.master_name",
+	"stores[].redis.username",
+	"stores[].redis.password",
+	"stores[].redis.sentinel_username",
+	"stores[].redis.sentinel_password",
+	"stores[].redis.db",
+	"stores[].redis.tls",
+	"stores[].redis.tls.enabled",
+	"stores[].redis.tls.ca_file",
+	"stores[].redis.tls.cert_file",
+	"stores[].redis.tls.key_file",
+	"stores[].redis.tls.server_name",
+	"stores[].redis.tls.insecure_skip_verify",
+	"stores[].redis.dial_timeout",
+	"stores[].redis.read_timeout",
+	"stores[].redis.write_timeout",
+	"stores[].redis.pool_size",
+	"stores[].redis.min_idle_conns",
+	"stores[].redis.key_prefix",
+	"stores[].guard",
+	"stores[].guard.consecutive_failures",
+	"stores[].guard.open_timeout",
+	"stores[].guard.max_inflight",
+	"stores[].params",
 	"auth",
 	"auth.jwt",
 	"auth.jwt[].name",
@@ -194,6 +224,9 @@ var wantKeys = []string{
 	"routes[].rate_limit.key.source",
 	"routes[].rate_limit.key.name",
 	"routes[].rate_limit.max_keys",
+	"routes[].rate_limit.store",
+	"routes[].rate_limit.on_store_error",
+	"routes[].rate_limit.store_timeout",
 	"routes[].circuit_breaker",
 	"routes[].circuit_breaker.enabled",
 	"routes[].retry",
@@ -306,8 +339,11 @@ func collectSchema(tb testing.TB, t reflect.Type, prefix string, keys, mapLeaves
 			for ft.Kind() == reflect.Pointer {
 				ft = ft.Elem()
 			}
-			if ft.Kind() == reflect.Map {
+			if ft.Kind() == reflect.Map || ft == reflect.TypeFor[SecretParams]() {
 				mapLeaves[p] = true
+			}
+			if ft == reflect.TypeFor[Secret]() || ft == reflect.TypeFor[SecretParams]() || ft == reflect.TypeFor[SecretURL]() {
+				continue
 			}
 			collectSchema(tb, f.Type, p, keys, mapLeaves)
 		}
@@ -793,7 +829,7 @@ func goConfig(version int) *Config {
 	return &Config{
 		Version:   version,
 		Listeners: []Listener{{Name: "public", Address: ":8080"}},
-		Upstreams: []Upstream{{Name: "users", Hosts: []Host{{URL: "http://127.0.0.1:9001"}}}},
+		Upstreams: []Upstream{{Name: "users", Hosts: []Host{{URL: NewSecretURL("http://127.0.0.1:9001")}}}},
 		Routes:    []Route{{Name: "all", Upstream: "users"}},
 	}
 }

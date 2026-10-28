@@ -75,9 +75,11 @@ func TestCloneIndependent(t *testing.T) {
 
 	c2.Routes[0].Name = "changed"
 	*c2.Upstreams[0].Hosts[0].Weight = 9
-	c2.Middlewares[0].Params["k"] = "x"
-	list := c2.Middlewares[0].Params["list"].([]any)
-	c2.Middlewares[0].Params["list"] = append(list, 3)
+	m := c2.Middlewares[0].Params.Reveal()
+	m["k"] = "x"
+	list := m["list"].([]any)
+	m["list"] = append(list, 3)
+	c2.Middlewares[0].Params = NewSecretParams(m)
 
 	if got := c.Fingerprint(); got != orig {
 		t.Fatalf("original fingerprint changed from %q to %q", orig, got)
@@ -88,17 +90,17 @@ func TestCloneIndependent(t *testing.T) {
 	if *c.Upstreams[0].Hosts[0].Weight != 3 {
 		t.Errorf("original weight = %d", *c.Upstreams[0].Hosts[0].Weight)
 	}
-	if c.Middlewares[0].Params["k"] != "v" {
-		t.Errorf("original param k = %v", c.Middlewares[0].Params["k"])
+	if c.Middlewares[0].Params.Reveal()["k"] != "v" {
+		t.Errorf("original param k = %v", c.Middlewares[0].Params.Reveal()["k"])
 	}
-	if l := c.Middlewares[0].Params["list"].([]any); len(l) != 2 {
+	if l := c.Middlewares[0].Params.Reveal()["list"].([]any); len(l) != 2 {
 		t.Errorf("original list length = %d", len(l))
 	}
 }
 
 func TestCloneAuthIndependent(t *testing.T) {
 	c := parseClone(t)
-	c.Auth.APIKeys[0].FileKeys = []APIKey{{ID: "file-1", Hash: "sha256:" + strings.Repeat("b", 64), Consumer: "filer", Scopes: []string{"read"}}}
+	c.Auth.APIKeys[0].FileKeys = []APIKey{{ID: "file-1", Hash: NewSecret("sha256:" + strings.Repeat("b", 64)), Consumer: "filer", Scopes: []string{"read"}}}
 	orig := c.Fingerprint()
 
 	c2 := c.Clone()

@@ -1,0 +1,166 @@
+version: 1
+listeners:
+  - name: public
+    address: ":8080"
+upstreams:
+  - name: users
+    hosts:
+      - url: "http://127.0.0.1:9001"
+stores:
+  - name: dup
+    type: custom
+  - name: dup
+    type: custom
+  - name: -bad
+    type: custom
+  - name: empty-type
+  - name: wrong-block
+    type: memcache
+    redis:
+      addresses: ["127.0.0.1:11211"]
+  - name: no-block
+    type: redis
+  - name: params-redis
+    type: redis
+    redis:
+      addresses: ["10.0.0.1:6379"]
+    params:
+      k: v
+  - name: bad-mode
+    type: redis
+    redis:
+      mode: ring
+      password: p4ss-UNIQUE-1
+      addresses: ["10.0.0.2:6379"]
+  - name: two-standalone
+    type: redis
+    redis:
+      mode: standalone
+      addresses: ["10.0.0.3:6379", "10.0.0.4:6379"]
+  - name: dup-address
+    type: redis
+    redis:
+      mode: cluster
+      addresses: ["10.0.0.5:6379", "10.0.0.5:6379"]
+  - name: scheme-address
+    type: redis
+    redis:
+      addresses: ["redis://h:1"]
+  - name: userinfo-address
+    type: redis
+    redis:
+      addresses: ["u@h:1"]
+  - name: zero-port
+    type: redis
+    redis:
+      addresses: ["h:0"]
+  - name: sentinel-no-master
+    type: redis
+    redis:
+      mode: sentinel
+      addresses: ["10.0.0.6:26379"]
+  - name: master-on-standalone
+    type: redis
+    redis:
+      master_name: mymaster
+      addresses: ["10.0.0.7:6379"]
+  - name: cluster-db
+    type: redis
+    redis:
+      mode: cluster
+      db: 1
+      addresses: ["10.0.0.8:6379"]
+  - name: cert-no-key
+    type: redis
+    redis:
+      addresses: ["10.0.0.9:6379"]
+      tls:
+        enabled: true
+        cert_file: client.crt
+  - name: ca-disabled
+    type: redis
+    redis:
+      addresses: ["10.0.0.10:6379"]
+      tls:
+        enabled: false
+        ca_file: ca.pem
+  - name: zero-dial
+    type: redis
+    redis:
+      addresses: ["10.0.0.11:6379"]
+      dial_timeout: 0s
+  - name: negative-pool
+    type: redis
+    redis:
+      addresses: ["10.0.0.12:6379"]
+      pool_size: -1
+  - name: idle-over-pool
+    type: redis
+    redis:
+      addresses: ["10.0.0.13:6379"]
+      pool_size: 2
+      min_idle_conns: 5
+  - name: brace-prefix
+    type: redis
+    redis:
+      addresses: ["10.0.0.14:6379"]
+      key_prefix: "a{b"
+  - name: zero-failures
+    type: custom
+    guard:
+      consecutive_failures: 0
+  - name: zero-open
+    type: custom
+    guard:
+      open_timeout: 0s
+  - name: zero-inflight
+    type: custom
+    guard:
+      max_inflight: 0
+  - name: float-inflight
+    type: custom
+    guard:
+      max_inflight: 1e3
+  - name: float-db
+    type: redis
+    redis:
+      addresses: ["10.0.0.15:6379"]
+      db: 1.5
+  - name: float-pool
+    type: redis
+    redis:
+      addresses: ["10.0.0.16:6379"]
+      pool_size: 2.0
+  - name: overflow-db
+    type: redis
+    redis:
+      addresses: ["10.0.0.17:6379"]
+      db: 99999999999999999999
+routes:
+  - name: limited
+    upstream: users
+    match:
+      path: /limited
+    rate_limit:
+      algorithm: token_bucket
+      rate: 10
+      store: dup
+      store_timeout: 0s
+      on_store_error: maybe
+  - name: no-store-options
+    upstream: users
+    match:
+      path: /no-store
+    rate_limit:
+      algorithm: token_bucket
+      rate: 10
+      on_store_error: deny
+      store_timeout: 10ms
+  - name: unknown-store
+    upstream: users
+    match:
+      path: /unknown
+    rate_limit:
+      algorithm: token_bucket
+      rate: 10
+      store: nothing

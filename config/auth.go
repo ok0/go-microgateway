@@ -24,7 +24,10 @@ import (
 // maxKeyFileBytes bounds the size of a key file.
 const maxKeyFileBytes = 1 << 20
 
-var yamlValueRe = regexp.MustCompile("`[^`]*`")
+var (
+	yamlValueRe = regexp.MustCompile("`[^`]*`")
+	yamlTypeRe  = regexp.MustCompile(`column \d+: type \S+: `)
+)
 
 // checkAuth validates every provider and returns the kind ("jwt" or "apikey") of each provider name.
 func checkAuth(ck *checker, a *Auth) map[string]string {
@@ -109,8 +112,8 @@ func checkJWT(ck *checker, p string, j *JWTProvider) {
 			continue
 		}
 		n := 0
-		for _, s := range []string{key.Secret, key.PublicKey, key.PublicKeyFile} {
-			if s != "" {
+		for _, set := range []bool{!key.Secret.IsZero(), key.PublicKey != "", key.PublicKeyFile != ""} {
+			if set {
 				n++
 			}
 		}
@@ -125,15 +128,15 @@ func checkJWT(ck *checker, p string, j *JWTProvider) {
 			if key.PublicKeyFile != "" {
 				ck.add(kp+".public_key_file", "is not allowed with HS algorithms")
 			}
-			if key.Secret != "" {
-				if err := authkey.Check(alg, []byte(key.Secret)); err != nil {
+			if !key.Secret.IsZero() {
+				if err := authkey.Check(alg, []byte(key.Secret.Reveal())); err != nil {
 					ck.add(kp+".secret", err.Error())
 				}
 			}
 			continue
 		}
 		hasAsym = true
-		if key.Secret != "" {
+		if !key.Secret.IsZero() {
 			ck.add(kp+".secret", "is allowed only with HS algorithms")
 		}
 		pemText, path := key.PublicKey, kp+".public_key"
@@ -157,7 +160,7 @@ func checkJWT(ck *checker, p string, j *JWTProvider) {
 	}
 	if jw := j.JWKS; jw != nil {
 		jp := p + ".jwks"
-		u, err := url.Parse(jw.URL)
+		u, err := url.Parse(jw.URL.Reveal())
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			ck.add(jp+".url", "must be an http or https URL")
 		}
@@ -218,7 +221,7 @@ func checkAPIKeys(ck *checker, p string, a *APIKeyProvider) {
 	fileHashes := map[string]bool{}
 	for _, fk := range a.FileKeys {
 		fileIDs[fk.ID] = true
-		fileHashes[strings.ToLower(fk.Hash)] = true
+		fileHashes[strings.ToLower(fk.Hash.Reveal())] = true
 	}
 	ids := map[string]bool{}
 	hashes := map[string]bool{}
@@ -236,10 +239,10 @@ func checkAPIKeys(ck *checker, p string, a *APIKeyProvider) {
 		if key.ID != "" && fileIDs[key.ID] {
 			ck.add(kp+".id", fmt.Sprintf("duplicate id %q (also in key_file)", key.ID))
 		}
-		if !apiKeyHash.MatchString(key.Hash) {
+		if !apiKeyHash.MatchString(key.Hash.Reveal()) {
 			ck.add(kp+".hash", "must have the form sha256:<64 hex digits>")
 		} else {
-			h := strings.ToLower(key.Hash)
+			h := strings.ToLower(key.Hash.Reveal())
 			switch {
 			case hashes[h]:
 				ck.add(kp+".hash", "duplicate hash")
@@ -466,10 +469,10 @@ func checkFileKeys(path, file string, keys []APIKey, idx *lineIndex) []FieldErro
 		default:
 			ids[key.ID] = true
 		}
-		if !apiKeyHash.MatchString(key.Hash) {
+		if !apiKeyHash.MatchString(key.Hash.Reveal()) {
 			report(k, "hash", "must have the form sha256:<64 hex digits>")
 		} else {
-			h := strings.ToLower(key.Hash)
+			h := strings.ToLower(key.Hash.Reveal())
 			if hashes[h] {
 				report(k, "hash", "duplicate hash")
 			}
@@ -516,9 +519,10 @@ func readSmall(path string) ([]byte, error) {
 	return data, nil
 }
 
-// sanitizeYAML replaces every backquoted value in a YAML error message so that no content of a file is echoed.
+// sanitizeYAML replaces every backquoted value in a YAML error message so that no content of a file is echoed, and removes
+// the column and type prefix of custom decoder errors.
 func sanitizeYAML(msg string) string {
-	return yamlValueRe.ReplaceAllString(msg, "`…`")
+	return yamlTypeRe.ReplaceAllString(yamlValueRe.ReplaceAllString(msg, "`…`"), "")
 }
 
 // KeyFiles returns the absolute key_file and public_key_file paths referenced by c, in configuration order, without duplicates.

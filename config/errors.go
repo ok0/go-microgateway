@@ -50,6 +50,11 @@ func newValidationError(errs []FieldError) *ValidationError {
 	return &ValidationError{Errors: errs}
 }
 
+// NewValidationError returns a *ValidationError holding errs, sorted by line and then by path.
+func NewValidationError(errs []FieldError) *ValidationError {
+	return newValidationError(errs)
+}
+
 func compareFieldErrors(a, b FieldError) int {
 	if (a.Line > 0) != (b.Line > 0) {
 		if a.Line > 0 {

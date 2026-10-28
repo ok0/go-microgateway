@@ -89,9 +89,10 @@ func closingBrace(s string, start int) int {
 }
 
 // substituteEnv applies expand to every string in *c: string struct fields, string slice elements,
-// map[string]string values and strings inside map[string]any and []any values. YAML keys, numbers,
-// booleans and Duration values are not touched, and map keys are never substituted. Each problem
-// becomes a FieldError at the path of the value; a value with a problem is left unchanged.
+// map[string]string values and strings inside map[string]any and []any values. Secret, SecretURL and
+// SecretParams values (including header values and middleware params) are substituted and re-wrapped.
+// YAML keys, numbers, booleans and Duration values are not touched, and map keys are never substituted.
+// Each problem becomes a FieldError at the path of the value; a value with a problem is left unchanged.
 func substituteEnv(c *Config, lookup func(string) (string, bool)) []FieldError {
 	var errs []FieldError
 	substituteValue(reflect.ValueOf(c).Elem(), "", lookup, &errs)
@@ -99,6 +100,44 @@ func substituteEnv(c *Config, lookup func(string) (string, bool)) []FieldError {
 }
 
 func substituteValue(v reflect.Value, path string, lookup func(string) (string, bool), errs *[]FieldError) {
+	if v.Type() == reflect.TypeFor[Secret]() {
+		s := v.Interface().(Secret).Reveal()
+		out, problems := expand(s, lookup)
+		if len(problems) > 0 {
+			for _, p := range problems {
+				*errs = append(*errs, FieldError{Path: path, Msg: p})
+			}
+			return
+		}
+		if out != s {
+			v.Set(reflect.ValueOf(NewSecret(out)))
+		}
+		return
+	}
+	if v.Type() == reflect.TypeFor[SecretURL]() {
+		s := v.Interface().(SecretURL).Reveal()
+		out, problems := expand(s, lookup)
+		if len(problems) > 0 {
+			for _, p := range problems {
+				*errs = append(*errs, FieldError{Path: path, Msg: p})
+			}
+			return
+		}
+		if out != s {
+			v.Set(reflect.ValueOf(NewSecretURL(out)))
+		}
+		return
+	}
+	if v.Type() == reflect.TypeFor[SecretParams]() {
+		p := v.Interface().(SecretParams)
+		if p.IsZero() {
+			return
+		}
+		m := p.Reveal()
+		substituteValue(reflect.ValueOf(&m).Elem(), path, lookup, errs)
+		v.Set(reflect.ValueOf(NewSecretParams(m)))
+		return
+	}
 	switch v.Kind() {
 	case reflect.Struct:
 		t := v.Type()

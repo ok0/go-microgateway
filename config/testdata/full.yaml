@@ -86,6 +86,45 @@ upstreams:
       port: 8080
       scheme: http
       refresh_interval: 15s
+stores:
+  - name: shared-redis
+    type: redis
+    redis:
+      mode: sentinel
+      addresses:
+        - "10.0.1.10:26379"
+        - "10.0.1.11:26379"
+      master_name: mymaster
+      username: lychgate
+      password: example-redis-password
+      sentinel_username: sentinel-user
+      sentinel_password: example-sentinel-password
+      db: 2
+      tls:
+        enabled: true
+        ca_file: certs/redis-ca.pem
+        cert_file: certs/redis-client.crt
+        key_file: certs/redis-client.key
+        server_name: redis.internal.example.com
+        insecure_skip_verify: false
+      dial_timeout: 1s
+      read_timeout: 500ms
+      write_timeout: 500ms
+      pool_size: 16
+      min_idle_conns: 2
+      key_prefix: lychgate
+  - name: custom-backend
+    type: external
+    guard:
+      consecutive_failures: 4
+      open_timeout: 5s
+      max_inflight: 256
+    params:
+      endpoint: https://limits.example.com
+      nested:
+        token: example-token
+        tiers:
+          - gold
 auth:
   jwt:
     - name: jwt-hs
@@ -275,6 +314,9 @@ routes:
       key:
         source: ip
       max_keys: 1000
+      store: custom-backend
+      on_store_error: deny
+      store_timeout: 20ms
   - name: partners-api
     match:
       path: /partners

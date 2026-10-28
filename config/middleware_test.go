@@ -6,10 +6,12 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/ok0/lychgate/internal/leakcheck"
 )
 
 func TestBuiltinParamsDefaults(t *testing.T) {
-	v, err := Middleware{Name: "c", Type: "cors", Params: map[string]any{"allowed_origins": []any{"https://a.example"}}}.BuiltinParams()
+	v, err := Middleware{Name: "c", Type: "cors", Params: NewSecretParams(map[string]any{"allowed_origins": []any{"https://a.example"}})}.BuiltinParams()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -24,9 +26,9 @@ func TestBuiltinParamsDefaults(t *testing.T) {
 		t.Errorf("AllowedOrigins = %v, want %v", cp.AllowedOrigins, want)
 	}
 
-	v, err = Middleware{Name: "h", Type: "headers", Params: map[string]any{
+	v, err = Middleware{Name: "h", Type: "headers", Params: NewSecretParams(map[string]any{
 		"request": map[string]any{"set": map[string]any{"X-Env": "prod"}},
-	}}.BuiltinParams()
+	})}.BuiltinParams()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,11 +36,11 @@ func TestBuiltinParamsDefaults(t *testing.T) {
 	if !ok {
 		t.Fatalf("got %T, want *HeadersParams", v)
 	}
-	if got := hp.Request.Set["X-Env"]; got != "prod" {
+	if got := hp.Request.Set["X-Env"].Reveal(); got != "prod" {
 		t.Errorf("Request.Set[X-Env] = %q, want prod", got)
 	}
 
-	v, err = Middleware{Name: "l", Type: "request_size_limit", Params: map[string]any{"max_bytes": 1024}}.BuiltinParams()
+	v, err = Middleware{Name: "l", Type: "request_size_limit", Params: NewSecretParams(map[string]any{"max_bytes": 1024})}.BuiltinParams()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +74,7 @@ func TestBuiltinParamsErrors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := Middleware{Name: "m", Type: tc.typ, Params: tc.params}.BuiltinParams()
+			_, err := Middleware{Name: "m", Type: tc.typ, Params: NewSecretParams(tc.params)}.BuiltinParams()
 			var pe *ParamsError
 			if !errors.As(err, &pe) {
 				t.Fatalf("got %T (%v), want *ParamsError", err, err)
@@ -124,7 +126,7 @@ func TestBuiltinParamsMergedErrors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			v, err := Middleware{Name: "m", Type: tc.typ, Params: tc.params}.BuiltinParams()
+			v, err := Middleware{Name: "m", Type: tc.typ, Params: NewSecretParams(tc.params)}.BuiltinParams()
 			if v != nil {
 				t.Errorf("value = %v, want nil", v)
 			}
@@ -143,6 +145,47 @@ func TestBuiltinParamsMergedErrors(t *testing.T) {
 				last := pe.Errors[len(pe.Errors)-1]
 				if !strings.Contains(last.Msg, tc.wantLastSub) {
 					t.Errorf("last message = %q, want it to contain %q", last.Msg, tc.wantLastSub)
+				}
+			}
+		})
+	}
+}
+
+func TestHeadersParamsSecretValues(t *testing.T) {
+	v, err := Middleware{Name: "h", Type: "headers", Params: NewSecretParams(map[string]any{
+		"request": map[string]any{"set": map[string]any{"Authorization": "Bearer hv-LEAK-1"}},
+	})}.BuiltinParams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hp := v.(*HeadersParams)
+	if got := hp.Request.Set["Authorization"].Reveal(); got != "Bearer hv-LEAK-1" {
+		t.Errorf("Request.Set[Authorization].Reveal() = %q, want the configured value", got)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		value  any
+		secret string
+	}{
+		{"list value", []any{"hv-LEAK-2"}, "hv-LEAK-2"},
+		{"mapping value", map[string]any{"a": "hv-LEAK-3"}, "hv-LEAK-3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Middleware{Name: "h", Type: "headers", Params: NewSecretParams(map[string]any{
+				"request": map[string]any{"set": map[string]any{"Authorization": tc.value}},
+			})}.BuiltinParams()
+			var pe *ParamsError
+			if !errors.As(err, &pe) {
+				t.Fatalf("got %T (%v), want *ParamsError", err, err)
+			}
+			want := []FieldError{{Path: "request.set.Authorization", Msg: "must be a string"}}
+			if len(pe.Errors) != len(want) || pe.Errors[0].Path != want[0].Path || pe.Errors[0].Msg != want[0].Msg {
+				t.Errorf("errors = %v, want %v", pe.Errors, want)
+			}
+			for _, form := range leakcheck.Forms(tc.secret) {
+				if strings.Contains(err.Error(), form) {
+					t.Errorf("error text contains secret form %q: %v", form, err)
 				}
 			}
 		})

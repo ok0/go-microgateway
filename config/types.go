@@ -13,6 +13,8 @@ type Config struct {
 	Admin Admin `yaml:"admin" json:"admin"`
 	// Upstreams are the backend pools that routes forward to.
 	Upstreams []Upstream `yaml:"upstreams" json:"upstreams"`
+	// Stores are the named backing stores that rate limits reference by name.
+	Stores []Store `yaml:"stores" json:"stores"`
 	// Auth declares the authentication providers.
 	Auth Auth `yaml:"auth" json:"auth"`
 	// Middlewares are named middleware instances referenced by routes.
@@ -126,8 +128,8 @@ type Upstream struct {
 
 // Host is one static backend address. Fields left at their zero value take the defaults noted on each field.
 type Host struct {
-	// URL is the backend base URL, with an http or https scheme.
-	URL string `yaml:"url" json:"url"`
+	// URL is the backend base URL, with an http or https scheme. Reveal returns the value; every formatting and encoding path redacts its userinfo and query values.
+	URL SecretURL `yaml:"url" json:"url"`
 	// Weight is the relative share of traffic. Default 1 when absent; 0 means the host is never selected.
 	Weight *int `yaml:"weight" json:"weight"`
 }
@@ -276,8 +278,8 @@ type JWTKey struct {
 	KID string `yaml:"kid" json:"kid"`
 	// Algorithm is the signing algorithm the key verifies.
 	Algorithm string `yaml:"algorithm" json:"algorithm"`
-	// Secret is the shared secret for HS algorithms.
-	Secret string `yaml:"secret" json:"secret"`
+	// Secret is the shared secret for HS algorithms. Reveal returns the value; every formatting and encoding path redacts it.
+	Secret Secret `yaml:"secret" json:"secret"`
 	// PublicKey is a PEM encoded public key for asymmetric algorithms.
 	PublicKey string `yaml:"public_key" json:"public_key"`
 	// PublicKeyFile is a path to a PEM encoded public key.
@@ -288,8 +290,8 @@ type JWTKey struct {
 
 // JWKS describes a remote JSON Web Key Set. Pointer fields take their default only when absent; other fields left at their zero value take the defaults noted on each field.
 type JWKS struct {
-	// URL is the http or https location of the key set.
-	URL string `yaml:"url" json:"url"`
+	// URL is the http or https location of the key set. Reveal returns the value; every formatting and encoding path redacts its userinfo and query values.
+	URL SecretURL `yaml:"url" json:"url"`
 	// Algorithms lists the asymmetric algorithms accepted from the key set; required.
 	Algorithms []string `yaml:"algorithms" json:"algorithms"`
 	// TTL is how long fetched keys are used before refresh. Default 10m when absent; must be positive.
@@ -326,8 +328,8 @@ type APIKeyProvider struct {
 type APIKey struct {
 	// ID identifies the key and must be unique within its provider.
 	ID string `yaml:"id" json:"id"`
-	// Hash is the key digest in the form sha256:<64 hex digits>.
-	Hash string `yaml:"hash" json:"hash"`
+	// Hash is the key digest in the form sha256:<64 hex digits>. Reveal returns the value; every formatting and encoding path redacts it.
+	Hash Secret `yaml:"hash" json:"hash"`
 	// Consumer names the client the key belongs to.
 	Consumer string `yaml:"consumer" json:"consumer"`
 	// Metadata holds extra values forwarded with the consumer.
@@ -350,8 +352,8 @@ type Middleware struct {
 	Name string `yaml:"name" json:"name"`
 	// Type selects the middleware implementation.
 	Type string `yaml:"type" json:"type"`
-	// Params carries implementation specific settings.
-	Params map[string]any `yaml:"params" json:"params"`
+	// Params carries implementation specific settings. Params are secret: every leaf is redacted when formatted or encoded; keys are kept.
+	Params SecretParams `yaml:"params" json:"params"`
 }
 
 // Route maps matching requests to an upstream. Fields left at their zero value take the defaults noted on each field.
@@ -398,8 +400,8 @@ type Match struct {
 	PathType string `yaml:"path_type" json:"path_type"`
 	// Methods lists HTTP methods; empty matches any method.
 	Methods []string `yaml:"methods" json:"methods"`
-	// Headers lists header values the request must carry.
-	Headers map[string]string `yaml:"headers" json:"headers"`
+	// Headers lists header values the request must carry. Values are secrets: Reveal returns the value; every formatting and encoding path redacts it.
+	Headers map[string]Secret `yaml:"headers" json:"headers"`
 }
 
 // Rewrite changes the request path before it is forwarded.
@@ -418,12 +420,12 @@ type ReplacePrefix struct {
 	To string `yaml:"to" json:"to"`
 }
 
-// HeaderOps edits headers. Add and Set map header names to values; Remove lists header names.
+// HeaderOps edits headers. Add and Set map header names to values; Remove lists header names. Values are secrets: Reveal returns the value; every formatting and encoding path redacts it.
 type HeaderOps struct {
 	// Add appends values to the named headers.
-	Add map[string]string `yaml:"add" json:"add"`
+	Add map[string]Secret `yaml:"add" json:"add"`
 	// Set replaces the named headers.
-	Set map[string]string `yaml:"set" json:"set"`
+	Set map[string]Secret `yaml:"set" json:"set"`
 	// Remove deletes the named headers.
 	Remove []string `yaml:"remove" json:"remove"`
 }
@@ -452,14 +454,62 @@ type Require struct {
 
 // RateLimit configures request rate limiting. Pointer fields distinguish absent from explicit zero: an absent field takes its default, while an explicit zero or negative value is a validation error and is never replaced by a default.
 type RateLimit struct {
-	Algorithm string       `yaml:"algorithm" json:"algorithm"` // token_bucket | sliding_window. Default "token_bucket".
-	Rate      *int64       `yaml:"rate" json:"rate"`           // tokens per Per; required for token_bucket; >= 1.
-	Per       *Duration    `yaml:"per" json:"per"`             // token_bucket only. Default 1s when absent; > 0.
-	Burst     *int64       `yaml:"burst" json:"burst"`         // token_bucket only. Default equal to Rate when absent; >= 1.
-	Limit     *int64       `yaml:"limit" json:"limit"`         // requests per Window; required for sliding_window; >= 1.
-	Window    *Duration    `yaml:"window" json:"window"`       // sliding_window only. Default 1m when absent; > 0.
-	Key       RateLimitKey `yaml:"key" json:"key"`
-	MaxKeys   *int         `yaml:"max_keys" json:"max_keys"` // keys kept in memory per instance. Default 100000 when absent; >= 1.
+	Algorithm    string       `yaml:"algorithm" json:"algorithm"` // token_bucket | sliding_window. Default "token_bucket".
+	Rate         *int64       `yaml:"rate" json:"rate"`           // tokens per Per; required for token_bucket; >= 1.
+	Per          *Duration    `yaml:"per" json:"per"`             // token_bucket only. Default 1s when absent; > 0.
+	Burst        *int64       `yaml:"burst" json:"burst"`         // token_bucket only. Default equal to Rate when absent; >= 1.
+	Limit        *int64       `yaml:"limit" json:"limit"`         // requests per Window; required for sliding_window; >= 1.
+	Window       *Duration    `yaml:"window" json:"window"`       // sliding_window only. Default 1m when absent; > 0.
+	Key          RateLimitKey `yaml:"key" json:"key"`
+	MaxKeys      *int         `yaml:"max_keys" json:"max_keys"`             // keys kept in memory per instance. Default 100000 when absent; >= 1.
+	Store        string       `yaml:"store" json:"store"`                   // named store holding the counters; empty keeps them in memory per instance.
+	OnStoreError string       `yaml:"on_store_error" json:"on_store_error"` // local|allow|deny when the store fails. Default local when store is set.
+	StoreTimeout *Duration    `yaml:"store_timeout" json:"store_timeout"`   // bound on each store call. Default 50ms when store is set; > 0.
+}
+
+// Store declares a named backing store that rate limits can reference.
+type Store struct {
+	Name   string       `yaml:"name" json:"name"`
+	Type   string       `yaml:"type" json:"type"`
+	Redis  *RedisStore  `yaml:"redis" json:"redis"`
+	Guard  StoreGuard   `yaml:"guard" json:"guard"`
+	Params SecretParams `yaml:"params" json:"params"`
+}
+
+// StoreGuard bounds how a store is called. Pointer fields take their default only when absent.
+type StoreGuard struct {
+	ConsecutiveFailures *int      `yaml:"consecutive_failures" json:"consecutive_failures"`
+	OpenTimeout         *Duration `yaml:"open_timeout" json:"open_timeout"`
+	MaxInflight         *int      `yaml:"max_inflight" json:"max_inflight"`
+}
+
+// RedisStore configures a Redis backed store. Fields left at their zero value take the defaults noted in the store checks.
+type RedisStore struct {
+	Mode             string    `yaml:"mode" json:"mode"`
+	Addresses        []string  `yaml:"addresses" json:"addresses"`
+	MasterName       string    `yaml:"master_name" json:"master_name"`
+	Username         string    `yaml:"username" json:"username"`
+	Password         Secret    `yaml:"password" json:"password"`
+	SentinelUsername string    `yaml:"sentinel_username" json:"sentinel_username"`
+	SentinelPassword Secret    `yaml:"sentinel_password" json:"sentinel_password"`
+	DB               int       `yaml:"db" json:"db"`
+	TLS              *RedisTLS `yaml:"tls" json:"tls"`
+	DialTimeout      *Duration `yaml:"dial_timeout" json:"dial_timeout"`
+	ReadTimeout      *Duration `yaml:"read_timeout" json:"read_timeout"`
+	WriteTimeout     *Duration `yaml:"write_timeout" json:"write_timeout"`
+	PoolSize         int       `yaml:"pool_size" json:"pool_size"`
+	MinIdleConns     int       `yaml:"min_idle_conns" json:"min_idle_conns"`
+	KeyPrefix        *string   `yaml:"key_prefix" json:"key_prefix"`
+}
+
+// RedisTLS configures TLS towards Redis servers.
+type RedisTLS struct {
+	Enabled            bool   `yaml:"enabled" json:"enabled"`
+	CAFile             string `yaml:"ca_file" json:"ca_file"`
+	CertFile           string `yaml:"cert_file" json:"cert_file"`
+	KeyFile            string `yaml:"key_file" json:"key_file"`
+	ServerName         string `yaml:"server_name" json:"server_name"`
+	InsecureSkipVerify bool   `yaml:"insecure_skip_verify" json:"insecure_skip_verify"`
 }
 
 // RateLimitKey selects the attribute limits are applied per. Fields left at their zero value take the defaults noted on each field.

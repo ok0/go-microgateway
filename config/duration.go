@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"time"
 
 	"go.yaml.in/yaml/v3"
@@ -25,13 +26,14 @@ func (d Duration) String() string {
 // UnmarshalYAML decodes a scalar holding a duration string. An invalid value is reported as a
 // *yaml.TypeError so that decoding of the rest of the document continues.
 func (d *Duration) UnmarshalYAML(n *yaml.Node) error {
-	if n.Kind == yaml.ScalarNode {
-		if v, err := time.ParseDuration(n.Value); err == nil {
-			*d = Duration(v)
-			return nil
-		}
+	if n.Kind != yaml.ScalarNode {
+		return decodeError(n, reflect.TypeFor[Duration](), `must be a duration string such as "250ms" or "5s"`)
 	}
-	return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: invalid duration %q (use a value such as \"250ms\" or \"5s\")", n.Line, n.Value)}}
+	if v, err := time.ParseDuration(n.Value); err == nil {
+		*d = Duration(v)
+		return nil
+	}
+	return decodeError(n, reflect.TypeFor[Duration](), fmt.Sprintf("invalid duration %q (use a value such as \"250ms\" or \"5s\")", n.Value))
 }
 
 // MarshalYAML encodes d as its duration string.

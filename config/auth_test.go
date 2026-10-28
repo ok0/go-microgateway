@@ -405,8 +405,8 @@ func TestKeyMaterialLoading(t *testing.T) {
 		d := goConfig(1)
 		d.Auth.APIKeys = []APIKeyProvider{{
 			Name:     "inline",
-			Keys:     []APIKey{{ID: "inline-1", Hash: testHash, Consumer: "alice"}},
-			FileKeys: []APIKey{{ID: "stale", Hash: testHash, Consumer: "stale"}},
+			Keys:     []APIKey{{ID: "inline-1", Hash: NewSecret(testHash), Consumer: "alice"}},
+			FileKeys: []APIKey{{ID: "stale", Hash: NewSecret(testHash), Consumer: "stale"}},
 		}}
 		if err := d.Validate(); err != nil {
 			t.Fatal(err)

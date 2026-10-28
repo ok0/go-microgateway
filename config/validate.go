@@ -18,13 +18,20 @@ import (
 )
 
 // Validate reloads the key files referenced by c, applies defaults to c, then checks it. It returns a
-// *ValidationError (line numbers are 0) or nil. Relative key file paths resolve against the working directory.
+// *ValidationError or nil. Line numbers come from the document c was parsed from (Parse and LoadFile, kept by
+// Clone): each error carries the line of its field or of the nearest enclosing field declared there. They are 0
+// for configurations built in Go. Relative key file paths resolve against the working directory.
 func (c *Config) Validate() error {
 	errs := loadKeyMaterial(c, "")
 	c.applyDefaults()
 	errs = append(errs, c.validate()...)
 	if len(errs) == 0 {
 		return nil
+	}
+	for i := range errs {
+		if errs[i].Line == 0 && errs[i].Path != "" {
+			errs[i].Line = c.lines.lineFor(errs[i].Path)
+		}
 	}
 	return newValidationError(errs)
 }
@@ -55,7 +62,8 @@ func (c *Config) validate() []FieldError {
 	kinds := checkAuth(ck, &c.Auth)
 	checkIdentityHeaders(ck, c)
 	checkMiddlewares(ck, c.Middlewares)
-	checkRoutes(ck, c, kinds)
+	names := checkStores(ck, c.Stores)
+	checkRoutes(ck, c, kinds, names)
 	return ck.errs
 }
 
@@ -227,9 +235,14 @@ func checkUpstreams(ck *checker, ups []Upstream) {
 }
 
 func checkHost(ck *checker, p string, h *Host) {
-	u, err := url.Parse(h.URL)
+	raw := h.URL.Reveal()
+	u, err := url.Parse(raw)
 	switch {
 	case err != nil:
+		if RedactURL(raw) != raw {
+			ck.add(p+".url", "invalid URL")
+			break
+		}
 		detail := err
 		var ue *url.Error
 		if errors.As(err, &ue) {
@@ -383,7 +396,7 @@ func checkMiddlewares(ck *checker, ms []Middleware) {
 		if ms[i].Type == "" {
 			ck.add(p+".type", "is required")
 		}
-		if hasNonStringKeys(ms[i].Params) {
+		if hasNonStringKeys(ms[i].Params.Reveal()) {
 			ck.add(p+".params", "keys must be strings")
 		} else if slices.Contains(BuiltinMiddlewareTypes, ms[i].Type) {
 			checkBuiltinParams(ck, p, &ms[i])
@@ -434,7 +447,7 @@ func hasNonStringKeys(v any) bool {
 	return false
 }
 
-func checkRoutes(ck *checker, c *Config, kinds map[string]string) {
+func checkRoutes(ck *checker, c *Config, kinds map[string]string, storeNames map[string]bool) {
 	upstreams := map[string]bool{}
 	for _, u := range c.Upstreams {
 		upstreams[u.Name] = true
@@ -463,6 +476,7 @@ func checkRoutes(ck *checker, c *Config, kinds map[string]string) {
 		}
 		if r.RateLimit != nil {
 			checkRateLimit(ck, p+".rate_limit", r)
+			checkRateLimitStore(ck, p+".rate_limit", r.RateLimit, storeNames)
 		}
 		if r.Retry != nil {
 			checkRetry(ck, p+".retry", r.Retry)
@@ -622,6 +636,27 @@ func checkRateLimit(ck *checker, p string, r *Route) {
 	}
 }
 
+func checkRateLimitStore(ck *checker, p string, rl *RateLimit, names map[string]bool) {
+	if rl.Store == "" {
+		if rl.OnStoreError != "" {
+			ck.add(p+".on_store_error", "is only valid with store")
+		}
+		if rl.StoreTimeout != nil {
+			ck.add(p+".store_timeout", "is only valid with store")
+		}
+		return
+	}
+	if !names[rl.Store] {
+		ck.add(p+".store", fmt.Sprintf("store %q is not defined in stores", rl.Store))
+	}
+	if !slices.Contains([]string{"local", "allow", "deny"}, rl.OnStoreError) {
+		ck.add(p+".on_store_error", "must be one of local, allow, deny")
+	}
+	if rl.StoreTimeout != nil && *rl.StoreTimeout <= 0 {
+		ck.add(p+".store_timeout", "must be positive")
+	}
+}
+
 func checkRetry(ck *checker, p string, rt *Retry) {
 	if a := *rt.Attempts; a < 1 || a > 10 {
 		ck.add(p+".attempts", "must be between 1 and 10")
@@ -684,7 +719,7 @@ func routeKey(r *Route) string {
 	slices.Sort(methods)
 	headers := make([]string, 0, len(r.Match.Headers))
 	for k, v := range r.Match.Headers {
-		headers = append(headers, strings.ToLower(k)+"="+v)
+		headers = append(headers, strings.ToLower(k)+"="+v.Reveal())
 	}
 	slices.Sort(headers)
 	return fmt.Sprintf("%s|%s|%s|%s|%s|%d",

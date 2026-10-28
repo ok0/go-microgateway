@@ -2,10 +2,13 @@ package config
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"reflect"
+	"slices"
 	"strings"
 )
 
@@ -28,37 +31,72 @@ func (c *Config) Line(path string) int {
 	return c.lines.lineFor(path)
 }
 
-// Redacted returns a deep copy of c in which every non-empty JWT key secret and every inline API key hash
-// is replaced by "REDACTED". The PEM content loaded from public key files and the keys loaded from API key
-// files are dropped. The userinfo and query values of every upstream host URL and JWKS URL are replaced by
-// "REDACTED" as described in RedactURL. c itself is not modified.
+// Redacted returns a deep copy of c in which every non-empty JWT key secret, every inline API key hash, every
+// non-empty store password and sentinel password, every store parameter leaf, every non-empty route header value
+// (match, request and response add/set) and every middleware parameter leaf is replaced by "REDACTED".
+// The PEM content loaded from public key files and the keys loaded from API key files are dropped. The userinfo
+// and query values of every non-empty upstream host URL and JWKS URL are replaced by "REDACTED" as described in
+// RedactURL. c itself is not modified.
 func (c *Config) Redacted() *Config {
 	r := deepCopy(reflect.ValueOf(c)).Interface().(*Config)
 	for i := range r.Auth.JWT {
 		for k := range r.Auth.JWT[i].Keys {
-			if r.Auth.JWT[i].Keys[k].Secret != "" {
-				r.Auth.JWT[i].Keys[k].Secret = "REDACTED"
+			if !r.Auth.JWT[i].Keys[k].Secret.IsZero() {
+				r.Auth.JWT[i].Keys[k].Secret = NewSecret(Redacted)
 			}
 			r.Auth.JWT[i].Keys[k].LoadedPublicKey = ""
 		}
-		if r.Auth.JWT[i].JWKS != nil {
-			r.Auth.JWT[i].JWKS.URL = RedactURL(r.Auth.JWT[i].JWKS.URL)
+		if jw := r.Auth.JWT[i].JWKS; jw != nil && !jw.URL.IsZero() {
+			jw.URL = NewSecretURL(RedactURL(jw.URL.Reveal()))
 		}
 	}
 	for i := range r.Auth.APIKeys {
 		r.Auth.APIKeys[i].FileKeys = nil
 		for k := range r.Auth.APIKeys[i].Keys {
-			if r.Auth.APIKeys[i].Keys[k].Hash != "" {
-				r.Auth.APIKeys[i].Keys[k].Hash = "REDACTED"
+			if !r.Auth.APIKeys[i].Keys[k].Hash.IsZero() {
+				r.Auth.APIKeys[i].Keys[k].Hash = NewSecret(Redacted)
 			}
 		}
 	}
 	for i := range r.Upstreams {
 		for j := range r.Upstreams[i].Hosts {
-			r.Upstreams[i].Hosts[j].URL = RedactURL(r.Upstreams[i].Hosts[j].URL)
+			if u := &r.Upstreams[i].Hosts[j].URL; !u.IsZero() {
+				*u = NewSecretURL(RedactURL(u.Reveal()))
+			}
 		}
 	}
+	for i := range r.Stores {
+		s := &r.Stores[i]
+		if rd := s.Redis; rd != nil {
+			if !rd.Password.IsZero() {
+				rd.Password = NewSecret(Redacted)
+			}
+			if !rd.SentinelPassword.IsZero() {
+				rd.SentinelPassword = NewSecret(Redacted)
+			}
+		}
+		s.Params = s.Params.Redacted()
+	}
+	for i := range r.Routes {
+		rt := &r.Routes[i]
+		redactHeaderValues(rt.Match.Headers)
+		redactHeaderValues(rt.RequestHeaders.Add)
+		redactHeaderValues(rt.RequestHeaders.Set)
+		redactHeaderValues(rt.ResponseHeaders.Add)
+		redactHeaderValues(rt.ResponseHeaders.Set)
+	}
+	for i := range r.Middlewares {
+		r.Middlewares[i].Params = r.Middlewares[i].Params.Redacted()
+	}
 	return r
+}
+
+func redactHeaderValues(m map[string]Secret) {
+	for k, v := range m {
+		if !v.IsZero() {
+			m[k] = NewSecret(Redacted)
+		}
+	}
 }
 
 // RedactURL returns raw with any userinfo replaced by REDACTED and every query parameter value replaced by
@@ -119,20 +157,93 @@ func redactHeuristicQuery(s string) string {
 	return s[:q+1] + redactQuery(s[q+1:limit]) + s[limit:]
 }
 
-// Fingerprint returns the lowercase hex SHA-256 of the JSON encoding of c. encoding/json sorts map
-// keys, so the encoding is canonical. For configurations built in Go whose parameters cannot be
-// encoded as JSON, the fingerprint is the SHA-256 of "unencodable: " followed by the encoding error.
+// Fingerprint returns the lowercase hex SHA-256 of the canonical JSON encoding of c, followed by a length-prefixed
+// digest input of every revealed secret, so rotating any secret changes the fingerprint. Secrets are encoded as
+// "REDACTED" in the JSON. See FingerprintOf.
 func (c *Config) Fingerprint() string {
-	b, err := json.Marshal(c)
+	return FingerprintOf(c)
+}
+
+// FingerprintOf returns the lowercase hex SHA-256 of the canonical JSON encoding of v, followed by a
+// length-prefixed digest input of every secret reachable from v, in a fixed order. Secrets never appear in the
+// JSON, so the digest input is what makes rotating a secret change the result. For values whose JSON encoding
+// fails, the result is the SHA-256 of "unencodable: " followed by the encoding error.
+func FingerprintOf(v any) string {
+	b, err := json.Marshal(v)
 	if err != nil {
 		sum := sha256.Sum256([]byte("unencodable: " + err.Error()))
 		return hex.EncodeToString(sum[:])
 	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
+	h := sha256.New()
+	h.Write(b)
+	walkSecrets(reflect.ValueOf(v), func(kind byte, raw []byte) {
+		h.Write([]byte{0, kind})
+		binary.Write(h, binary.BigEndian, uint64(len(raw)))
+		h.Write(raw)
+	})
+	return hex.EncodeToString(h.Sum(nil))
 }
 
+// walkSecrets visits every secret reachable from v in a fixed order and passes each to emit with a kind byte:
+// 's' for Secret, 'u' for SecretURL and 'p' for SecretParams. Exported fields are visited in declaration order,
+// slice elements in order and map entries sorted by key. A secret is never recursed into.
+func walkSecrets(v reflect.Value, emit func(kind byte, raw []byte)) {
+	if !v.IsValid() {
+		return
+	}
+	switch v.Type() {
+	case secretType:
+		emit('s', []byte(v.Interface().(Secret).Reveal()))
+		return
+	case secretURLType:
+		emit('u', []byte(v.Interface().(SecretURL).Reveal()))
+		return
+	case secretParamsType:
+		p := v.Interface().(SecretParams)
+		raw, err := json.Marshal(p.Reveal())
+		if err != nil {
+			raw = []byte("unencodable " + fmt.Sprintf("%T", p))
+		}
+		emit('p', raw)
+		return
+	}
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Interface:
+		if !v.IsNil() {
+			walkSecrets(v.Elem(), emit)
+		}
+	case reflect.Struct:
+		t := v.Type()
+		for i := 0; i < v.NumField(); i++ {
+			if t.Field(i).IsExported() {
+				walkSecrets(v.Field(i), emit)
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			walkSecrets(v.Index(i), emit)
+		}
+	case reflect.Map:
+		keys := v.MapKeys()
+		slices.SortFunc(keys, func(a, b reflect.Value) int {
+			return strings.Compare(fmt.Sprint(a.Interface()), fmt.Sprint(b.Interface()))
+		})
+		for _, k := range keys {
+			walkSecrets(v.MapIndex(k), emit)
+		}
+	}
+}
+
+var (
+	secretType       = reflect.TypeFor[Secret]()
+	secretParamsType = reflect.TypeFor[SecretParams]()
+	secretURLType    = reflect.TypeFor[SecretURL]()
+)
+
 func deepCopy(v reflect.Value) reflect.Value {
+	if t := v.Type(); t == secretType || t == secretParamsType || t == secretURLType {
+		return v
+	}
 	switch v.Kind() {
 	case reflect.Pointer:
 		if v.IsNil() {

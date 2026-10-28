@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -113,10 +114,10 @@ func TestSemanticChecks(t *testing.T) {
 			c.Upstreams[0].LoadBalancer = LoadBalancer{Algorithm: "consistent_hash", Hash: Hash{Source: "bogus"}}
 		}, "upstreams[0].load_balancer.hash.source", "must be one of"},
 		{"host URL scheme", func(c *Config) {
-			c.Upstreams[0].Hosts[0].URL = "ftp://x"
+			c.Upstreams[0].Hosts[0].URL = NewSecretURL("ftp://x")
 		}, "upstreams[0].hosts[0].url", "scheme"},
 		{"jwks url", func(c *Config) {
-			c.Auth.JWT[0].JWKS = &JWKS{URL: "not a url", Algorithms: []string{"RS256"}}
+			c.Auth.JWT[0].JWKS = &JWKS{URL: NewSecretURL("not a url"), Algorithms: []string{"RS256"}}
 		}, "auth.jwt[0].jwks.url", "must be an http or https URL"},
 		{"trusted proxy CIDR", func(c *Config) {
 			c.Global.TrustedProxies = []string{"10.0.0.0/33"}
@@ -145,7 +146,7 @@ func TestSemanticChecks(t *testing.T) {
 			c.Auth.JWT[0].Leeway = durPtr(6 * time.Minute)
 		}, "auth.jwt[0].leeway", "must not exceed 5m"},
 		{"HS256 key with public_key instead of secret", func(c *Config) {
-			c.Auth.JWT[0].Keys[0].Secret = ""
+			c.Auth.JWT[0].Keys[0].Secret = NewSecret("")
 			c.Auth.JWT[0].Keys[0].PublicKey = "pem"
 		}, "auth.jwt[0].keys[0].public_key", "not allowed with HS"},
 		{"RS256 key with secret", func(c *Config) {
@@ -155,7 +156,7 @@ func TestSemanticChecks(t *testing.T) {
 			c.Routes[0].Pipeline = []string{"retry", "auth"}
 		}, "routes[0].pipeline[0]", `"retry" must be the last stage`},
 		{"api key hash form", func(c *Config) {
-			c.Auth.APIKeys[0].Keys[0].Hash = "sha256:abc"
+			c.Auth.APIKeys[0].Keys[0].Hash = NewSecret("sha256:abc")
 		}, "auth.api_keys[0].keys[0].hash", "must have the form"},
 		{"jwt mode with an api_keys provider", func(c *Config) {
 			c.Routes[0].Auth = &RouteAuth{Mode: "jwt", Providers: []string{"keys1"}}
@@ -167,10 +168,10 @@ func TestSemanticChecks(t *testing.T) {
 			c.Routes[0].Middlewares = []string{"cors1", "cors1"}
 		}, "routes[0].middlewares[1]", "duplicate middleware"},
 		{"invalid cors param", func(c *Config) {
-			c.Middlewares[0].Params = map[string]any{"max_age": -1}
+			c.Middlewares[0].Params = NewSecretParams(map[string]any{"max_age": -1})
 		}, "middlewares[0].params.max_age", "must not be negative"},
 		{"unknown builtin param", func(c *Config) {
-			c.Middlewares[0].Params = map[string]any{"origin": "x"}
+			c.Middlewares[0].Params = NewSecretParams(map[string]any{"origin": "x"})
 		}, "middlewares[0].params.origin", "unknown field"},
 		{"request_size_limit missing max_bytes", func(c *Config) {
 			c.Middlewares = append(c.Middlewares, Middleware{Name: "lim", Type: "request_size_limit"})
@@ -216,7 +217,7 @@ func TestSemanticChecks(t *testing.T) {
 			c.Upstreams[0].LoadBalancer = LoadBalancer{Algorithm: "consistent_hash", Hash: Hash{Source: "header"}, BoundedLoadFactor: 1.25, VirtualNodes: 160}
 		}, "upstreams[0].load_balancer.hash.name", "is required"},
 		{"host url with credentials and invalid port", func(c *Config) {
-			c.Upstreams[0].Hosts[0].URL = "http://user:s3cret@h:bad"
+			c.Upstreams[0].Hosts[0].URL = NewSecretURL("http://user:s3cret@h:bad")
 		}, "upstreams[0].hosts[0].url", "invalid URL"},
 		{"breaker buckets zero", func(c *Config) {
 			c.Upstreams[0].CircuitBreaker.Buckets = intPtr(0)
@@ -307,7 +308,7 @@ func TestBaseValid(t *testing.T) {
 
 func TestUnregisteredTypeAccepted(t *testing.T) {
 	c := base()
-	c.Middlewares = append(c.Middlewares, Middleware{Name: "x", Type: "my_custom", Params: map[string]any{"anything": 1}})
+	c.Middlewares = append(c.Middlewares, Middleware{Name: "x", Type: "my_custom", Params: NewSecretParams(map[string]any{"anything": 1})})
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -398,13 +399,55 @@ upstreams:
 
 func TestHostURLErrorOmitsCredentials(t *testing.T) {
 	c := base()
-	c.Upstreams[0].Hosts[0].URL = "http://user:s3cret@h:bad"
+	c.Upstreams[0].Hosts[0].URL = NewSecretURL("http://user:s3cret@h:bad")
 	err := c.Validate()
 	if err == nil {
 		t.Fatal("no error for invalid host URL")
 	}
 	if strings.Contains(err.Error(), "s3cret") {
 		t.Errorf("error leaks credential: %v", err)
+	}
+}
+
+func TestHostURLParseErrorHidesCredentials(t *testing.T) {
+	c := base()
+	c.Upstreams[0].Hosts[0].URL = NewSecretURL("http://u:p%zz@h:1")
+	var ve *ValidationError
+	if err := c.Validate(); !errors.As(err, &ve) {
+		t.Fatalf("Validate() = %v, want *ValidationError", err)
+	}
+	var found bool
+	for _, fe := range ve.Errors {
+		if fe.Path != "upstreams[0].hosts[0].url" {
+			continue
+		}
+		found = true
+		if fe.Msg != "invalid URL" {
+			t.Errorf("credential URL message = %q, want %q", fe.Msg, "invalid URL")
+		}
+	}
+	if !found {
+		t.Fatalf("no error at upstreams[0].hosts[0].url: %v", ve)
+	}
+
+	c = base()
+	c.Upstreams[0].Hosts[0].URL = NewSecretURL("http://h:1/%zz")
+	ve = nil
+	if err := c.Validate(); !errors.As(err, &ve) {
+		t.Fatalf("Validate() = %v, want *ValidationError", err)
+	}
+	found = false
+	for _, fe := range ve.Errors {
+		if fe.Path != "upstreams[0].hosts[0].url" {
+			continue
+		}
+		found = true
+		if !strings.HasPrefix(fe.Msg, "invalid URL: ") {
+			t.Errorf("plain URL message = %q, want prefix %q", fe.Msg, "invalid URL: ")
+		}
+	}
+	if !found {
+		t.Fatalf("no error at upstreams[0].hosts[0].url: %v", ve)
 	}
 }
 
@@ -553,4 +596,77 @@ routes:
 			t.Errorf("no error at %s; got %v", w.path, err)
 		}
 	}
+}
+
+const lineDoc = `version: 1
+listeners:
+  - name: public
+    address: ":8080"
+upstreams:
+  - name: users
+    hosts:
+      - url: "http://127.0.0.1:9001"
+routes:
+  - name: users-api
+    upstream: users
+    rate_limit:
+      algorithm: token_bucket
+      rate: 10
+`
+
+func exactLine(doc, trimmed string) int {
+	for i, l := range strings.Split(doc, "\n") {
+		if strings.TrimSpace(l) == trimmed {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+func TestValidateAnnotatesLines(t *testing.T) {
+	c, err := Parse([]byte(lineDoc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	zero := int64(0)
+	c.Routes[0].RateLimit.Store = "nowhere"
+	c.Routes[0].RateLimit.Rate = &zero
+
+	wantStore := exactLine(lineDoc, "rate_limit:")
+	wantRate := exactLine(lineDoc, "rate: 10")
+	if wantStore == 0 || wantRate == 0 {
+		t.Fatalf("lines not found in document: %d %d", wantStore, wantRate)
+	}
+
+	check := func(name string, cfg *Config, wantStoreLine, wantRateLine int) {
+		t.Helper()
+		var ve *ValidationError
+		if err := cfg.Validate(); !errors.As(err, &ve) {
+			t.Fatalf("%s: Validate() = %v, want *ValidationError", name, err)
+		}
+		lines := map[string]int{}
+		for _, fe := range ve.Errors {
+			lines[fe.Path] = fe.Line
+		}
+		storeLine, ok := lines["routes[0].rate_limit.store"]
+		if !ok {
+			t.Fatalf("%s: no error at routes[0].rate_limit.store: %v", name, ve)
+		}
+		if storeLine != wantStoreLine {
+			t.Errorf("%s: store line = %d, want %d", name, storeLine, wantStoreLine)
+		}
+		rateLine, ok := lines["routes[0].rate_limit.rate"]
+		if !ok {
+			t.Fatalf("%s: no error at routes[0].rate_limit.rate: %v", name, ve)
+		}
+		if rateLine != wantRateLine {
+			t.Errorf("%s: rate line = %d, want %d", name, rateLine, wantRateLine)
+		}
+	}
+
+	check("parsed", c.Clone(), wantStore, wantRate)
+
+	g := c.Clone()
+	g.lines = nil
+	check("go-built", g, 0, 0)
 }

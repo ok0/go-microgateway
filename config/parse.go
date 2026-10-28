@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -56,8 +57,10 @@ func LoadFile(path string, opts ...ParseOption) (*Config, error) {
 }
 
 var (
-	typeLineRe     = regexp.MustCompile(`^line (\d+): (.*)$`)
-	unknownFieldRe = regexp.MustCompile(`^field (\S+) not found in type`)
+	customDecodeRe = regexp.MustCompile(`^line (\d+): column (\d+): type (\S+): (.*)$`)
+	unknownFieldRe = regexp.MustCompile(`^line (\d+): field (\S+) not found in type (\S+)`)
+	mismatchRe     = regexp.MustCompile("^line (\\d+): cannot unmarshal (!!\\w+)(?: `(.*)`)? into (\\S+)$")
+	lineEntryRe    = regexp.MustCompile(`^line (\d+): (.*)$`)
 	lineNumRe      = regexp.MustCompile(`line (\d+)`)
 	yamlLinePrefix = regexp.MustCompile(`^line \d+: `)
 )
@@ -76,6 +79,7 @@ func load(data []byte, dir string, opts []ParseOption) (*Config, error) {
 		return nil, newValidationError([]FieldError{{Line: lineFromMsg(err.Error()), Msg: trimYAMLMsg(err.Error())}})
 	}
 	idx := buildIndex(&root)
+	loc := newLocator(&root, reflect.TypeFor[Config]())
 
 	cfg := &Config{}
 	var errs []FieldError
@@ -90,7 +94,7 @@ func load(data []byte, dir string, opts []ParseOption) (*Config, error) {
 		}
 		if isType {
 			for _, entry := range typeErr.Errors {
-				fe := decodeFieldError(entry, idx)
+				fe := decodeFieldError(entry, loc)
 				if fe.Path == "" {
 					rootFailure = true
 				} else {
@@ -129,19 +133,103 @@ func load(data []byte, dir string, opts []ParseOption) (*Config, error) {
 	return cfg, nil
 }
 
-// decodeFieldError converts one yaml.TypeError entry into a FieldError located through idx.
-func decodeFieldError(entry string, idx *lineIndex) FieldError {
-	m := typeLineRe.FindStringSubmatch(entry)
+// decodeFieldError converts one yaml.TypeError entry into a FieldError located through loc. The first rule that
+// matches the entry decides the result; a rule whose node cannot be claimed reports the line only. Each claim
+// marks one node, so repeated identical errors on one line each locate a distinct node. A flow mapping, flow
+// sequence, alias or block collection sharing the error line is located by its own node, not by the last key
+// written on that line.
+func decodeFieldError(entry string, loc *locator) FieldError {
+	if m := customDecodeRe.FindStringSubmatch(entry); m != nil {
+		line, _ := strconv.Atoi(m[1])
+		col, _ := strconv.Atoi(m[2])
+		target, msg := m[3], m[4]
+		r := loc.claim(
+			func(r *nodeRef) bool { return at(r, line, col) },
+			func(r *nodeRef) bool { return sameType(loc, r, target) },
+		)
+		if r == nil {
+			return FieldError{Line: line, Msg: msg}
+		}
+		return FieldError{Path: r.path, Line: r.val.Line, Msg: msg}
+	}
+	if m := unknownFieldRe.FindStringSubmatch(entry); m != nil {
+		line, _ := strconv.Atoi(m[1])
+		name, parent := m[2], m[3]
+		r := loc.claim(
+			func(r *nodeRef) bool { return r.key != nil && r.key.Line == line && r.key.Value == name },
+			func(r *nodeRef) bool {
+				pp, _ := parentPath(r.path)
+				t := loc.typeAt(pp)
+				return t != nil && t.String() == parent
+			},
+		)
+		if r == nil {
+			return FieldError{Line: line, Msg: fmt.Sprintf("unknown field %q", name)}
+		}
+		return FieldError{Path: r.path, Line: line, Msg: fmt.Sprintf("unknown field %q", name)}
+	}
+	if m := mismatchRe.FindStringSubmatch(entry); m != nil {
+		line, _ := strconv.Atoi(m[1])
+		tag, quoted, into := m[2], m[3], m[4]
+		msg := lineEntryRe.FindStringSubmatch(entry)[2]
+		r := loc.claim(
+			func(r *nodeRef) bool {
+				n := resolved(r.val)
+				return n.Line == line && valueFitsTag(n, tag, quoted)
+			},
+			func(r *nodeRef) bool { return sameType(loc, r, into) },
+		)
+		if r == nil {
+			return FieldError{Line: line, Msg: msg}
+		}
+		return FieldError{Path: r.path, Line: r.val.Line, Msg: msg}
+	}
+	m := lineEntryRe.FindStringSubmatch(entry)
 	if m == nil {
 		return FieldError{Msg: entry}
 	}
 	line, _ := strconv.Atoi(m[1])
 	msg := m[2]
-	if u := unknownFieldRe.FindStringSubmatch(msg); u != nil {
-		name := u[1]
-		return FieldError{Path: idx.pathAt(line, name), Line: line, Msg: fmt.Sprintf("unknown field %q", name)}
+	r := loc.claim(func(r *nodeRef) bool { return resolved(r.val).Line == line }, nil)
+	if r == nil {
+		r = loc.claim(func(r *nodeRef) bool { return r.key != nil && r.key.Line == line }, nil)
 	}
-	return FieldError{Path: idx.pathAt(line, ""), Line: line, Msg: msg}
+	if r == nil {
+		return FieldError{Line: line, Msg: msg}
+	}
+	return FieldError{Path: r.path, Line: line, Msg: msg}
+}
+
+// at reports whether the value of r starts at line and column.
+func at(r *nodeRef, line, col int) bool {
+	n := resolved(r.val)
+	return n.Line == line && n.Column == col
+}
+
+// sameType reports whether the field at r has the Go type named want, as reflect prints it.
+func sameType(loc *locator, r *nodeRef, want string) bool {
+	t := loc.typeAt(r.path)
+	return t != nil && t.String() == want
+}
+
+// valueFitsTag reports whether n is the node yaml.v3 names in a "cannot unmarshal" message with the given tag
+// and quoted value excerpt.
+func valueFitsTag(n *yaml.Node, tag, quoted string) bool {
+	switch tag {
+	case "!!map":
+		return n.Kind == yaml.MappingNode
+	case "!!seq":
+		return n.Kind == yaml.SequenceNode
+	}
+	return n.Kind == yaml.ScalarNode && n.ShortTag() == tag && excerpt(n.Value) == quoted
+}
+
+// excerpt shortens a scalar value the way yaml.v3 does in "cannot unmarshal" messages.
+func excerpt(v string) string {
+	if len(v) > 10 {
+		return v[:7] + "..."
+	}
+	return v
 }
 
 // underPath reports whether path equals, or is nested under, one of the decode error paths.

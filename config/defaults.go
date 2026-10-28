@@ -85,6 +85,10 @@ func (c *Config) applyDefaults() {
 	defDur(&g.Reload.Debounce, 250*time.Millisecond)
 	defDur(&g.Reload.PollInterval, 5*time.Second)
 
+	for i := range c.Stores {
+		c.Stores[i].applyDefaults()
+	}
+
 	for i := range c.Listeners {
 		l := &c.Listeners[i]
 		defBool(&l.HTTP2, true)
@@ -204,6 +208,10 @@ func (c *Config) applyDefaults() {
 			}
 			defStr(&rl.Key.Source, "ip")
 			defIntPtr(&rl.MaxKeys, 100000)
+			if rl.Store != "" {
+				defStr(&rl.OnStoreError, "local")
+				defDurPtr(&rl.StoreTimeout, 50*time.Millisecond)
+			}
 		}
 		if rb := r.CircuitBreaker; rb != nil {
 			defBool(&rb.Enabled, true)

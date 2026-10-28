@@ -64,6 +64,11 @@ func TestIntegerFieldsAudited(t *testing.T) {
 		"routes[].retry.attempts",
 		"routes[].retry.max_body_bytes",
 		"routes[].retry.on_statuses[]",
+		"stores[].guard.consecutive_failures",
+		"stores[].guard.max_inflight",
+		"stores[].redis.db",
+		"stores[].redis.min_idle_conns",
+		"stores[].redis.pool_size",
 		"upstreams[].active_health.healthy_threshold",
 		"upstreams[].active_health.unhealthy_threshold",
 		"upstreams[].circuit_breaker.buckets",
@@ -162,43 +167,72 @@ func TestIntegerFieldsRejectFloat(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.path, func(t *testing.T) {
-			var doc yaml.Node
-			if err := yaml.Unmarshal(raw, &doc); err != nil {
-				t.Fatal(err)
-			}
-			target := navigateNode(t, &doc, tc.path)
-			target.Value = "2.5"
-			target.Tag = ""
-			target.Style = 0
-			out, err := yaml.Marshal(&doc)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var reparsed yaml.Node
-			if err := yaml.Unmarshal(out, &reparsed); err != nil {
-				t.Fatal(err)
-			}
-			wantLine := navigateNode(t, &reparsed, tc.path).Line
-
-			_, err = Parse(out, WithBaseDir("testdata"))
-			var ve *ValidationError
-			if !errors.As(err, &ve) {
-				t.Fatalf("error = %v, want *ValidationError", err)
-			}
-			if len(ve.Errors) != 1 {
-				t.Fatalf("got %d errors, want 1: %v", len(ve.Errors), err)
-			}
-			fe := ve.Errors[0]
-			if fe.Path != tc.path {
-				t.Errorf("Path = %q, want %q", fe.Path, tc.path)
-			}
-			if fe.Line != wantLine {
-				t.Errorf("Line = %d, want %d", fe.Line, wantLine)
-			}
-			if want := "cannot unmarshal !!float `2.5` into " + tc.typ; fe.Msg != want {
-				t.Errorf("Msg = %q, want %q", fe.Msg, want)
-			}
+			assertIntegerRejected(t, raw, tc.path, "2.5", "cannot unmarshal !!float `2.5` into "+tc.typ)
 		})
+	}
+
+	storeTests := []struct {
+		path, value, msg string
+	}{
+		{"stores[0].redis.db", "3.5", "cannot unmarshal !!float `3.5` into int"},
+		{"stores[0].redis.db", "1e3", "cannot unmarshal !!float `1e3` into int"},
+		{"stores[0].redis.pool_size", "3.0", "cannot unmarshal !!float `3.0` into int"},
+		{"stores[0].redis.min_idle_conns", "3.0", "cannot unmarshal !!float `3.0` into int"},
+		{"stores[0].redis.min_idle_conns", `"3"`, "cannot unmarshal !!str `3` into int"},
+		{"stores[1].guard.consecutive_failures", "3.5", "cannot unmarshal !!float `3.5` into int"},
+		{"stores[1].guard.max_inflight", "1e3", "cannot unmarshal !!float `1e3` into int"},
+		{"stores[1].guard.max_inflight", `"256"`, "cannot unmarshal !!str `256` into int"},
+		{"stores[0].redis.db", "99999999999999999999", "cannot unmarshal !!float `9999999...` into int"},
+	}
+	for _, tc := range storeTests {
+		t.Run(tc.path+"="+tc.value, func(t *testing.T) {
+			assertIntegerRejected(t, raw, tc.path, tc.value, tc.msg)
+		})
+	}
+}
+
+func assertIntegerRejected(t *testing.T, raw []byte, path, value, wantMsg string) {
+	t.Helper()
+	var doc yaml.Node
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	target := navigateNode(t, &doc, path)
+	if strings.HasPrefix(value, `"`) {
+		target.Value = strings.Trim(value, `"`)
+		target.Style = yaml.DoubleQuotedStyle
+	} else {
+		target.Value = value
+		target.Style = 0
+	}
+	target.Tag = ""
+	out, err := yaml.Marshal(&doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reparsed yaml.Node
+	if err := yaml.Unmarshal(out, &reparsed); err != nil {
+		t.Fatal(err)
+	}
+	wantLine := navigateNode(t, &reparsed, path).Line
+
+	_, err = Parse(out, WithBaseDir("testdata"))
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("error = %v, want *ValidationError", err)
+	}
+	if len(ve.Errors) != 1 {
+		t.Fatalf("got %d errors, want 1: %v", len(ve.Errors), err)
+	}
+	fe := ve.Errors[0]
+	if fe.Path != path {
+		t.Errorf("Path = %q, want %q", fe.Path, path)
+	}
+	if fe.Line != wantLine {
+		t.Errorf("Line = %d, want %d", fe.Line, wantLine)
+	}
+	if fe.Msg != wantMsg {
+		t.Errorf("Msg = %q, want %q", fe.Msg, wantMsg)
 	}
 }
 
@@ -210,12 +244,12 @@ func TestParamsIntegersRejectFloat(t *testing.T) {
 	}{
 		{
 			name: "cors max_age",
-			mw:   Middleware{Type: "cors", Params: map[string]any{"max_age": 2.5}},
+			mw:   Middleware{Type: "cors", Params: NewSecretParams(map[string]any{"max_age": 2.5})},
 			want: FieldError{Path: "max_age", Msg: "cannot unmarshal !!float `2.5` into int"},
 		},
 		{
 			name: "request_size_limit max_bytes",
-			mw:   Middleware{Type: "request_size_limit", Params: map[string]any{"max_bytes": 2.5}},
+			mw:   Middleware{Type: "request_size_limit", Params: NewSecretParams(map[string]any{"max_bytes": 2.5})},
 			want: FieldError{Path: "max_bytes", Msg: "cannot unmarshal !!float `2.5` into int64"},
 		},
 	}
@@ -239,8 +273,8 @@ func TestParamsIntegersRejectFloat(t *testing.T) {
 	}
 
 	ok := []Middleware{
-		{Type: "cors", Params: map[string]any{"max_age": 600}},
-		{Type: "request_size_limit", Params: map[string]any{"max_bytes": 1024}},
+		{Type: "cors", Params: NewSecretParams(map[string]any{"max_age": 600})},
+		{Type: "request_size_limit", Params: NewSecretParams(map[string]any{"max_bytes": 1024})},
 	}
 	for _, mw := range ok {
 		if _, err := mw.BuiltinParams(); err != nil {
