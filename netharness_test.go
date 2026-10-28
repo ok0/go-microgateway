@@ -64,6 +64,8 @@ type memNetwork struct {
 	listeners map[string]*memListener
 	refused   map[string]bool
 	holes     map[string]bool
+	failNext  map[string]int
+	dials     map[string]int
 	seq       int
 	open      atomic.Int64
 }
@@ -73,6 +75,8 @@ func newMemNetwork() *memNetwork {
 		listeners: make(map[string]*memListener),
 		refused:   make(map[string]bool),
 		holes:     make(map[string]bool),
+		failNext:  make(map[string]int),
+		dials:     make(map[string]int),
 	}
 }
 
@@ -101,6 +105,12 @@ func (n *memNetwork) listen() *memListener {
 func (n *memNetwork) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	refused := &net.OpError{Op: "dial", Net: network, Err: errors.New("connection refused")}
 	n.mu.Lock()
+	n.dials[addr]++
+	if n.failNext[addr] > 0 {
+		n.failNext[addr]--
+		n.mu.Unlock()
+		return nil, refused
+	}
 	l, ok := n.listeners[addr]
 	isRefused := n.refused[addr]
 	isHole := n.holes[addr]
@@ -220,6 +230,26 @@ func (n *memNetwork) refuse(t *testing.T, s *testServer) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.refused[s.Addr] = true
+}
+
+func (n *memNetwork) failDials(t *testing.T, s *testServer, k int) {
+	t.Helper()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.failNext[s.Addr] = k
+}
+
+func (n *memNetwork) unrefuse(t *testing.T, s *testServer) {
+	t.Helper()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	delete(n.refused, s.Addr)
+}
+
+func (n *memNetwork) dialCount(addr string) int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.dials[addr]
 }
 
 func (n *memNetwork) blackhole(t *testing.T) string {
@@ -496,4 +526,22 @@ func TestMemNetwork(t *testing.T) {
 	if got := peakSrv.Peak.Load(); got < 3 {
 		t.Fatalf("peak connections = %d, want at least 3", got)
 	}
+
+	t.Run("failDials", func(t *testing.T) {
+		failSrv := n.serve(t, echoHandler("fail"))
+		n.failDials(t, failSrv, 1)
+		_, err := n.DialContext(context.Background(), "tcp", failSrv.Addr)
+		var oe *net.OpError
+		if !errors.As(err, &oe) || oe.Op != "dial" {
+			t.Fatalf("first dial error = %v, want a dial *net.OpError", err)
+		}
+		conn, err := n.DialContext(context.Background(), "tcp", failSrv.Addr)
+		if err != nil {
+			t.Fatalf("second dial error = %v, want nil", err)
+		}
+		_ = conn.Close()
+		if got := n.dialCount(failSrv.Addr); got != 2 {
+			t.Fatalf("dialCount = %d, want 2", got)
+		}
+	})
 }
