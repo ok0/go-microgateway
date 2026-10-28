@@ -196,7 +196,7 @@ type PassiveHealth struct {
 	MaxEjectionPercent *int `yaml:"max_ejection_percent" json:"max_ejection_percent"`
 }
 
-// ActiveHealth probes backends on a schedule. Fields left at their zero value take the defaults noted on each field.
+// ActiveHealth probes backends on a schedule. Pointer fields take their default only when absent; other fields left at their zero value take the defaults noted on each field.
 type ActiveHealth struct {
 	// Path is the request path probed. Default "/health".
 	Path string `yaml:"path" json:"path"`
@@ -206,10 +206,10 @@ type ActiveHealth struct {
 	Jitter *float64 `yaml:"jitter" json:"jitter"`
 	// Timeout bounds a single probe. Default 2s.
 	Timeout Duration `yaml:"timeout" json:"timeout"`
-	// HealthyThreshold is the successes needed to mark a backend healthy. Default 2.
-	HealthyThreshold int `yaml:"healthy_threshold" json:"healthy_threshold"`
-	// UnhealthyThreshold is the failures needed to mark a backend unhealthy. Default 3.
-	UnhealthyThreshold int `yaml:"unhealthy_threshold" json:"unhealthy_threshold"`
+	// HealthyThreshold is the successes needed to mark a backend healthy. Default 2 when absent; must be >= 1.
+	HealthyThreshold *int `yaml:"healthy_threshold" json:"healthy_threshold"`
+	// UnhealthyThreshold is the failures needed to mark a backend unhealthy. Default 3 when absent; must be >= 1.
+	UnhealthyThreshold *int `yaml:"unhealthy_threshold" json:"unhealthy_threshold"`
 	// ExpectedStatuses lists accepted status codes as "NNN" or "NNN-NNN". Default ["200-399"], applied only when nil.
 	ExpectedStatuses []string `yaml:"expected_statuses" json:"expected_statuses"`
 }
@@ -242,7 +242,7 @@ type Auth struct {
 	APIKeys []APIKeyProvider `yaml:"api_keys" json:"api_keys"`
 }
 
-// JWTProvider verifies bearer tokens. Fields left at their zero value take the defaults noted on each field.
+// JWTProvider verifies bearer tokens. Pointer fields take their default only when absent; other fields left at their zero value take the defaults noted on each field.
 type JWTProvider struct {
 	// Name identifies the provider; names are unique across all providers.
 	Name string `yaml:"name" json:"name"`
@@ -250,8 +250,8 @@ type JWTProvider struct {
 	Issuer string `yaml:"issuer" json:"issuer"`
 	// Audiences lists accepted token audiences; at least one is required.
 	Audiences []string `yaml:"audiences" json:"audiences"`
-	// Leeway tolerates clock skew when checking token times. Default 30s.
-	Leeway Duration `yaml:"leeway" json:"leeway"`
+	// Leeway tolerates clock skew when checking token times. Default 30s when absent; 0 means no leeway; max 5m.
+	Leeway *Duration `yaml:"leeway" json:"leeway"`
 	// Header is the header carrying the token. Default "Authorization".
 	Header string `yaml:"header" json:"header"`
 	// Keys lists static verification keys.
@@ -264,6 +264,10 @@ type JWTProvider struct {
 	RolesClaim string `yaml:"roles_claim" json:"roles_claim"`
 	// ForwardClaims maps claim names to the upstream header that carries their values.
 	ForwardClaims map[string]string `yaml:"forward_claims" json:"forward_claims"`
+	// MaxTokenBytes bounds the size of a presented token. Default 4096 when absent; must be positive.
+	MaxTokenBytes *int `yaml:"max_token_bytes" json:"max_token_bytes"`
+	// ForwardCredentials keeps the token on the upstream request. Default false when absent.
+	ForwardCredentials *bool `yaml:"forward_credentials" json:"forward_credentials"`
 }
 
 // JWTKey is one verification key. Exactly one of Secret, PublicKey or PublicKeyFile must be set.
@@ -278,29 +282,33 @@ type JWTKey struct {
 	PublicKey string `yaml:"public_key" json:"public_key"`
 	// PublicKeyFile is a path to a PEM encoded public key.
 	PublicKeyFile string `yaml:"public_key_file" json:"public_key_file"`
+	// LoadedPublicKey is the PEM content read from PublicKeyFile when the configuration is loaded or validated; any value set by the caller is replaced.
+	LoadedPublicKey string `yaml:"-" json:"loaded_public_key,omitempty"`
 }
 
-// JWKS describes a remote JSON Web Key Set. Fields left at their zero value take the defaults noted on each field.
+// JWKS describes a remote JSON Web Key Set. Pointer fields take their default only when absent; other fields left at their zero value take the defaults noted on each field.
 type JWKS struct {
 	// URL is the http or https location of the key set.
 	URL string `yaml:"url" json:"url"`
-	// TTL is how long fetched keys are used before refresh. Default 5m.
-	TTL Duration `yaml:"ttl" json:"ttl"`
-	// MinRefreshInterval is the minimum time between refreshes. Default 30s.
-	MinRefreshInterval Duration `yaml:"min_refresh_interval" json:"min_refresh_interval"`
-	// Timeout bounds a key set fetch. Default 5s.
-	Timeout Duration `yaml:"timeout" json:"timeout"`
+	// Algorithms lists the asymmetric algorithms accepted from the key set; required.
+	Algorithms []string `yaml:"algorithms" json:"algorithms"`
+	// TTL is how long fetched keys are used before refresh. Default 10m when absent; must be positive.
+	TTL *Duration `yaml:"ttl" json:"ttl"`
+	// MinRefreshInterval is the minimum time between refreshes. Default 30s when absent; must be positive.
+	MinRefreshInterval *Duration `yaml:"min_refresh_interval" json:"min_refresh_interval"`
+	// Timeout bounds a key set fetch. Default 5s when absent; must be positive.
+	Timeout *Duration `yaml:"timeout" json:"timeout"`
 }
 
-// APIKeyProvider authenticates requests by API key. Fields left at their zero value take the defaults noted on each field.
+// APIKeyProvider authenticates requests by API key. Pointer fields take their default only when absent; other fields left at their zero value take the defaults noted on each field.
 type APIKeyProvider struct {
 	// Name identifies the provider; names are unique across all providers.
 	Name string `yaml:"name" json:"name"`
-	// Header is the header carrying the key. Default "X-API-Key".
-	Header string `yaml:"header" json:"header"`
+	// Header is the header carrying the key. Default "X-API-Key" when absent; an explicit "" disables the header and requires Query.
+	Header *string `yaml:"header" json:"header"`
 	// Query is the query parameter carrying the key as an alternative to Header.
 	Query string `yaml:"query" json:"query"`
-	// KeyFile is a path to a file whose keys are added to Keys.
+	// KeyFile is a path to a file whose keys are loaded into FileKeys when the configuration is loaded or validated.
 	KeyFile string `yaml:"key_file" json:"key_file"`
 	// Keys lists inline keys.
 	Keys []APIKey `yaml:"keys" json:"keys"`
@@ -308,6 +316,10 @@ type APIKeyProvider struct {
 	ConsumerHeader string `yaml:"consumer_header" json:"consumer_header"`
 	// MetadataHeaders maps metadata field names to the headers that receive their values.
 	MetadataHeaders map[string]string `yaml:"metadata_headers" json:"metadata_headers"`
+	// ForwardCredentials keeps the key on the upstream request. Default false when absent.
+	ForwardCredentials *bool `yaml:"forward_credentials" json:"forward_credentials"`
+	// FileKeys holds the keys read from KeyFile when the configuration is loaded or validated; replaced on every load.
+	FileKeys []APIKey `yaml:"-" json:"file_keys,omitempty"`
 }
 
 // APIKey is one accepted API key, stored as a hash.
@@ -320,6 +332,10 @@ type APIKey struct {
 	Consumer string `yaml:"consumer" json:"consumer"`
 	// Metadata holds extra values forwarded with the consumer.
 	Metadata map[string]string `yaml:"metadata" json:"metadata"`
+	// Scopes lists the scopes granted to the consumer of the key.
+	Scopes []string `yaml:"scopes" json:"scopes"`
+	// Roles lists the roles granted to the consumer of the key.
+	Roles []string `yaml:"roles" json:"roles"`
 }
 
 // APIKeyFile is the format of an API key file referenced by key_file.
@@ -430,11 +446,11 @@ type Require struct {
 	Scopes []string `yaml:"scopes" json:"scopes"`
 	// Roles lists roles the identity must hold.
 	Roles []string `yaml:"roles" json:"roles"`
-	// Claims lists claim values the identity must carry.
-	Claims map[string]string `yaml:"claims" json:"claims"`
+	// Claims maps claim names to the expected value: a string, number or boolean. For API keys the claim is matched against metadata.
+	Claims map[string]any `yaml:"claims" json:"claims"`
 }
 
-// RateLimit configures request rate limiting. Fields left at their zero value take the defaults noted on each field.
+// RateLimit configures request rate limiting. Pointer fields take their default only when absent; other fields left at their zero value take the defaults noted on each field.
 type RateLimit struct {
 	// Algorithm is token_bucket or sliding_window. Default "token_bucket".
 	Algorithm string `yaml:"algorithm" json:"algorithm"`
@@ -450,8 +466,8 @@ type RateLimit struct {
 	Window Duration `yaml:"window" json:"window"`
 	// Key selects what limits are applied per.
 	Key RateLimitKey `yaml:"key" json:"key"`
-	// MaxKeys bounds how many distinct keys are tracked. Default 100000.
-	MaxKeys int `yaml:"max_keys" json:"max_keys"`
+	// MaxKeys bounds how many distinct keys are tracked. Default 100000 when absent; must be >= 1.
+	MaxKeys *int `yaml:"max_keys" json:"max_keys"`
 	// IdleTTL is how long an unused key is kept. Default 10m.
 	IdleTTL Duration `yaml:"idle_ttl" json:"idle_ttl"`
 }

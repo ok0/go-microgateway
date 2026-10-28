@@ -71,8 +71,8 @@ func activeCfg(unhealthy, healthy int) config.ActiveHealth {
 		Interval:           config.Duration(probeInterval),
 		Timeout:            config.Duration(2 * time.Second),
 		Jitter:             floatp(0),
-		HealthyThreshold:   healthy,
-		UnhealthyThreshold: unhealthy,
+		HealthyThreshold:   intp(healthy),
+		UnhealthyThreshold: intp(unhealthy),
 		ExpectedStatuses:   []string{"200-399"},
 	}
 }

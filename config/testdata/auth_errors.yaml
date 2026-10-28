@@ -1,0 +1,98 @@
+# Seeded authentication configuration errors. Each entry below carries one problem:
+#   auth.jwt[0]          issuer is missing
+#   auth.jwt[1]          audiences is empty
+#   auth.jwt[2]          HS256 secret is too short and max_token_bytes is 0
+#   auth.jwt[3]          public_key is set on an HS256 key
+#   auth.jwt[4]          algorithm is none
+#   auth.jwt[5]          jwks ttl is 0s
+#   auth.api_keys[0]     hash is malformed
+#   routes[0]            names an unknown provider
+#   routes[1]            names a provider of the wrong kind
+#   routes[2]            allow_anonymous is combined with require
+#   routes[3]            explicit pipeline omits auth
+version: 1
+listeners:
+  - name: public
+    address: ":8080"
+upstreams:
+  - name: users
+    hosts:
+      - url: "http://127.0.0.1:9001"
+auth:
+  jwt:
+    - name: no-issuer
+      audiences: [api]
+      keys:
+        - algorithm: HS256
+          secret: 0123456789abcdef0123456789abcdef
+    - name: no-audience
+      issuer: https://idp.example
+      audiences: []
+      keys:
+        - algorithm: HS256
+          secret: 0123456789abcdef0123456789abcdef
+    - name: short-secret
+      issuer: https://idp.example
+      audiences: [api]
+      max_token_bytes: 0
+      keys:
+        - algorithm: HS256
+          secret: too-short
+    - name: hs-with-pem
+      issuer: https://idp.example
+      audiences: [api]
+      keys:
+        - algorithm: HS256
+          public_key: "not-a-pem"
+    - name: alg-none
+      issuer: https://idp.example
+      audiences: [api]
+      keys:
+        - algorithm: none
+          secret: 0123456789abcdef0123456789abcdef
+    - name: zero-ttl
+      issuer: https://idp.example
+      audiences: [api]
+      jwks:
+        url: https://idp.example/jwks
+        algorithms: [RS256]
+        ttl: 0s
+  api_keys:
+    - name: bad-hash
+      keys:
+        - id: k1
+          hash: "sha256:1234"
+          consumer: alice
+routes:
+  - name: dangling
+    match:
+      path: /a
+    upstream: users
+    auth:
+      mode: jwt
+      providers: [missing-provider]
+  - name: kind-mismatch
+    match:
+      path: /b
+    upstream: users
+    auth:
+      mode: apikey
+      providers: [short-secret]
+  - name: anonymous-require
+    match:
+      path: /c
+    upstream: users
+    auth:
+      mode: jwt
+      providers: [no-issuer]
+      allow_anonymous: true
+      require:
+        scopes: [read]
+  - name: pipeline-without-auth
+    match:
+      path: /d
+    upstream: users
+    auth:
+      mode: apikey
+      providers: [bad-hash]
+    pipeline: [timeout]

@@ -122,12 +122,15 @@ var wantKeys = []string{
 	"auth.jwt[].keys[].public_key_file",
 	"auth.jwt[].jwks",
 	"auth.jwt[].jwks.url",
+	"auth.jwt[].jwks.algorithms",
 	"auth.jwt[].jwks.ttl",
 	"auth.jwt[].jwks.min_refresh_interval",
 	"auth.jwt[].jwks.timeout",
 	"auth.jwt[].scope_claim",
 	"auth.jwt[].roles_claim",
 	"auth.jwt[].forward_claims",
+	"auth.jwt[].max_token_bytes",
+	"auth.jwt[].forward_credentials",
 	"auth.api_keys",
 	"auth.api_keys[].name",
 	"auth.api_keys[].header",
@@ -138,8 +141,11 @@ var wantKeys = []string{
 	"auth.api_keys[].keys[].hash",
 	"auth.api_keys[].keys[].consumer",
 	"auth.api_keys[].keys[].metadata",
+	"auth.api_keys[].keys[].scopes",
+	"auth.api_keys[].keys[].roles",
 	"auth.api_keys[].consumer_header",
 	"auth.api_keys[].metadata_headers",
+	"auth.api_keys[].forward_credentials",
 	"middlewares",
 	"middlewares[].name",
 	"middlewares[].type",
@@ -687,8 +693,8 @@ func TestLoadFileResolvesKeyFile(t *testing.T) {
 	if !filepath.IsAbs(p.KeyFile) {
 		t.Errorf("KeyFile %q is not absolute", p.KeyFile)
 	}
-	if len(p.Keys) != 1 || p.Keys[0].ID != "file-key" {
-		t.Errorf("keys = %+v", p.Keys)
+	if len(p.FileKeys) != 1 || p.FileKeys[0].ID != "file-key" {
+		t.Errorf("file keys = %+v", p.FileKeys)
 	}
 
 	write(minimalYAML + "auth:\n  api_keys:\n    - name: file\n      key_file: missing.yaml\n")

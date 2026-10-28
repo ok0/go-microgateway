@@ -18,7 +18,8 @@ import (
 type ParseOption func(*parseOptions)
 
 type parseOptions struct {
-	lookup func(string) (string, bool)
+	lookup  func(string) (string, bool)
+	baseDir string
 }
 
 // WithEnvLookup replaces the function used to resolve ${VAR} references. The default is os.LookupEnv.
@@ -28,16 +29,24 @@ func WithEnvLookup(f func(string) (string, bool)) ParseOption {
 	}
 }
 
+// WithBaseDir resolves relative key_file and public_key_file paths in Parse against dir instead of the working directory.
+func WithBaseDir(dir string) ParseOption {
+	return func(o *parseOptions) {
+		o.baseDir = dir
+	}
+}
+
 // Parse decodes, substitutes environment references in, applies defaults to, and validates a
-// configuration document. Relative file references are not read. On failure it returns nil and a
-// *ValidationError that lists every problem found.
+// configuration document. Key files named by the document are always read: relative paths resolve
+// against the directory set by WithBaseDir, or else against the working directory. Relative TLS file
+// paths are not resolved. On failure it returns nil and a *ValidationError that lists every problem found.
 func Parse(data []byte, opts ...ParseOption) (*Config, error) {
 	return load(data, "", opts)
 }
 
-// LoadFile reads and parses the configuration file at path, like Parse. Relative paths to key files
-// are resolved against the directory containing path and their contents are loaded. A file that
-// cannot be read is reported as a plain error, not as a *ValidationError.
+// LoadFile reads and parses the configuration file at path, like Parse. Key files are always read.
+// Relative paths to key files and TLS files are resolved against the directory containing path. A file
+// that cannot be read is reported as a plain error, not as a *ValidationError.
 func LoadFile(path string, opts ...ParseOption) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -57,6 +66,9 @@ func load(data []byte, dir string, opts []ParseOption) (*Config, error) {
 	o := parseOptions{lookup: os.LookupEnv}
 	for _, opt := range opts {
 		opt(&o)
+	}
+	if dir == "" {
+		dir = o.baseDir
 	}
 
 	var root yaml.Node
@@ -94,8 +106,9 @@ func load(data []byte, dir string, opts []ParseOption) (*Config, error) {
 
 	errs = append(errs, substituteEnv(cfg, o.lookup)...)
 	if dir != "" {
-		errs = append(errs, resolveFiles(cfg, dir)...)
+		resolveFiles(cfg, dir)
 	}
+	errs = append(errs, loadKeyMaterial(cfg, dir)...)
 	cfg.applyDefaults()
 	if !rootFailure {
 		for _, fe := range cfg.validate() {
@@ -141,9 +154,8 @@ func underPath(path string, decoded map[string]bool) bool {
 	return false
 }
 
-// resolveFiles makes relative file paths absolute against dir and loads the files that hold keys.
-func resolveFiles(c *Config, dir string) []FieldError {
-	var errs []FieldError
+// resolveFiles makes relative TLS file paths absolute against dir.
+func resolveFiles(c *Config, dir string) {
 	absPath := func(p string) string {
 		if p == "" || filepath.IsAbs(p) {
 			return p
@@ -156,41 +168,6 @@ func resolveFiles(c *Config, dir string) []FieldError {
 			t.KeyFile = absPath(t.KeyFile)
 		}
 	}
-	for i := range c.Auth.JWT {
-		for k := range c.Auth.JWT[i].Keys {
-			key := &c.Auth.JWT[i].Keys[k]
-			if key.PublicKeyFile == "" {
-				continue
-			}
-			key.PublicKeyFile = absPath(key.PublicKeyFile)
-			if _, err := os.Stat(key.PublicKeyFile); err != nil {
-				errs = append(errs, FieldError{
-					Path: fmt.Sprintf("auth.jwt[%d].keys[%d].public_key_file", i, k),
-					Msg:  fmt.Sprintf("cannot read file: %v", err),
-				})
-			}
-		}
-	}
-	for i := range c.Auth.APIKeys {
-		p := &c.Auth.APIKeys[i]
-		if p.KeyFile == "" {
-			continue
-		}
-		p.KeyFile = absPath(p.KeyFile)
-		path := fmt.Sprintf("auth.api_keys[%d].key_file", i)
-		data, err := os.ReadFile(p.KeyFile)
-		if err != nil {
-			errs = append(errs, FieldError{Path: path, Msg: fmt.Sprintf("%s: %v", p.KeyFile, err)})
-			continue
-		}
-		var kf APIKeyFile
-		if err := yamlx.DecodeStrict(data, &kf); err != nil {
-			errs = append(errs, FieldError{Path: path, Msg: fmt.Sprintf("%s: %v", p.KeyFile, err)})
-			continue
-		}
-		p.Keys = append(p.Keys, kf.Keys...)
-	}
-	return errs
 }
 
 func lineFromMsg(msg string) int {

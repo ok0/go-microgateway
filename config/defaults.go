@@ -51,6 +51,26 @@ func defBool(p **bool, v bool) {
 	}
 }
 
+func defDurPtr(p **Duration, v time.Duration) {
+	if *p == nil {
+		d := Duration(v)
+		*p = &d
+	}
+}
+
+func defIntPtr(p **int, v int) {
+	if *p == nil {
+		*p = intPtr(v)
+	}
+}
+
+func defStrPtr(p **string, v string) {
+	if *p == nil {
+		s := v
+		*p = &s
+	}
+}
+
 func burstFor(rate float64) int {
 	if !(rate > 1) || math.IsInf(rate, 0) {
 		return 1
@@ -121,8 +141,8 @@ func (c *Config) applyDefaults() {
 				a.Jitter = floatPtr(0.1)
 			}
 			defDur(&a.Timeout, 2*time.Second)
-			defInt(&a.HealthyThreshold, 2)
-			defInt(&a.UnhealthyThreshold, 3)
+			defIntPtr(&a.HealthyThreshold, 2)
+			defIntPtr(&a.UnhealthyThreshold, 3)
 			if a.ExpectedStatuses == nil {
 				a.ExpectedStatuses = []string{"200-399"}
 			}
@@ -153,20 +173,23 @@ func (c *Config) applyDefaults() {
 
 	for i := range c.Auth.JWT {
 		p := &c.Auth.JWT[i]
-		defDur(&p.Leeway, 30*time.Second)
+		defDurPtr(&p.Leeway, 30*time.Second)
 		defStr(&p.Header, "Authorization")
 		defStr(&p.ScopeClaim, "scope")
 		defStr(&p.RolesClaim, "roles")
+		defIntPtr(&p.MaxTokenBytes, 4096)
+		defBool(&p.ForwardCredentials, false)
 		if j := p.JWKS; j != nil {
-			defDur(&j.TTL, 5*time.Minute)
-			defDur(&j.MinRefreshInterval, 30*time.Second)
-			defDur(&j.Timeout, 5*time.Second)
+			defDurPtr(&j.TTL, 10*time.Minute)
+			defDurPtr(&j.MinRefreshInterval, 30*time.Second)
+			defDurPtr(&j.Timeout, 5*time.Second)
 		}
 	}
 	for i := range c.Auth.APIKeys {
 		p := &c.Auth.APIKeys[i]
-		defStr(&p.Header, "X-API-Key")
+		defStrPtr(&p.Header, "X-API-Key")
 		defStr(&p.ConsumerHeader, "X-Consumer-ID")
+		defBool(&p.ForwardCredentials, false)
 	}
 
 	for i := range c.Routes {
@@ -184,7 +207,7 @@ func (c *Config) applyDefaults() {
 			}
 			defDur(&rl.Window, time.Minute)
 			defStr(&rl.Key.Source, "ip")
-			defInt(&rl.MaxKeys, 100000)
+			defIntPtr(&rl.MaxKeys, 100000)
 			defDur(&rl.IdleTTL, 10*time.Minute)
 		}
 		if rb := r.CircuitBreaker; rb != nil {

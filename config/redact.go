@@ -28,9 +28,10 @@ func (c *Config) Line(path string) int {
 	return c.lines.lineFor(path)
 }
 
-// Redacted returns a deep copy of c in which every non-empty JWT key secret and every API key hash
-// is replaced by "REDACTED", and the userinfo and query values of every upstream host URL and JWKS URL
-// are replaced by "REDACTED" as described in RedactURL. c itself is not modified.
+// Redacted returns a deep copy of c in which every non-empty JWT key secret and every inline API key hash
+// is replaced by "REDACTED". The PEM content loaded from public key files and the keys loaded from API key
+// files are dropped. The userinfo and query values of every upstream host URL and JWKS URL are replaced by
+// "REDACTED" as described in RedactURL. c itself is not modified.
 func (c *Config) Redacted() *Config {
 	r := deepCopy(reflect.ValueOf(c)).Interface().(*Config)
 	for i := range r.Auth.JWT {
@@ -38,12 +39,14 @@ func (c *Config) Redacted() *Config {
 			if r.Auth.JWT[i].Keys[k].Secret != "" {
 				r.Auth.JWT[i].Keys[k].Secret = "REDACTED"
 			}
+			r.Auth.JWT[i].Keys[k].LoadedPublicKey = ""
 		}
 		if r.Auth.JWT[i].JWKS != nil {
 			r.Auth.JWT[i].JWKS.URL = RedactURL(r.Auth.JWT[i].JWKS.URL)
 		}
 	}
 	for i := range r.Auth.APIKeys {
+		r.Auth.APIKeys[i].FileKeys = nil
 		for k := range r.Auth.APIKeys[i].Keys {
 			if r.Auth.APIKeys[i].Keys[k].Hash != "" {
 				r.Auth.APIKeys[i].Keys[k].Hash = "REDACTED"

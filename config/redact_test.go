@@ -84,6 +84,48 @@ func TestFingerprintChanges(t *testing.T) {
 		},
 		"jwt secret":    func(c *Config) { c.Auth.JWT[0].Keys[0].Secret = "other-secret" },
 		"route timeout": func(c *Config) { c.Routes[0].Timeout = Duration(time.Second) },
+		"leeway nil": func(c *Config) {
+			c.Auth.JWT[0].Leeway = nil
+		},
+		"leeway zero": func(c *Config) {
+			z := Duration(0)
+			c.Auth.JWT[0].Leeway = &z
+		},
+		"max_token_bytes": func(c *Config) { *c.Auth.JWT[0].MaxTokenBytes++ },
+		"jwt forward_credentials": func(c *Config) {
+			v := true
+			c.Auth.JWT[0].ForwardCredentials = &v
+		},
+		"jwks.algorithms": func(c *Config) { c.Auth.JWT[1].JWKS.Algorithms = []string{"RS256"} },
+		"jwks.ttl": func(c *Config) {
+			d := Duration(time.Hour)
+			c.Auth.JWT[1].JWKS.TTL = &d
+		},
+		"jwks.min_refresh_interval": func(c *Config) {
+			d := Duration(time.Hour)
+			c.Auth.JWT[1].JWKS.MinRefreshInterval = &d
+		},
+		"jwks.timeout": func(c *Config) {
+			d := Duration(time.Hour)
+			c.Auth.JWT[1].JWKS.Timeout = &d
+		},
+		"api header nil": func(c *Config) { c.Auth.APIKeys[0].Header = nil },
+		"api header empty": func(c *Config) {
+			s := ""
+			c.Auth.APIKeys[0].Header = &s
+		},
+		"api forward_credentials": func(c *Config) {
+			v := true
+			c.Auth.APIKeys[0].ForwardCredentials = &v
+		},
+		"file keys entry": func(c *Config) {
+			c.Auth.APIKeys[0].FileKeys = []APIKey{{ID: "file-1", Hash: "sha256:" + strings.Repeat("a", 64), Consumer: "file"}}
+		},
+		"loaded public key":   func(c *Config) { c.Auth.JWT[1].Keys[0].LoadedPublicKey = "pem" },
+		"key scopes":          func(c *Config) { c.Auth.APIKeys[0].Keys[0].Scopes = []string{"admin"} },
+		"key roles":           func(c *Config) { c.Auth.APIKeys[0].Keys[0].Roles = []string{"admin"} },
+		"require claim 1":     func(c *Config) { c.Routes[0].Auth.Require.Claims["tier"] = 1 },
+		"require claim \"1\"": func(c *Config) { c.Routes[0].Auth.Require.Claims["tier"] = "1" },
 	}
 	for name, edit := range edits {
 		c := parseFull(t)
@@ -125,7 +167,7 @@ func TestRedactURLUnparseableQuery(t *testing.T) {
 func TestRedactedURLCredentials(t *testing.T) {
 	c := parseFull(t)
 	c.Upstreams[0].Hosts[0].URL = "http://user:s3cret@h:80"
-	c.Auth.JWT[0].JWKS = &JWKS{URL: "https://u:s3cret@idp/keys"}
+	c.Auth.JWT[1].JWKS = &JWKS{URL: "https://u:pw@idp/keys?token=s3cret", Algorithms: []string{"RS256"}}
 	before := c.Fingerprint()
 
 	r := c.Redacted()
@@ -133,13 +175,41 @@ func TestRedactedURLCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(b), "s3cret") {
-		t.Errorf("redacted configuration still contains the credential: %s", b)
+	for _, secret := range []string{"s3cret", "pw@"} {
+		if strings.Contains(string(b), secret) {
+			t.Errorf("redacted configuration still contains %q: %s", secret, b)
+		}
 	}
-	if c.Upstreams[0].Hosts[0].URL != "http://user:s3cret@h:80" || c.Auth.JWT[0].JWKS.URL != "https://u:s3cret@idp/keys" {
+	if c.Upstreams[0].Hosts[0].URL != "http://user:s3cret@h:80" || c.Auth.JWT[1].JWKS.URL != "https://u:pw@idp/keys?token=s3cret" {
 		t.Error("original configuration was modified")
 	}
 	if c.Fingerprint() != before {
 		t.Error("original fingerprint changed")
+	}
+}
+
+func TestRedactedDropsLoadedKeyMaterial(t *testing.T) {
+	c := parseFull(t)
+	c.Auth.JWT[1].Keys[0].LoadedPublicKey = "-----BEGIN PUBLIC KEY-----\nloaded-pem-body\n"
+	c.Auth.APIKeys[0].FileKeys = []APIKey{{ID: "file-1", Hash: "sha256:" + strings.Repeat("c", 64), Consumer: "filer"}}
+
+	r := c.Redacted()
+	if got := r.Auth.JWT[1].Keys[0].LoadedPublicKey; got != "" {
+		t.Errorf("redacted LoadedPublicKey = %q, want empty", got)
+	}
+	if r.Auth.APIKeys[0].FileKeys != nil {
+		t.Errorf("redacted FileKeys = %+v, want nil", r.Auth.APIKeys[0].FileKeys)
+	}
+	if c.Auth.JWT[1].Keys[0].LoadedPublicKey == "" || len(c.Auth.APIKeys[0].FileKeys) != 1 {
+		t.Error("original key material was modified")
+	}
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"loaded-pem-body", strings.Repeat("c", 64), "9771189e33ad49531f98873eb4e4458ce1c96f313fe15c6d753f4c7b6ad4eba5", "file-1"} {
+		if strings.Contains(string(b), secret) {
+			t.Errorf("redacted configuration contains %q", secret)
+		}
 	}
 }

@@ -25,7 +25,7 @@ auth:
         - example-api
       keys:
         - algorithm: HS256
-          secret: example-secret
+          secret: example-secret-0123456789abcdef0123
   api_keys:
     - name: keys1
       keys:
@@ -116,7 +116,7 @@ func TestSemanticChecks(t *testing.T) {
 			c.Upstreams[0].Hosts[0].URL = "ftp://x"
 		}, "upstreams[0].hosts[0].url", "scheme"},
 		{"jwks url", func(c *Config) {
-			c.Auth.JWT[0].JWKS = &JWKS{URL: "not a url"}
+			c.Auth.JWT[0].JWKS = &JWKS{URL: "not a url", Algorithms: []string{"RS256"}}
 		}, "auth.jwt[0].jwks.url", "must be an http or https URL"},
 		{"trusted proxy CIDR", func(c *Config) {
 			c.Global.TrustedProxies = []string{"10.0.0.0/33"}
@@ -142,15 +142,15 @@ func TestSemanticChecks(t *testing.T) {
 			c.Upstreams[0].CircuitBreaker.HalfOpenProbes = intPtr(1)
 		}, "upstreams[0].circuit_breaker.half_open_probes", "must be >= success_threshold"},
 		{"jwt leeway above 5m", func(c *Config) {
-			c.Auth.JWT[0].Leeway = Duration(6 * time.Minute)
+			c.Auth.JWT[0].Leeway = durPtr(6 * time.Minute)
 		}, "auth.jwt[0].leeway", "must not exceed 5m"},
 		{"HS256 key with public_key instead of secret", func(c *Config) {
 			c.Auth.JWT[0].Keys[0].Secret = ""
 			c.Auth.JWT[0].Keys[0].PublicKey = "pem"
-		}, "auth.jwt[0].keys[0].secret", "requires a secret"},
+		}, "auth.jwt[0].keys[0].public_key", "not allowed with HS"},
 		{"RS256 key with secret", func(c *Config) {
 			c.Auth.JWT[0].Keys[0].Algorithm = "RS256"
-		}, "auth.jwt[0].keys[0].algorithm", "requires public_key or public_key_file"},
+		}, "auth.jwt[0].keys[0].secret", "allowed only with HS"},
 		{"retry not last in pipeline", func(c *Config) {
 			c.Routes[0].Pipeline = []string{"retry", "auth"}
 		}, "routes[0].pipeline[0]", `"retry" must be the last stage`},
@@ -194,7 +194,7 @@ func TestSemanticChecks(t *testing.T) {
 			c.Upstreams[0].ActiveHealth = &ActiveHealth{Path: "health", Interval: Duration(10 * time.Second), Timeout: Duration(2 * time.Second)}
 		}, "upstreams[0].active_health.path", "must start with"},
 		{"active negative healthy threshold", func(c *Config) {
-			c.Upstreams[0].ActiveHealth = &ActiveHealth{HealthyThreshold: -1, Interval: Duration(10 * time.Second), Timeout: Duration(2 * time.Second)}
+			c.Upstreams[0].ActiveHealth = &ActiveHealth{HealthyThreshold: intPtr(-1), Interval: Duration(10 * time.Second), Timeout: Duration(2 * time.Second)}
 		}, "upstreams[0].active_health.healthy_threshold", "must be >= 1"},
 		{"active expected status class", func(c *Config) {
 			c.Upstreams[0].ActiveHealth = &ActiveHealth{ExpectedStatuses: []string{"2xx"}, Interval: Duration(10 * time.Second), Timeout: Duration(2 * time.Second)}

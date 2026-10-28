@@ -813,8 +813,8 @@ func healthUpstream(hs ...config.Host) config.Upstream {
 			Interval:           dur(10 * time.Second),
 			Timeout:            dur(time.Hour),
 			Jitter:             floatp(0),
-			HealthyThreshold:   1,
-			UnhealthyThreshold: 1,
+			HealthyThreshold:   intp(1),
+			UnhealthyThreshold: intp(1),
 			ExpectedStatuses:   []string{"200-299"},
 		},
 	}

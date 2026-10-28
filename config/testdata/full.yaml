@@ -97,18 +97,15 @@ auth:
       keys:
         - kid: hs-1
           algorithm: HS256
-          secret: example-hs256-secret
+          secret: example-hs256-secret-0123456789abcdef
           public_key: ""
           public_key_file: ""
-      jwks:
-        url: https://auth.example.com/.well-known/jwks.json
-        ttl: 10m
-        min_refresh_interval: 1m
-        timeout: 3s
       scope_claim: scope
       roles_claim: roles
       forward_claims:
         sub: X-Auth-Subject
+      max_token_bytes: 8192
+      forward_credentials: false
     - name: jwt-rs
       issuer: https://sso.example.com
       audiences:
@@ -120,16 +117,31 @@ auth:
           algorithm: RS256
           public_key: |
             -----BEGIN PUBLIC KEY-----
-            ZmFrZQ==
+            MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqr7L6VJeDP7x7dLqouXD
+            ic/hwJBM/9lXgAGxAGjoCmynagVletzrKWyhA9DQrEu0Zh6VdPC8WPJsWWESD9ve
+            B+uhQpC31yBlRxZKzfb8PMNWclK3QjhAPCH9UgWp4zp+zze91PSopMT5lkY/xXSZ
+            7Oo/wAu1uzr2QJK95yrosWupYl3UP/IYEBe2WsAeYOAMhBLJmi9mZ4+VGAwsET1r
+            8JmQ9gs0MiAEehlBktMS62eF56xwLvWUDFrNC1KMXJSln+hbTYna+dd66W1acGEi
+            Wdok6FlWLri8F5viT4rUkIuBIJN6U66Aug6LuI1eeQceOTwdSOdrveRz8C0ZGdYS
+            RQIDAQAB
             -----END PUBLIC KEY-----
           public_key_file: ""
       scope_claim: scp
       roles_claim: groups
+      jwks:
+        url: https://sso.example.com/.well-known/jwks.json
+        algorithms:
+          - RS256
+          - ES256
+        ttl: 10m
+        min_refresh_interval: 1m
+        timeout: 3s
   api_keys:
     - name: partners
       header: X-API-Key
       query: api_key
       key_file: ""
+      forward_credentials: false
       consumer_header: X-Consumer-ID
       metadata_headers:
         tier: X-Consumer-Tier
@@ -137,6 +149,10 @@ auth:
         - id: alice-1
           hash: "sha256:9771189e33ad49531f98873eb4e4458ce1c96f313fe15c6d753f4c7b6ad4eba5"
           consumer: alice
+          scopes:
+            - read
+          roles:
+            - user
           metadata:
             tier: gold
         - id: bob-1

@@ -87,6 +87,14 @@ func NewChecker(cfg config.ActiveHealth, d CheckerDeps) (*Checker, error) {
 	if cfg.Jitter != nil {
 		jitter = *cfg.Jitter
 	}
+	healthyN := 2
+	if cfg.HealthyThreshold != nil {
+		healthyN = *cfg.HealthyThreshold
+	}
+	unhealthyN := 3
+	if cfg.UnhealthyThreshold != nil {
+		unhealthyN = *cfg.UnhealthyThreshold
+	}
 	expected := make([]statusRange, 0, len(cfg.ExpectedStatuses))
 	for _, s := range cfg.ExpectedStatuses {
 		r, err := parseStatusRange(s)
@@ -105,8 +113,8 @@ func NewChecker(cfg config.ActiveHealth, d CheckerDeps) (*Checker, error) {
 		timeout:    cfg.Timeout.Std(),
 		jitter:     jitter,
 		path:       cfg.Path,
-		healthyN:   cfg.HealthyThreshold,
-		unhealthyN: cfg.UnhealthyThreshold,
+		healthyN:   healthyN,
+		unhealthyN: unhealthyN,
 		expected:   expected,
 	}, nil
 }

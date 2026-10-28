@@ -3,7 +3,6 @@ package config
 import (
 	"errors"
 	"fmt"
-	"maps"
 	"math"
 	"net"
 	"net/netip"
@@ -17,10 +16,12 @@ import (
 	"github.com/ok0/lychgate/internal/router"
 )
 
-// Validate applies defaults to c, then checks it; it returns a *ValidationError (line numbers are 0) or nil.
+// Validate reloads the key files referenced by c, applies defaults to c, then checks it. It returns a
+// *ValidationError (line numbers are 0) or nil. Relative key file paths resolve against the working directory.
 func (c *Config) Validate() error {
+	errs := loadKeyMaterial(c, "")
 	c.applyDefaults()
-	errs := c.validate()
+	errs = append(errs, c.validate()...)
 	if len(errs) == 0 {
 		return nil
 	}
@@ -28,7 +29,6 @@ func (c *Config) Validate() error {
 }
 
 var (
-	jwtAlgorithms = []string{"HS256", "HS384", "HS512", "RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512", "EdDSA"}
 	lbAlgorithms  = []string{"p2c", "round_robin", "weighted_round_robin", "random", "consistent_hash"}
 	apiKeyHash    = regexp.MustCompile(`^sha256:[0-9a-fA-F]{64}$`)
 	statusPattern = regexp.MustCompile(`^\d{3}(-\d{3})?$`)
@@ -52,6 +52,7 @@ func (c *Config) validate() []FieldError {
 	checkListeners(ck, c)
 	checkUpstreams(ck, c.Upstreams)
 	kinds := checkAuth(ck, &c.Auth)
+	checkIdentityHeaders(ck, c)
 	checkMiddlewares(ck, c.Middlewares)
 	checkRoutes(ck, c, kinds)
 	return ck.errs
@@ -324,10 +325,10 @@ func checkUpstreamHealth(ck *checker, p string, u *Upstream) {
 		if j := ah.Jitter; j != nil && (!(*j >= 0 && *j < 1) || math.IsInf(*j, 0)) {
 			ck.add(ap+".jitter", "must be in [0, 1)")
 		}
-		if ah.HealthyThreshold < 1 {
+		if *ah.HealthyThreshold < 1 {
 			ck.add(ap+".healthy_threshold", "must be >= 1")
 		}
-		if ah.UnhealthyThreshold < 1 {
+		if *ah.UnhealthyThreshold < 1 {
 			ck.add(ap+".unhealthy_threshold", "must be >= 1")
 		}
 		for k, s := range ah.ExpectedStatuses {
@@ -366,140 +367,6 @@ func checkUpstreamHealth(ck *checker, p string, u *Upstream) {
 		}
 		if *cb.HalfOpenProbes < *cb.SuccessThreshold {
 			ck.add(cp+".half_open_probes", "must be >= success_threshold")
-		}
-	}
-}
-
-// checkAuth validates every provider and returns the kind ("jwt" or "apikey") of each provider name.
-func checkAuth(ck *checker, a *Auth) map[string]string {
-	kinds := map[string]string{}
-	names := map[string]bool{}
-	for i := range a.JWT {
-		p := fmt.Sprintf("auth.jwt[%d]", i)
-		checkName(ck, p+".name", a.JWT[i].Name, names)
-		if a.JWT[i].Name != "" {
-			if _, ok := kinds[a.JWT[i].Name]; !ok {
-				kinds[a.JWT[i].Name] = "jwt"
-			}
-		}
-		checkJWT(ck, p, &a.JWT[i])
-	}
-	for i := range a.APIKeys {
-		p := fmt.Sprintf("auth.api_keys[%d]", i)
-		checkName(ck, p+".name", a.APIKeys[i].Name, names)
-		if a.APIKeys[i].Name != "" {
-			if _, ok := kinds[a.APIKeys[i].Name]; !ok {
-				kinds[a.APIKeys[i].Name] = "apikey"
-			}
-		}
-		checkAPIKeys(ck, p, &a.APIKeys[i])
-	}
-	return kinds
-}
-
-func checkJWT(ck *checker, p string, j *JWTProvider) {
-	if j.Issuer == "" {
-		ck.add(p+".issuer", "is required")
-	}
-	if len(j.Audiences) == 0 {
-		ck.add(p+".audiences", "at least one audience is required")
-	}
-	switch {
-	case j.Leeway < 0:
-		ck.add(p+".leeway", "must not be negative")
-	case j.Leeway > Duration(5*time.Minute):
-		ck.add(p+".leeway", "must not exceed 5m")
-	}
-	if j.Header == "" {
-		ck.add(p+".header", "is required")
-	}
-	if j.ScopeClaim == "" {
-		ck.add(p+".scope_claim", "is required")
-	}
-	if j.RolesClaim == "" {
-		ck.add(p+".roles_claim", "is required")
-	}
-	if len(j.Keys) == 0 && j.JWKS == nil {
-		ck.add(p, "keys or jwks is required")
-	}
-	kids := map[string]bool{}
-	for k := range j.Keys {
-		key := &j.Keys[k]
-		kp := fmt.Sprintf("%s.keys[%d]", p, k)
-		if len(j.Keys) > 1 {
-			switch {
-			case key.KID == "":
-				ck.add(kp+".kid", "is required when there is more than one key")
-			case kids[key.KID]:
-				ck.add(kp+".kid", fmt.Sprintf("duplicate kid %q", key.KID))
-			default:
-				kids[key.KID] = true
-			}
-		}
-		if !slices.Contains(jwtAlgorithms, key.Algorithm) {
-			ck.add(kp+".algorithm", "must be one of HS256, HS384, HS512, RS256, RS384, RS512, PS256, PS384, PS512, ES256, ES384, ES512, EdDSA")
-		}
-		n := 0
-		for _, s := range []string{key.Secret, key.PublicKey, key.PublicKeyFile} {
-			if s != "" {
-				n++
-			}
-		}
-		if n != 1 {
-			ck.add(kp, "exactly one of secret, public_key, public_key_file must be set")
-		}
-		hmac := strings.HasPrefix(key.Algorithm, "HS")
-		if hmac && key.Secret == "" {
-			ck.add(kp+".secret", "requires a secret for HS algorithms")
-		}
-		if !hmac && key.Secret != "" {
-			ck.add(kp+".algorithm", "requires public_key or public_key_file")
-		}
-	}
-	if jw := j.JWKS; jw != nil {
-		jp := p + ".jwks"
-		u, err := url.Parse(jw.URL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			ck.add(jp+".url", "must be an http or https URL")
-		}
-		requirePositive(ck, jp+".ttl", jw.TTL)
-		requirePositive(ck, jp+".min_refresh_interval", jw.MinRefreshInterval)
-		requirePositive(ck, jp+".timeout", jw.Timeout)
-	}
-	for _, claim := range slices.Sorted(maps.Keys(j.ForwardClaims)) {
-		if j.ForwardClaims[claim] == "" {
-			ck.add(p+".forward_claims."+claim, "must not be empty")
-		}
-	}
-}
-
-func checkAPIKeys(ck *checker, p string, a *APIKeyProvider) {
-	if a.Header == "" {
-		ck.add(p+".header", "is required")
-	}
-	if a.ConsumerHeader == "" {
-		ck.add(p+".consumer_header", "is required")
-	}
-	if len(a.Keys) == 0 && a.KeyFile == "" {
-		ck.add(p, "keys or key_file is required")
-	}
-	ids := map[string]bool{}
-	for k := range a.Keys {
-		key := &a.Keys[k]
-		kp := fmt.Sprintf("%s.keys[%d]", p, k)
-		switch {
-		case key.ID == "":
-			ck.add(kp+".id", "is required")
-		case ids[key.ID]:
-			ck.add(kp+".id", fmt.Sprintf("duplicate id %q", key.ID))
-		default:
-			ids[key.ID] = true
-		}
-		if !apiKeyHash.MatchString(key.Hash) {
-			ck.add(kp+".hash", "must have the form sha256:<64 hex digits>")
-		}
-		if key.Consumer == "" {
-			ck.add(kp+".consumer", "is required")
 		}
 	}
 }
@@ -610,6 +477,9 @@ func checkRoutes(ck *checker, c *Config, kinds map[string]string) {
 			usedMws[m] = true
 		}
 		checkPipeline(ck, p+".pipeline", r.Pipeline, mws)
+		if r.Auth != nil && r.Auth.Mode != "none" && len(r.Pipeline) > 0 && !slices.Contains(r.Pipeline, "auth") {
+			ck.add(p+".pipeline", `must include "auth" when auth mode is not none`)
+		}
 		key := routeKey(r)
 		if earlier, ok := seenKeys[key]; ok {
 			ck.add(p, fmt.Sprintf("conflicts with route %q", earlier))
@@ -655,30 +525,6 @@ func checkRewrite(ck *checker, p string, rw *Rewrite) {
 	}
 }
 
-func checkRouteAuth(ck *checker, p string, a *RouteAuth, kinds map[string]string) {
-	if !slices.Contains([]string{"none", "jwt", "apikey", "any"}, a.Mode) {
-		ck.add(p+".mode", "must be one of none, jwt, apikey, any")
-	}
-	switch {
-	case a.Mode == "none" && len(a.Providers) > 0:
-		ck.add(p+".providers", "must be empty when mode is none")
-	case a.Mode != "none" && len(a.Providers) == 0:
-		ck.add(p+".providers", "at least one provider is required")
-	}
-	for j, name := range a.Providers {
-		pp := fmt.Sprintf("%s.providers[%d]", p, j)
-		kind, ok := kinds[name]
-		switch {
-		case !ok:
-			ck.add(pp, fmt.Sprintf("unknown auth provider %q", name))
-		case a.Mode == "jwt" && kind == "apikey":
-			ck.add(pp, fmt.Sprintf("%q is not a jwt provider", name))
-		case a.Mode == "apikey" && kind == "jwt":
-			ck.add(pp, fmt.Sprintf("%q is not an apikey provider", name))
-		}
-	}
-}
-
 func checkRateLimit(ck *checker, p string, rl *RateLimit) {
 	switch rl.Algorithm {
 	case "token_bucket":
@@ -706,7 +552,7 @@ func checkRateLimit(ck *checker, p string, rl *RateLimit) {
 	default:
 		ck.add(p+".key.source", "must be one of ip, consumer, header, route")
 	}
-	if rl.MaxKeys < 1 {
+	if *rl.MaxKeys < 1 {
 		ck.add(p+".max_keys", "must be >= 1")
 	}
 	requirePositive(ck, p+".idle_ttl", rl.IdleTTL)
