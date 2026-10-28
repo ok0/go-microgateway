@@ -17,6 +17,7 @@ import (
 	"github.com/ok0/lychgate/internal/middleware"
 	"github.com/ok0/lychgate/internal/reqctx"
 	"github.com/ok0/lychgate/internal/router"
+	"github.com/ok0/lychgate/internal/state"
 )
 
 func mustParse(t *testing.T, doc string) *config.Config {
@@ -26,6 +27,21 @@ func mustParse(t *testing.T, doc string) *config.Config {
 		t.Fatal(err)
 	}
 	return cfg
+}
+
+func build(t *testing.T, cfg *config.Config, d Deps) (*Snapshot, *state.Registry, error) {
+	t.Helper()
+	reg := state.NewRegistry(nil)
+	t.Cleanup(reg.Close)
+	tx := reg.Begin()
+	s, err := Build(cfg, d, tx)
+	if err != nil {
+		tx.Abort()
+		return nil, reg, err
+	}
+	lease := tx.Commit()
+	t.Cleanup(func() { _ = lease.Release() })
+	return s, reg, nil
 }
 
 func TestBuildDNSFails(t *testing.T) {
@@ -42,7 +58,7 @@ routes:
   - name: all
     upstream: users
 `)
-	s, err := Build(cfg, Deps{})
+	s, _, err := build(t, cfg, Deps{})
 	if err == nil || !strings.Contains(err.Error(), "not yet supported") {
 		t.Fatalf("Build error = %v, want not yet supported", err)
 	}
@@ -66,11 +82,10 @@ routes:
       path: /api
     upstream: users
 `)
-	s, err := Build(cfg, Deps{})
+	s, _, err := build(t, cfg, Deps{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = s.Close() })
 
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/nope", nil))
@@ -123,11 +138,10 @@ routes:
       path_type: pattern
     upstream: users
 `, backend.URL))
-	s, err := Build(cfg, Deps{})
+	s, _, err := build(t, cfg, Deps{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = s.Close() })
 	gw := httptest.NewServer(s)
 	t.Cleanup(gw.Close)
 
@@ -203,9 +217,13 @@ routes:
       path: /api
     upstream: users
 `)
-		s, err := Build(cfg, Deps{})
+		s, _, err := build(t, cfg, Deps{})
 		if err == nil || !strings.Contains(err.Error(), "middlewares[0].type") || !strings.Contains(err.Error(), `unknown middleware type "nope"`) {
 			t.Fatalf("Build error = %v, want middlewares[0].type and unknown middleware type \"nope\"", err)
+		}
+		var ve *config.ValidationError
+		if !errors.As(err, &ve) {
+			t.Errorf("Build error %T is not a *config.ValidationError", err)
 		}
 		if s != nil {
 			t.Errorf("snapshot = %v, want nil", s)
@@ -241,14 +259,125 @@ routes:
       path: /api
     upstream: users
 `)
-		s, err := Build(cfg, Deps{Middlewares: reg})
+		s, _, err := build(t, cfg, Deps{Middlewares: reg})
 		if err == nil || !strings.Contains(err.Error(), "middlewares[1]") || !strings.Contains(err.Error(), "boom") {
 			t.Fatalf("Build error = %v, want middlewares[1] and boom", err)
+		}
+		var ve *config.ValidationError
+		if !errors.As(err, &ve) {
+			t.Errorf("Build error %T is not a *config.ValidationError", err)
 		}
 		if s != nil {
 			t.Errorf("snapshot = %v, want nil", s)
 		}
 	})
+}
+
+func TestBuildMiddlewareErrorsAll(t *testing.T) {
+	reg := middleware.NewRegistry()
+	if err := reg.Register("t", func(config.Middleware) (middleware.Middleware, error) {
+		return nil, errors.New("boom")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := mustParse(t, `version: 1
+listeners:
+  - name: public
+    address: ":8080"
+upstreams:
+  - name: users
+    hosts:
+      - url: "http://127.0.0.1:9001"
+middlewares:
+  - name: a
+    type: nope
+  - name: b
+    type: nope2
+  - name: c
+    type: t
+routes:
+  - name: api
+    match:
+      path: /api
+    upstream: users
+`)
+	s, _, err := build(t, cfg, Deps{Middlewares: reg})
+	if s != nil {
+		t.Errorf("snapshot = %v, want nil", s)
+	}
+	var ve *config.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("Build error %T is not a *config.ValidationError", err)
+	}
+	wantPaths := []string{"middlewares[0].type", "middlewares[1].type", "middlewares[2]"}
+	if len(ve.Errors) != len(wantPaths) {
+		t.Fatalf("errors = %d, want %d: %v", len(ve.Errors), len(wantPaths), ve.Errors)
+	}
+	for i, fe := range ve.Errors {
+		if fe.Path != wantPaths[i] {
+			t.Errorf("error %d: path = %q, want %q", i, fe.Path, wantPaths[i])
+		}
+		if fe.Line <= 0 {
+			t.Errorf("error %d: line = %d, want > 0", i, fe.Line)
+		}
+	}
+}
+
+func TestBuildFingerprint(t *testing.T) {
+	cfg := mustParse(t, `version: 1
+listeners:
+  - name: public
+    address: ":8080"
+upstreams:
+  - name: users
+    hosts:
+      - url: "http://127.0.0.1:9001"
+routes:
+  - name: api
+    match:
+      path: /api
+    upstream: users
+`)
+	s, _, err := build(t, cfg, Deps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Fingerprint != cfg.Fingerprint() {
+		t.Errorf("Fingerprint = %q, want %q", s.Fingerprint, cfg.Fingerprint())
+	}
+}
+
+func TestBuildFailureReleasesCreated(t *testing.T) {
+	reg := middleware.NewRegistry()
+	if err := reg.Register("t", func(config.Middleware) (middleware.Middleware, error) {
+		return nil, errors.New("boom")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := mustParse(t, `version: 1
+listeners:
+  - name: public
+    address: ":8080"
+upstreams:
+  - name: users
+    hosts:
+      - url: "http://127.0.0.1:9001"
+middlewares:
+  - name: b
+    type: t
+routes:
+  - name: api
+    match:
+      path: /api
+    upstream: users
+`)
+	_, sreg, err := build(t, cfg, Deps{Middlewares: reg})
+	if err == nil {
+		t.Fatal("Build error = nil, want factory error")
+	}
+	if n := sreg.Len(); n != 0 {
+		t.Errorf("registry Len = %d after failed build, want 0", n)
+	}
 }
 
 func TestFactoryCalledOncePerDefinition(t *testing.T) {
@@ -285,11 +414,9 @@ routes:
     upstream: users
     middlewares: [first]
 `)
-	s, err := Build(cfg, Deps{Middlewares: reg})
-	if err != nil {
+	if _, _, err := build(t, cfg, Deps{Middlewares: reg}); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = s.Close() })
 	if calls != 2 {
 		t.Errorf("factory calls = %d, want 2", calls)
 	}
@@ -312,10 +439,8 @@ routes:
     upstream: users
 `)
 	for i := range 2 {
-		s, err := Build(cfg, Deps{Metrics: reg})
-		if err != nil {
+		if _, _, err := build(t, cfg, Deps{Metrics: reg}); err != nil {
 			t.Fatalf("Build %d: %v", i, err)
 		}
-		t.Cleanup(func() { _ = s.Close() })
 	}
 }

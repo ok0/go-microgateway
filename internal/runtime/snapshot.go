@@ -2,7 +2,6 @@
 package runtime
 
 import (
-	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -16,6 +15,7 @@ import (
 	"github.com/ok0/lychgate/internal/proxy"
 	"github.com/ok0/lychgate/internal/reqctx"
 	"github.com/ok0/lychgate/internal/router"
+	"github.com/ok0/lychgate/internal/state"
 	"github.com/ok0/lychgate/internal/upstream"
 )
 
@@ -24,12 +24,14 @@ type Deps struct {
 	Clock       clock.Clock
 	Metrics     *metrics.Registry
 	Middlewares *middleware.Registry
+	Dial        upstream.DialFunc // nil dials TCP
 }
 
 type Snapshot struct {
-	Config    *config.Config
-	Router    *router.Router
-	Upstreams map[string]*upstream.Upstream
+	Config      *config.Config
+	Fingerprint string
+	Router      *router.Router
+	Upstreams   map[string]*upstream.Upstream
 
 	handler  http.Handler
 	notFound http.Handler
@@ -40,7 +42,8 @@ type routeEntry struct {
 	handler http.Handler
 }
 
-func Build(cfg *config.Config, d Deps) (*Snapshot, error) {
+// Build ... Components that hold resources or carry state are obtained through tx; when Build fails the caller aborts tx, which releases everything this build created.
+func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 	logger := d.Logger
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
@@ -71,26 +74,31 @@ func Build(cfg *config.Config, d Deps) (*Snapshot, error) {
 
 	ups := make(map[string]*upstream.Upstream, len(cfg.Upstreams))
 	for i := range cfg.Upstreams {
-		u, err := upstream.Build(cfg.Upstreams[i])
+		u, err := upstream.Build(cfg.Upstreams[i], upstream.Deps{State: tx, Dial: d.Dial})
 		if err != nil {
-			_ = closeAll(ups)
 			return nil, err
 		}
 		ups[cfg.Upstreams[i].Name] = u
 	}
 
 	named := make(map[string]middleware.Middleware, len(cfg.Middlewares))
+	var mwErrs []config.FieldError
 	for i, def := range cfg.Middlewares {
 		if !reg.Known(def.Type) {
-			_ = closeAll(ups)
-			return nil, fmt.Errorf("middlewares[%d].type: unknown middleware type %q", i, def.Type)
+			path := fmt.Sprintf("middlewares[%d].type", i)
+			mwErrs = append(mwErrs, config.FieldError{Path: path, Line: cfg.Line(path), Msg: fmt.Sprintf("unknown middleware type %q", def.Type)})
+			continue
 		}
 		mw, err := reg.Build(def)
 		if err != nil {
-			_ = closeAll(ups)
-			return nil, fmt.Errorf("middlewares[%d] (%q): %w", i, def.Name, err)
+			path := fmt.Sprintf("middlewares[%d]", i)
+			mwErrs = append(mwErrs, config.FieldError{Path: path, Line: cfg.Line(path), Msg: fmt.Sprintf("%q: %v", def.Name, err)})
+			continue
 		}
 		named[def.Name] = mw
+	}
+	if len(mwErrs) > 0 {
+		return nil, &config.ValidationError{Errors: mwErrs}
 	}
 
 	accessLog := cfg.Global.Log.AccessLog == nil || *cfg.Global.Log.AccessLog
@@ -140,7 +148,6 @@ func Build(cfg *config.Config, d Deps) (*Snapshot, error) {
 
 	rt, err := router.New(entries)
 	if err != nil {
-		_ = closeAll(ups)
 		return nil, err
 	}
 
@@ -154,10 +161,11 @@ func Build(cfg *config.Config, d Deps) (*Snapshot, error) {
 	})
 
 	s := &Snapshot{
-		Config:    cfg,
-		Router:    rt,
-		Upstreams: ups,
-		notFound:  notFound,
+		Config:      cfg,
+		Fingerprint: cfg.Fingerprint(),
+		Router:      rt,
+		Upstreams:   ups,
+		notFound:    notFound,
 	}
 	s.handler = middleware.Chain(
 		http.HandlerFunc(s.dispatch),
@@ -188,16 +196,4 @@ func (s *Snapshot) dispatch(w http.ResponseWriter, r *http.Request) {
 
 func (s *Snapshot) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.handler.ServeHTTP(w, r)
-}
-
-func (s *Snapshot) Close() error {
-	return closeAll(s.Upstreams)
-}
-
-func closeAll(ups map[string]*upstream.Upstream) error {
-	var errs []error
-	for _, u := range ups {
-		errs = append(errs, u.Close())
-	}
-	return errors.Join(errs...)
 }

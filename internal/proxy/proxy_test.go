@@ -15,16 +15,23 @@ import (
 
 	"github.com/ok0/lychgate/config"
 	"github.com/ok0/lychgate/internal/metrics"
+	"github.com/ok0/lychgate/internal/state"
 	"github.com/ok0/lychgate/internal/upstream"
 )
 
 func newUpstream(t *testing.T, rawURL string) *upstream.Upstream {
 	t.Helper()
-	up, err := upstream.Build(config.Upstream{Name: "u", Hosts: []config.Host{{URL: rawURL}}})
+	reg := state.NewRegistry(nil)
+	tx := reg.Begin()
+	up, err := upstream.Build(config.Upstream{Name: "u", Hosts: []config.Host{{URL: rawURL}}}, upstream.Deps{State: tx})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = up.Close() })
+	lease := tx.Commit()
+	t.Cleanup(func() {
+		reg.Close()
+		_ = lease.Release()
+	})
 	return up
 }
 
