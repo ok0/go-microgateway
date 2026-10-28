@@ -247,7 +247,7 @@ routes:
 		`lychgate_request_duration_seconds_count{route="api"} 2`,
 		`lychgate_request_duration_seconds_bucket{route="api",le="+Inf"} 2`,
 		`lychgate_upstream_attempts_total{upstream="good",host="` + goodHost + `",outcome="success"} 2`,
-		`lychgate_upstream_attempts_total{upstream="bad",host="` + badAddr + `",outcome="error"} 1`,
+		`lychgate_upstream_attempts_total{upstream="bad",host="` + badAddr + `",outcome="failure"} 1`,
 	} {
 		if !metricsHasLine(body, line) {
 			t.Fatalf("metrics lack line %q\n%s", line, body)

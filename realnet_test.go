@@ -40,3 +40,15 @@ func TestTransportRecreatedOnTimeoutChangeTCP(t *testing.T) {
 func TestRenameResetsStateTCP(t *testing.T) {
 	runRenameResetsState(t, tcpNetwork{})
 }
+
+func TestPassiveEjectionTCP(t *testing.T) {
+	runPassiveEjection(t, tcpNetwork{})
+}
+
+func TestActiveHealthTCP(t *testing.T) {
+	runActiveHealth(t, tcpNetwork{})
+}
+
+func TestTransportLimitsTCP(t *testing.T) {
+	runTransportLimits(t, tcpNetwork{})
+}

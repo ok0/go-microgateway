@@ -429,6 +429,8 @@ func TestRoundRobinGateway(t *testing.T) {
 	c := backend(t, "C")
 	doc := "version: 1\n" + listenersYAML + fmt.Sprintf(`upstreams:
   - name: up
+    load_balancer:
+      algorithm: round_robin
     hosts:
       - url: %q
         weight: 1

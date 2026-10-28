@@ -12,6 +12,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/ok0/lychgate/internal/clock"
 )
 
 // testNetwork is the network a gateway test runs on: in memory (hermetic) or loopback TCP.
@@ -26,21 +29,31 @@ type testNetwork interface {
 	dial(t *testing.T, s *testServer) net.Conn
 	// openConns reports the open connection ends on the network; ok is false when it cannot be observed.
 	openConns() (n int64, ok bool)
+	refuse(t *testing.T, s *testServer)
+	blackhole(t *testing.T) string
 }
 
 // testServer is a running test server and its server-side connection counts.
 type testServer struct {
-	URL  string       // "http://host:port"
-	Addr string       // "host:port"
-	New  atomic.Int64 // connections accepted
-	Open atomic.Int64 // accepted connections not yet closed or hijacked
+	URL     string       // "http://host:port"
+	Addr    string       // "host:port"
+	New     atomic.Int64 // connections accepted
+	Open    atomic.Int64 // accepted connections not yet closed or hijacked
+	Peak    atomic.Int64
+	closeFn func()
 }
 
 func (s *testServer) track(_ net.Conn, st http.ConnState) {
 	switch st {
 	case http.StateNew:
 		s.New.Add(1)
-		s.Open.Add(1)
+		open := s.Open.Add(1)
+		for {
+			peak := s.Peak.Load()
+			if open <= peak || s.Peak.CompareAndSwap(peak, open) {
+				break
+			}
+		}
 	case http.StateClosed, http.StateHijacked:
 		s.Open.Add(-1)
 	}
@@ -49,12 +62,18 @@ func (s *testServer) track(_ net.Conn, st http.ConnState) {
 type memNetwork struct {
 	mu        sync.Mutex
 	listeners map[string]*memListener
+	refused   map[string]bool
+	holes     map[string]bool
 	seq       int
 	open      atomic.Int64
 }
 
 func newMemNetwork() *memNetwork {
-	return &memNetwork{listeners: make(map[string]*memListener)}
+	return &memNetwork{
+		listeners: make(map[string]*memListener),
+		refused:   make(map[string]bool),
+		holes:     make(map[string]bool),
+	}
 }
 
 type memListener struct {
@@ -83,7 +102,16 @@ func (n *memNetwork) DialContext(ctx context.Context, network, addr string) (net
 	refused := &net.OpError{Op: "dial", Net: network, Err: errors.New("connection refused")}
 	n.mu.Lock()
 	l, ok := n.listeners[addr]
+	isRefused := n.refused[addr]
+	isHole := n.holes[addr]
 	n.mu.Unlock()
+	if isRefused {
+		return nil, refused
+	}
+	if isHole {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if !ok {
 		return nil, refused
 	}
@@ -160,7 +188,19 @@ func (l *memListener) Addr() net.Addr {
 
 func (n *memNetwork) serve(t *testing.T, h http.Handler) *testServer {
 	t.Helper()
-	l := n.listen()
+	return n.serveListener(t, n.listen(), h)
+}
+
+func (n *memNetwork) serveAt(t *testing.T, addr string, h http.Handler) *testServer {
+	t.Helper()
+	n.mu.Lock()
+	l := &memListener{addr: addr, n: n, ch: make(chan net.Conn), done: make(chan struct{})}
+	n.listeners[addr] = l
+	n.mu.Unlock()
+	return n.serveListener(t, l, h)
+}
+
+func (n *memNetwork) serveListener(t *testing.T, l *memListener, h http.Handler) *testServer {
 	s := &testServer{URL: "http://" + l.addr, Addr: l.addr}
 	srv := &http.Server{Handler: h, ConnState: s.track}
 	served := make(chan struct{})
@@ -173,6 +213,23 @@ func (n *memNetwork) serve(t *testing.T, h http.Handler) *testServer {
 		<-served
 	})
 	return s
+}
+
+func (n *memNetwork) refuse(t *testing.T, s *testServer) {
+	t.Helper()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.refused[s.Addr] = true
+}
+
+func (n *memNetwork) blackhole(t *testing.T) string {
+	t.Helper()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.seq++
+	addr := fmt.Sprintf("blackhole%d.mem:80", n.seq)
+	n.holes[addr] = true
+	return addr
 }
 
 func (n *memNetwork) gateway(t *testing.T, doc string, opts ...Option) *Gateway {
@@ -215,8 +272,19 @@ func (tcpNetwork) serve(t *testing.T, h http.Handler) *testServer {
 	srv.Start()
 	s.URL = srv.URL
 	s.Addr = srv.Listener.Addr().String()
+	s.closeFn = srv.Close
 	t.Cleanup(srv.Close)
 	return s
+}
+
+func (tcpNetwork) refuse(t *testing.T, s *testServer) {
+	t.Helper()
+	s.closeFn()
+}
+
+func (tcpNetwork) blackhole(t *testing.T) string {
+	t.Helper()
+	return "10.255.255.1:81"
 }
 
 func (tcpNetwork) gateway(t *testing.T, doc string, opts ...Option) *Gateway {
@@ -247,6 +315,17 @@ func (tcpNetwork) dial(t *testing.T, s *testServer) net.Conn {
 
 func (tcpNetwork) openConns() (int64, bool) {
 	return 0, false
+}
+
+func delayed(clk *clock.Fake, d time.Duration, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-clk.After(d):
+		case <-r.Context().Done():
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 type heldBackend struct {
@@ -370,4 +449,51 @@ func TestMemNetwork(t *testing.T) {
 		open, _ := n.openConns()
 		return open == 0
 	})
+
+	refusedSrv := n.serve(t, echoHandler("refused"))
+	n.refuse(t, refusedSrv)
+	if _, err := n.DialContext(context.Background(), "tcp", refusedSrv.Addr); err == nil {
+		t.Fatal("dial to refused address succeeded")
+	}
+
+	hole := n.blackhole(t)
+	holeCtx, holeCancel := context.WithCancel(context.Background())
+	holeDone := make(chan error, 1)
+	go func() {
+		_, err := n.DialContext(holeCtx, "tcp", hole)
+		holeDone <- err
+	}()
+	holeCancel()
+	select {
+	case err := <-holeDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("blackhole dial error = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("blackhole dial did not return after cancel")
+	}
+
+	gate := make(chan struct{})
+	peakSrv := n.serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-gate
+		w.WriteHeader(http.StatusOK)
+	}))
+	peakClient := n.client(t, nil)
+	var wg sync.WaitGroup
+	for range 3 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := peakClient.Get(peakSrv.URL + "/")
+			if err == nil {
+				resp.Body.Close()
+			}
+		}()
+	}
+	eventually(t, func() bool { return peakSrv.Open.Load() == 3 })
+	close(gate)
+	wg.Wait()
+	if got := peakSrv.Peak.Load(); got < 3 {
+		t.Fatalf("peak connections = %d, want at least 3", got)
+	}
 }

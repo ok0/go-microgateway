@@ -429,7 +429,7 @@ func TestRunInvalidConfig(t *testing.T) {
 	}
 }
 
-func TestRunDNSNotSupported(t *testing.T) {
+func TestValidateDNSUpstream(t *testing.T) {
 	path := writeTemp(t, `version: 1
 listeners:
   - name: public
@@ -446,12 +446,67 @@ routes:
       path_type: prefix
     upstream: users
 `)
-	code, _, errs := runCmd(t, "run", "-config", path)
+	code, _, errs := runCmd(t, "validate", "-config", path)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr:\n%s", code, errs)
+	}
+}
+
+func TestValidateUpstreamErrors(t *testing.T) {
+	src := `version: 1
+listeners:
+  - name: public
+    address: ":8080"
+upstreams:
+  - name: a
+    hosts:
+      - url: "http://a.internal:9001"
+        weight: -1
+    load_balancer:
+      algorithm: bogus
+    passive_health:
+      max_ejection_percent: 120
+    active_health:
+      interval: 1s
+      timeout: 2s
+  - name: b
+    hosts:
+      - url: "http://b.internal:9001"
+    dns:
+      hostname: b.internal
+      port: 9001
+    load_balancer:
+      algorithm: consistent_hash
+  - name: c
+    hosts: []
+    load_balancer:
+      algorithm: consistent_hash
+      hash:
+        source: ip
+      bounded_load_factor: 0.5
+      virtual_nodes: -1
+`
+	path := writeTemp(t, src)
+	code, _, errs := runCmd(t, "validate", "-config", path)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1; stderr:\n%s", code, errs)
 	}
-	if !strings.Contains(errs, "not yet supported") {
-		t.Errorf("stderr = %q, want it to contain %q", errs, "not yet supported")
+	paths := []string{
+		"upstreams[0].hosts[0].weight",
+		"upstreams[0].load_balancer.algorithm",
+		"upstreams[0].passive_health.max_ejection_percent",
+		"upstreams[0].active_health.timeout",
+		"upstreams[1]",
+		"upstreams[1].load_balancer.hash.source",
+		"upstreams[2]",
+		"upstreams[2].load_balancer.bounded_load_factor",
+		"upstreams[2].load_balancer.virtual_nodes",
+	}
+	for _, p := range paths {
+		re := regexp.MustCompile(regexp.QuoteMeta(p) + ` \(line [1-9][0-9]*\): `)
+		if !re.MatchString(errs) {
+			t.Errorf("stderr lacks an error for %s with a line number\nstderr:\n%s", p, errs)
+		}
 	}
 }
 
