@@ -120,6 +120,7 @@ func (f *Fake) Advance(d time.Duration) {
 		}
 	}
 	f.now = target
+	f.cond.Broadcast()
 	f.mu.Unlock()
 }
 
@@ -135,6 +136,7 @@ func (f *Fake) Set(t time.Time) {
 	}
 	f.mu.Lock()
 	f.now = t
+	f.cond.Broadcast()
 	f.mu.Unlock()
 }
 
@@ -143,6 +145,22 @@ func (f *Fake) BlockUntil(n int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for len(f.waiters) < n {
+		f.cond.Wait()
+	}
+}
+
+// Due returns the number of pending waiters whose deadline is no later than now+within.
+func (f *Fake) Due(within time.Duration) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.dueLocked(within)
+}
+
+// BlockUntilDue blocks until at least n pending waiters are due within the given duration of fake time.
+func (f *Fake) BlockUntilDue(n int, within time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for f.dueLocked(within) < n {
 		f.cond.Wait()
 	}
 }
@@ -170,6 +188,17 @@ func (f *Fake) removeLocked(w *waiter) bool {
 		}
 	}
 	return false
+}
+
+func (f *Fake) dueLocked(within time.Duration) int {
+	limit := f.now.Add(within)
+	count := 0
+	for _, w := range f.waiters {
+		if !w.deadline.After(limit) {
+			count++
+		}
+	}
+	return count
 }
 
 func (f *Fake) nextDueLocked(target time.Time) *waiter {

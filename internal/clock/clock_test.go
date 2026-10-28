@@ -129,6 +129,25 @@ func TestFakeBlockUntil(t *testing.T) {
 	<-done
 }
 
+func TestBlockUntilDue(t *testing.T) {
+	f := NewFake(testStart)
+	f.AfterFunc(time.Hour, func() {})
+	if n := f.Due(250 * time.Millisecond); n != 0 {
+		t.Fatalf("Due(250ms) with only a 1h timer = %d, want 0", n)
+	}
+
+	go f.AfterFunc(100*time.Millisecond, func() {})
+	f.BlockUntilDue(1, 250*time.Millisecond)
+	if n := f.Due(250 * time.Millisecond); n != 1 {
+		t.Fatalf("Due(250ms) after BlockUntilDue = %d, want 1", n)
+	}
+
+	f.Advance(100 * time.Millisecond)
+	if n := f.Due(250 * time.Millisecond); n != 0 {
+		t.Fatalf("Due(250ms) after Advance(100ms) = %d, want 0", n)
+	}
+}
+
 func TestFakeSet(t *testing.T) {
 	f := NewFake(testStart)
 	ch := f.After(5 * time.Second)
