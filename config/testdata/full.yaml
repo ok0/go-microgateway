@@ -230,7 +230,6 @@ routes:
         source: header
         name: X-Tenant
       max_keys: 50000
-      idle_ttl: 10m
     circuit_breaker:
       enabled: true
     retry:
@@ -276,7 +275,6 @@ routes:
       key:
         source: ip
       max_keys: 1000
-      idle_ttl: 5m
   - name: partners-api
     match:
       path: /partners

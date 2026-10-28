@@ -1,7 +1,6 @@
 package config
 
 import (
-	"math"
 	"time"
 )
 
@@ -69,13 +68,6 @@ func defStrPtr(p **string, v string) {
 		s := v
 		*p = &s
 	}
-}
-
-func burstFor(rate float64) int {
-	if !(rate > 1) || math.IsInf(rate, 0) {
-		return 1
-	}
-	return int(math.Ceil(rate))
 }
 
 // applyDefaults sets every default documented in types.go on fields that hold their zero value.
@@ -201,14 +193,17 @@ func (c *Config) applyDefaults() {
 		}
 		if rl := r.RateLimit; rl != nil {
 			defStr(&rl.Algorithm, "token_bucket")
-			defDur(&rl.Per, time.Second)
-			if rl.Algorithm == "token_bucket" && rl.Burst == 0 {
-				rl.Burst = burstFor(rl.Rate)
+			switch rl.Algorithm {
+			case "token_bucket":
+				defDurPtr(&rl.Per, time.Second)
+				if rl.Burst == nil && rl.Rate != nil && *rl.Rate >= 1 {
+					rl.Burst = int64Ptr(*rl.Rate)
+				}
+			case "sliding_window":
+				defDurPtr(&rl.Window, time.Minute)
 			}
-			defDur(&rl.Window, time.Minute)
 			defStr(&rl.Key.Source, "ip")
 			defIntPtr(&rl.MaxKeys, 100000)
-			defDur(&rl.IdleTTL, 10*time.Minute)
 		}
 		if rb := r.CircuitBreaker; rb != nil {
 			defBool(&rb.Enabled, true)

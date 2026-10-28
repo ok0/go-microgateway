@@ -194,7 +194,6 @@ var wantKeys = []string{
 	"routes[].rate_limit.key.source",
 	"routes[].rate_limit.key.name",
 	"routes[].rate_limit.max_keys",
-	"routes[].rate_limit.idle_ttl",
 	"routes[].circuit_breaker",
 	"routes[].circuit_breaker.enabled",
 	"routes[].retry",

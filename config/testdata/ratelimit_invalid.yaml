@@ -1,0 +1,131 @@
+version: 1
+listeners:
+  - name: public
+    address: ":8080"
+upstreams:
+  - name: u
+    hosts:
+      - url: "http://127.0.0.1:9001"
+routes:
+  - name: r1
+    match:
+      path: /r1
+    upstream: u
+    rate_limit:
+      algorithm: token_bucket
+      rate: 5
+      idle_ttl: 1m
+  - name: r2
+    match:
+      path: /r2
+    upstream: u
+    rate_limit:
+      rate: 0
+  - name: r3
+    match:
+      path: /r3
+    upstream: u
+    rate_limit:
+      algorithm: token_bucket
+  - name: r4
+    match:
+      path: /r4
+    upstream: u
+    rate_limit:
+      rate: 5
+      per: 0s
+  - name: r5
+    match:
+      path: /r5
+    upstream: u
+    rate_limit:
+      rate: 5
+      burst: 0
+  - name: r6
+    match:
+      path: /r6
+    upstream: u
+    rate_limit:
+      rate: 5
+      max_keys: 0
+  - name: r7
+    match:
+      path: /r7
+    upstream: u
+    rate_limit:
+      algorithm: sliding_window
+      limit: 10
+      window: 0s
+  - name: r8
+    match:
+      path: /r8
+    upstream: u
+    rate_limit:
+      algorithm: token_bucket
+      rate: 5
+      limit: 10
+  - name: r9
+    match:
+      path: /r9
+    upstream: u
+    rate_limit:
+      algorithm: sliding_window
+      limit: 10
+      rate: 5
+  - name: r10
+    match:
+      path: /r10
+    upstream: u
+    rate_limit:
+      rate: 5
+      key: {source: header}
+  - name: r11
+    match:
+      path: /r11
+    upstream: u
+    rate_limit:
+      rate: 5
+      key: {source: ip, name: X-A}
+  - name: r12
+    match:
+      path: /r12
+    upstream: u
+    rate_limit:
+      algorithm: leaky
+  - name: r13
+    match:
+      path: /r13
+    upstream: u
+    rate_limit:
+      rate: 5
+      key: {source: cookie}
+  - name: r14
+    match:
+      path: /r14
+    upstream: u
+    rate_limit:
+      rate: 2000
+      per: 1ms
+  - name: r15
+    match:
+      path: /r15
+    upstream: u
+    rate_limit:
+      rate: 1
+      per: 1h
+      burst: 25
+  - name: r16
+    match:
+      path: /r16
+    upstream: u
+    rate_limit:
+      rate: 5
+      key: {source: consumer}
+  - name: r17
+    match:
+      path: /r17
+    upstream: u
+    rate_limit:
+      rate: 5
+    pipeline:
+      - timeout

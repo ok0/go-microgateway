@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ok0/lychgate/internal/router"
+	"github.com/ok0/lychgate/store"
 )
 
 // Validate reloads the key files referenced by c, applies defaults to c, then checks it. It returns a
@@ -461,7 +462,7 @@ func checkRoutes(ck *checker, c *Config, kinds map[string]string) {
 			checkRouteAuth(ck, p+".auth", r.Auth, kinds)
 		}
 		if r.RateLimit != nil {
-			checkRateLimit(ck, p+".rate_limit", r.RateLimit)
+			checkRateLimit(ck, p+".rate_limit", r)
 		}
 		if r.Retry != nil {
 			checkRetry(ck, p+".retry", r.Retry)
@@ -479,6 +480,9 @@ func checkRoutes(ck *checker, c *Config, kinds map[string]string) {
 		checkPipeline(ck, p+".pipeline", r.Pipeline, mws)
 		if r.Auth != nil && r.Auth.Mode != "none" && len(r.Pipeline) > 0 && !slices.Contains(r.Pipeline, "auth") {
 			ck.add(p+".pipeline", `must include "auth" when auth mode is not none`)
+		}
+		if r.RateLimit != nil && len(r.Pipeline) > 0 && !slices.Contains(r.Pipeline, "rate_limit") {
+			ck.add(p+".pipeline", `must include "rate_limit" because the route has a rate_limit block`)
 		}
 		key := routeKey(r)
 		if earlier, ok := seenKeys[key]; ok {
@@ -525,26 +529,84 @@ func checkRewrite(ck *checker, p string, rw *Rewrite) {
 	}
 }
 
-func checkRateLimit(ck *checker, p string, rl *RateLimit) {
+func checkRateLimit(ck *checker, p string, r *Route) {
+	rl := r.RateLimit
+	start := len(ck.errs)
+	ok := true
 	switch rl.Algorithm {
 	case "token_bucket":
-		if !(rl.Rate > 0) || math.IsInf(rl.Rate, 0) {
-			ck.add(p+".rate", "must be a positive finite number")
+		if rl.Rate == nil {
+			ck.add(p+".rate", "is required for token_bucket")
+			ok = false
+		} else if *rl.Rate < 1 {
+			ck.add(p+".rate", "must be >= 1")
+			ok = false
 		}
-		requirePositive(ck, p+".per", rl.Per)
-		if rl.Burst < 1 {
+		if rl.Per != nil && *rl.Per <= 0 {
+			ck.add(p+".per", "must be positive")
+			ok = false
+		}
+		if rl.Burst != nil && *rl.Burst < 1 {
 			ck.add(p+".burst", "must be >= 1")
+			ok = false
+		}
+		if rl.Limit != nil {
+			ck.add(p+".limit", "is only valid with algorithm sliding_window")
+		}
+		if rl.Window != nil {
+			ck.add(p+".window", "is only valid with algorithm sliding_window")
+		}
+		if ok {
+			t := int64(rl.Per.Std()) / *rl.Rate
+			if t < int64(store.MinInterval) {
+				ck.add(p+".rate", "per/rate must be at least 1µs")
+			} else if *rl.Burst > int64(store.MaxSpan)/t {
+				ck.add(p+".burst", "burst × per/rate must not exceed 24h")
+			}
 		}
 	case "sliding_window":
-		if rl.Limit < 1 {
+		if rl.Limit == nil {
+			ck.add(p+".limit", "is required for sliding_window")
+			ok = false
+		} else if *rl.Limit < 1 {
 			ck.add(p+".limit", "must be >= 1")
+			ok = false
 		}
-		requirePositive(ck, p+".window", rl.Window)
+		if rl.Window != nil && *rl.Window <= 0 {
+			ck.add(p+".window", "must be positive")
+			ok = false
+		}
+		if rl.Rate != nil {
+			ck.add(p+".rate", "is only valid with algorithm token_bucket")
+		}
+		if rl.Per != nil {
+			ck.add(p+".per", "is only valid with algorithm token_bucket")
+		}
+		if rl.Burst != nil {
+			ck.add(p+".burst", "is only valid with algorithm token_bucket")
+		}
+		if ok {
+			if rl.Window.Std() > store.MaxSpan {
+				ck.add(p+".window", "must not exceed 24h")
+			} else if int64(*rl.Window) / *rl.Limit < int64(store.MinInterval) {
+				ck.add(p+".limit", "window/limit must be at least 1µs")
+			}
+		}
 	default:
 		ck.add(p+".algorithm", "must be one of token_bucket, sliding_window")
 	}
+	if len(ck.errs) == start {
+		if l, valid := rl.StoreLimit(); valid {
+			if err := l.Validate(); err != nil {
+				ck.add(p, err.Error())
+			}
+		}
+	}
 	switch rl.Key.Source {
 	case "ip", "consumer", "route":
+		if rl.Key.Name != "" {
+			ck.add(p+".key.name", "is only valid with key source header")
+		}
 	case "header":
 		if rl.Key.Name == "" {
 			ck.add(p+".key.name", "is required when key source is header")
@@ -552,10 +614,12 @@ func checkRateLimit(ck *checker, p string, rl *RateLimit) {
 	default:
 		ck.add(p+".key.source", "must be one of ip, consumer, header, route")
 	}
+	if rl.Key.Source == "consumer" && (r.Auth == nil || r.Auth.Mode == "none") {
+		ck.add(p+".key.source", "consumer requires route authentication (auth.mode is none, so every request would fall back to the client IP)")
+	}
 	if *rl.MaxKeys < 1 {
 		ck.add(p+".max_keys", "must be >= 1")
 	}
-	requirePositive(ck, p+".idle_ttl", rl.IdleTTL)
 }
 
 func checkRetry(ck *checker, p string, rt *Retry) {

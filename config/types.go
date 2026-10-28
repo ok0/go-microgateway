@@ -450,33 +450,23 @@ type Require struct {
 	Claims map[string]any `yaml:"claims" json:"claims"`
 }
 
-// RateLimit configures request rate limiting. Pointer fields take their default only when absent; other fields left at their zero value take the defaults noted on each field.
+// RateLimit configures request rate limiting. Pointer fields distinguish absent from explicit zero: an absent field takes its default, while an explicit zero or negative value is a validation error and is never replaced by a default.
 type RateLimit struct {
-	// Algorithm is token_bucket or sliding_window. Default "token_bucket".
-	Algorithm string `yaml:"algorithm" json:"algorithm"`
-	// Rate is the token refill rate per Per, used by token_bucket.
-	Rate float64 `yaml:"rate" json:"rate"`
-	// Per is the period Rate is measured over. Default 1s.
-	Per Duration `yaml:"per" json:"per"`
-	// Burst is the bucket size for token_bucket. Default max(1, ceil(rate)) for token_bucket.
-	Burst int `yaml:"burst" json:"burst"`
-	// Limit is the request count per Window, used by sliding_window.
-	Limit int `yaml:"limit" json:"limit"`
-	// Window is the period Limit applies to, used by sliding_window. Default 1m.
-	Window Duration `yaml:"window" json:"window"`
-	// Key selects what limits are applied per.
-	Key RateLimitKey `yaml:"key" json:"key"`
-	// MaxKeys bounds how many distinct keys are tracked. Default 100000 when absent; must be >= 1.
-	MaxKeys *int `yaml:"max_keys" json:"max_keys"`
-	// IdleTTL is how long an unused key is kept. Default 10m.
-	IdleTTL Duration `yaml:"idle_ttl" json:"idle_ttl"`
+	Algorithm string       `yaml:"algorithm" json:"algorithm"` // token_bucket | sliding_window. Default "token_bucket".
+	Rate      *int64       `yaml:"rate" json:"rate"`           // tokens per Per; required for token_bucket; >= 1.
+	Per       *Duration    `yaml:"per" json:"per"`             // token_bucket only. Default 1s when absent; > 0.
+	Burst     *int64       `yaml:"burst" json:"burst"`         // token_bucket only. Default equal to Rate when absent; >= 1.
+	Limit     *int64       `yaml:"limit" json:"limit"`         // requests per Window; required for sliding_window; >= 1.
+	Window    *Duration    `yaml:"window" json:"window"`       // sliding_window only. Default 1m when absent; > 0.
+	Key       RateLimitKey `yaml:"key" json:"key"`
+	MaxKeys   *int         `yaml:"max_keys" json:"max_keys"` // keys kept in memory per instance. Default 100000 when absent; >= 1.
 }
 
 // RateLimitKey selects the attribute limits are applied per. Fields left at their zero value take the defaults noted on each field.
 type RateLimitKey struct {
 	// Source is one of ip, consumer, header, route. Default "ip".
 	Source string `yaml:"source" json:"source"`
-	// Name is the header name, required when Source is header.
+	// Name is the header name. It is required when Source is header and is only valid with Source header.
 	Name string `yaml:"name" json:"name"`
 }
 

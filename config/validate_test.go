@@ -95,8 +95,8 @@ func TestSemanticChecks(t *testing.T) {
 			c.Global.DrainTimeout = Duration(-time.Second)
 		}, "global.drain_timeout", "must be positive"},
 		{"zero rate on token_bucket", func(c *Config) {
-			c.Routes[0].RateLimit = &RateLimit{Algorithm: "token_bucket", Rate: 0}
-		}, "routes[0].rate_limit.rate", "must be a positive finite number"},
+			c.Routes[0].RateLimit = &RateLimit{Algorithm: "token_bucket", Rate: int64Ptr(0)}
+		}, "routes[0].rate_limit.rate", "must be >= 1"},
 		{"invalid path_type", func(c *Config) {
 			c.Routes[0].Match.PathType = "regex"
 		}, "routes[0].match.path_type", "must be one of"},
@@ -107,7 +107,7 @@ func TestSemanticChecks(t *testing.T) {
 			c.Upstreams[0].LoadBalancer.Algorithm = "bogus"
 		}, "upstreams[0].load_balancer.algorithm", "must be one of"},
 		{"invalid rate-limit key source", func(c *Config) {
-			c.Routes[0].RateLimit = &RateLimit{Rate: 1, Key: RateLimitKey{Source: "bogus"}}
+			c.Routes[0].RateLimit = &RateLimit{Rate: int64Ptr(1), Key: RateLimitKey{Source: "bogus"}}
 		}, "routes[0].rate_limit.key.source", "must be one of"},
 		{"invalid hash source with consistent_hash", func(c *Config) {
 			c.Upstreams[0].LoadBalancer = LoadBalancer{Algorithm: "consistent_hash", Hash: Hash{Source: "bogus"}}
