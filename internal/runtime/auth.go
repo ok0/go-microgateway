@@ -64,7 +64,7 @@ func buildJWT(p *config.JWTProvider, tx *state.Tx, f auth.Fetcher, clk clock.Clo
 	for i, k := range p.Keys {
 		var material any
 		if authkey.IsHMAC(k.Algorithm) {
-			material = []byte(k.Secret)
+			material = []byte(k.Secret.Reveal())
 		} else {
 			pemData := k.PublicKey
 			if pemData == "" {
@@ -127,8 +127,8 @@ func buildJWKS(provider string, j *config.JWKS, tx *state.Tx, f auth.Fetcher, cl
 	return state.Get(tx, auth.KindJWKS, provider, jwksFingerprint(j), func() (*auth.JWKS, error) {
 		return auth.NewJWKS(auth.JWKSConfig{
 			Provider:           provider,
-			URL:                j.URL,
-			DisplayURL:         config.RedactURL(j.URL),
+			URL:                j.URL.Reveal(),
+			DisplayURL:         j.URL.String(),
 			Algorithms:         slices.Clone(j.Algorithms),
 			TTL:                ttl,
 			MinRefreshInterval: minRefresh,
@@ -156,7 +156,7 @@ func jwksFingerprint(j *config.JWKS) string {
 		MinRefreshInterval time.Duration
 		Timeout            time.Duration
 	}{
-		URL:                j.URL,
+		URL:                j.URL.Reveal(),
 		Algorithms:         j.Algorithms,
 		TTL:                durationOr(j.TTL, 10*time.Minute),
 		MinRefreshInterval: durationOr(j.MinRefreshInterval, 30*time.Second),
@@ -171,7 +171,7 @@ func buildAPIKey(a *config.APIKeyProvider) (*auth.APIKey, error) {
 	}
 	var entries []auth.APIKeyEntry
 	for _, k := range slices.Concat(a.Keys, a.FileKeys) {
-		hash, err := hex.DecodeString(strings.ToLower(strings.TrimPrefix(k.Hash, "sha256:")))
+		hash, err := hex.DecodeString(strings.ToLower(strings.TrimPrefix(k.Hash.Reveal(), "sha256:")))
 		if err != nil {
 			return nil, fmt.Errorf("auth provider %q key %q: invalid hash", a.Name, k.ID)
 		}

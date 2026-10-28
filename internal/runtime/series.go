@@ -17,6 +17,12 @@ type Series struct {
 	JWKSRefreshes        *metrics.CounterVec
 	RateLimited          *metrics.CounterVec
 	RateLimitKeys        *metrics.GaugeVec
+	// StoreAvailable reports whether a store's guard admits calls.
+	StoreAvailable *metrics.GaugeVec
+	// StoreErrors counts store calls that failed or timed out.
+	StoreErrors *metrics.CounterVec
+	// StoreFallback counts rate-limit decisions made by a failure policy.
+	StoreFallback *metrics.CounterVec
 }
 
 // RegisterSeries registers (or, for an identical earlier registration, reuses) the series in r.
@@ -85,5 +91,17 @@ func RegisterSeries(r *metrics.Registry) (*Series, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Series{Requests: requests, Duration: duration, Attempts: attempts, Upstream: um, Retries: retries, RetryBudgetExhausted: exhausted, AuthFailures: authFailures, JWKSRefreshes: jwksRefreshes, RateLimited: rateLimited, RateLimitKeys: rateLimitKeys}, nil
+	storeAvailable, err := r.Gauge("lychgate_store_available", "Whether the store's guard admits calls (1) or is open/probing (0).", "store")
+	if err != nil {
+		return nil, err
+	}
+	storeErrors, err := r.Counter("lychgate_store_errors_total", "Store calls that failed or timed out, by store and operation.", "store", "op")
+	if err != nil {
+		return nil, err
+	}
+	storeFallback, err := r.Counter("lychgate_ratelimit_store_fallback_total", "Rate-limit decisions made by the failure policy because the store was unavailable.", "route", "policy")
+	if err != nil {
+		return nil, err
+	}
+	return &Series{Requests: requests, Duration: duration, Attempts: attempts, Upstream: um, Retries: retries, RetryBudgetExhausted: exhausted, AuthFailures: authFailures, JWKSRefreshes: jwksRefreshes, RateLimited: rateLimited, RateLimitKeys: rateLimitKeys, StoreAvailable: storeAvailable, StoreErrors: storeErrors, StoreFallback: storeFallback}, nil
 }

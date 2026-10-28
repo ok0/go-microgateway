@@ -1,0 +1,357 @@
+package runtime
+
+import (
+	"context"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/url"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/ok0/lychgate/config"
+	"github.com/ok0/lychgate/internal/clock"
+	"github.com/ok0/lychgate/internal/metrics"
+	"github.com/ok0/lychgate/internal/teststore"
+	"github.com/ok0/lychgate/store"
+)
+
+const stTypeName = "test"
+
+var stStart = time.Unix(1_700_000_000, 0)
+
+const stHead = "version: 1\nlisteners:\n  - name: public\n    address: \":8080\"\nupstreams:\n  - name: users\n    hosts:\n      - url: \"http://127.0.0.1:9001\"\n"
+
+func stDoc(stores, routes string) string {
+	return stHead + "stores:\n" + stores + "routes:\n" + routes
+}
+
+func stStore(name, typ, params string) string {
+	s := fmt.Sprintf("  - name: %s\n    type: %s\n", name, typ)
+	if params != "" {
+		s += "    params:\n" + params
+	}
+	return s
+}
+
+func stRoute(name, store string) string {
+	return fmt.Sprintf("  - name: %s\n    match:\n      path: /%s\n    upstream: users\n    rate_limit:\n      rate: 5\n      per: 1s\n      key:\n        source: ip\n      store: %s\n", name, name, store)
+}
+
+type stNilBackend struct{}
+
+func (*stNilBackend) Close() error { return nil }
+
+type stCloseOnly struct{ closes *atomic.Int64 }
+
+func (s *stCloseOnly) Close() error {
+	s.closes.Add(1)
+	return nil
+}
+
+type stScripted struct {
+	take     func(ctx context.Context, key string, l store.Limit) (store.Decision, error)
+	closeErr error
+}
+
+func (s *stScripted) Take(ctx context.Context, key string, l store.Limit) (store.Decision, error) {
+	return s.take(ctx, key, l)
+}
+
+func (s *stScripted) Close() error { return s.closeErr }
+
+func TestResolveStores(t *testing.T) {
+	var calls atomic.Int64
+	factory := func(*config.Store, *slog.Logger) (store.Backend, error) {
+		calls.Add(1)
+		return nil, errors.New("unexpected build")
+	}
+	set := NewStoreSet(map[string]StoreType{
+		stTypeName: {Caps: store.CapRateLimit, Build: factory},
+		"nocap":    {Caps: 1 << 1, Build: factory},
+	})
+	cfg := mustParse(t, stDoc(
+		stStore("unused", "missing", "")+stStore("b", "nocap", "")+stStore("c", stTypeName, ""),
+		stRoute("api", "b")+stRoute("good", "c"),
+	))
+
+	errs := set.Resolve(cfg)
+	if len(errs) != 2 {
+		t.Fatalf("errors = %v, want 2", errs)
+	}
+	wantPaths := []string{"stores[0].type", "routes[0].rate_limit.store"}
+	for i, fe := range errs {
+		if fe.Path != wantPaths[i] {
+			t.Errorf("error %d: path = %q, want %q", i, fe.Path, wantPaths[i])
+		}
+		if fe.Line <= 0 {
+			t.Errorf("error %d: line = %d, want > 0", i, fe.Line)
+		}
+	}
+	if !strings.Contains(errs[1].Msg, "does not support rate limiting") {
+		t.Errorf("message = %q, want rate limiting refusal", errs[1].Msg)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("factory calls = %d, want 0", n)
+	}
+
+	var nilSet *StoreSet
+	if got := nilSet.Resolve(cfg); len(got) != 3 {
+		t.Errorf("nil StoreSet errors = %v, want 3 unregistered types", got)
+	}
+}
+
+func TestBuildStoreFactoryFailures(t *testing.T) {
+	const secret = "p4ss-UNIQUE-1"
+	var closes atomic.Int64
+	set := NewStoreSet(map[string]StoreType{
+		"echo": {Caps: store.CapRateLimit, Build: func(e *config.Store, _ *slog.Logger) (store.Backend, error) {
+			return nil, fmt.Errorf("auth rejected for %v", e.Params.Reveal()["token"])
+		}},
+		"boom": {Caps: store.CapRateLimit, Build: func(e *config.Store, _ *slog.Logger) (store.Backend, error) {
+			panic("panic with " + e.Params.Reveal()["token"].(string))
+		}},
+		"nilb": {Caps: store.CapRateLimit, Build: func(*config.Store, *slog.Logger) (store.Backend, error) {
+			return nil, nil
+		}},
+		"typed": {Caps: store.CapRateLimit, Build: func(*config.Store, *slog.Logger) (store.Backend, error) {
+			return (*stNilBackend)(nil), nil
+		}},
+		"noTake": {Caps: store.CapRateLimit, Build: func(*config.Store, *slog.Logger) (store.Backend, error) {
+			return &stCloseOnly{closes: &closes}, nil
+		}},
+	})
+	token := "      token: " + secret + "\n"
+	doc := "version: 1\nlisteners:\n  - name: public\n    address: \":8080\"\nupstreams:\n  - name: users\n    hosts:\n      - url: \"http://127.0.0.1:9001\"\n" +
+		"middlewares:\n  - name: m\n    type: nope\n" +
+		"stores:\n" +
+		stStore("echo", "echo", token) +
+		stStore("boom", "boom", token) +
+		stStore("nilb", "nilb", "") +
+		stStore("typed", "typed", "") +
+		stStore("noTake", "noTake", "") +
+		"routes:\n" +
+		stRoute("r0", "echo") + stRoute("r1", "boom") + stRoute("r2", "nilb") + stRoute("r3", "typed") + stRoute("r4", "noTake")
+	cfg := mustParse(t, doc)
+
+	s, _, err := build(t, cfg, Deps{Stores: set})
+	if s != nil {
+		t.Errorf("snapshot = %v, want nil", s)
+	}
+	var ve *config.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("Build error %T is not a *config.ValidationError", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("Build error leaks the secret: %v", err)
+	}
+
+	want := map[string]string{
+		"stores[0]":           "store factory failed: auth rejected for REDACTED",
+		"stores[1]":           "store factory panicked: panic with REDACTED",
+		"stores[2]":           "store factory returned a nil backend",
+		"stores[3]":           "store factory returned a nil backend",
+		"stores[4]":           "does not implement store.RateLimiter",
+		"middlewares[0].type": "unknown middleware type",
+	}
+	if len(ve.Errors) != len(want) {
+		t.Fatalf("errors = %d, want %d: %v", len(ve.Errors), len(want), ve.Errors)
+	}
+	for _, fe := range ve.Errors {
+		sub, ok := want[fe.Path]
+		if !ok {
+			t.Errorf("unexpected error path %q: %v", fe.Path, fe)
+			continue
+		}
+		if fe.Line <= 0 {
+			t.Errorf("%s: line = %d, want > 0", fe.Path, fe.Line)
+		}
+		if !strings.Contains(fe.Msg, sub) {
+			t.Errorf("%s: message = %q, want it to contain %q", fe.Path, fe.Msg, sub)
+		}
+	}
+	if n := closes.Load(); n != 1 {
+		t.Errorf("noTake backend closed %d times, want 1", n)
+	}
+}
+
+func TestOnlyReferencedStoresBuilt(t *testing.T) {
+	fake := clock.NewFake(stStart)
+	shared := teststore.NewShared(fake)
+	t.Cleanup(func() { _ = shared.Close() })
+	var calls atomic.Int64
+	set := NewStoreSet(map[string]StoreType{
+		stTypeName: {Caps: store.CapRateLimit, Build: func(*config.Store, *slog.Logger) (store.Backend, error) {
+			calls.Add(1)
+			return shared.Handle(), nil
+		}},
+	})
+	cfg := mustParse(t, stDoc(stStore("used", stTypeName, "")+stStore("unused", stTypeName, ""), stRoute("api", "used")))
+	s, _, err := build(t, cfg, Deps{Clock: fake, Stores: set})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("factory calls = %d, want 1", n)
+	}
+	if len(s.built) != 1 || s.built[0].name != "used" {
+		t.Errorf("built stores = %d, want only \"used\"", len(s.built))
+	}
+}
+
+func TestStoreBackendScrubsAndClassifies(t *testing.T) {
+	const secret = "tok-SECRET-9"
+	e := &config.Store{Name: "s", Type: stTypeName, Params: config.NewSecretParams(map[string]any{"token": secret})}
+	cases := []struct {
+		name     string
+		take     func(ctx context.Context, key string, l store.Limit) (store.Decision, error)
+		closeErr error
+		kind     error
+		exact    string
+	}{
+		{
+			name: "unavailable with query escape",
+			take: func(context.Context, string, store.Limit) (store.Decision, error) {
+				return store.Decision{}, fmt.Errorf("dial %s failed: %w", url.QueryEscape(secret), store.ErrUnavailable)
+			},
+			kind: store.ErrUnavailable,
+		},
+		{
+			name: "invalid limit with base64",
+			take: func(context.Context, string, store.Limit) (store.Decision, error) {
+				return store.Decision{}, fmt.Errorf("bad %s: %w", base64.StdEncoding.EncodeToString([]byte(secret)), store.ErrInvalidLimit)
+			},
+			kind: store.ErrInvalidLimit,
+		},
+		{
+			name: "canceled",
+			take: func(context.Context, string, store.Limit) (store.Decision, error) {
+				return store.Decision{}, fmt.Errorf("gone %s: %w", secret, context.Canceled)
+			},
+			kind:  context.Canceled,
+			exact: `store "s": take: context canceled`,
+		},
+		{
+			name: "unclassified",
+			take: func(context.Context, string, store.Limit) (store.Decision, error) {
+				return store.Decision{}, fmt.Errorf("odd %s", secret)
+			},
+		},
+		{
+			name: "panic",
+			take: func(context.Context, string, store.Limit) (store.Decision, error) {
+				panic("panic " + secret)
+			},
+			kind: store.ErrUnavailable,
+		},
+		{
+			name: "close",
+			take: func(context.Context, string, store.Limit) (store.Decision, error) {
+				return store.Decision{}, nil
+			},
+			closeErr: fmt.Errorf("close %s: %w", secret, store.ErrUnavailable),
+			kind:     store.ErrUnavailable,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fake := &stScripted{take: c.take, closeErr: c.closeErr}
+			sb, err := newStoreBackend(e, StoreType{Caps: store.CapRateLimit, Build: func(*config.Store, *slog.Logger) (store.Backend, error) {
+				return fake, nil
+			}}, slog.New(slog.DiscardHandler))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got error
+			if c.closeErr != nil {
+				got = sb.Close()
+			} else {
+				_, got = sb.Take(context.Background(), "k", store.Limit{})
+			}
+			if got == nil {
+				t.Fatal("error = nil")
+			}
+			if strings.Contains(got.Error(), secret) || strings.Contains(got.Error(), url.QueryEscape(secret)) || strings.Contains(got.Error(), base64.StdEncoding.EncodeToString([]byte(secret))) {
+				t.Errorf("error leaks the secret: %q", got.Error())
+			}
+			if c.kind != nil && !errors.Is(got, c.kind) {
+				t.Errorf("errors.Is(%v) = false", c.kind)
+			}
+			if c.kind == nil && errors.Unwrap(got) != nil {
+				t.Errorf("errors.Unwrap = %v, want nil", errors.Unwrap(got))
+			}
+			if c.kind != nil && errors.Unwrap(got) != c.kind {
+				t.Errorf("errors.Unwrap = %v, want only the sentinel %v", errors.Unwrap(got), c.kind)
+			}
+			if c.exact != "" && got.Error() != c.exact {
+				t.Errorf("error = %q, want %q", got.Error(), c.exact)
+			}
+		})
+	}
+}
+
+func TestGuardEntryOwnership(t *testing.T) {
+	fake := clock.NewFake(stStart)
+	reg := metrics.NewRegistry()
+	avail, err := reg.Gauge("lychgate_store_available", "Test gauge.", "store")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := mustParse(t, stDoc(stStore("a", stTypeName, ""), ""))
+	e := &cfg.Stores[0]
+	set := NewStoreSet(nil)
+	logger := slog.New(slog.DiscardHandler)
+
+	old, err := newGuardEntry(e, set, fake, logger, avail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur, err := newGuardEntry(e, set, fake, logger, avail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set.own(old, "r=local")
+	set.own(cur, "r=local")
+	if v := avail.With("a").Value(); v != 1 {
+		t.Fatalf("gauge after own = %v, want 1", v)
+	}
+
+	trip := func(ge *guardEntry) {
+		t.Helper()
+		for range 3 {
+			_ = ge.g.Do(context.Background(), time.Second, func(context.Context) error {
+				return fmt.Errorf("x: %w", store.ErrUnavailable)
+			})
+		}
+	}
+	trip(old)
+	if v := avail.With("a").Value(); v != 1 {
+		t.Errorf("superseded guard changed gauge to %v, want 1", v)
+	}
+	trip(cur)
+	if v := avail.With("a").Value(); v != 0 {
+		t.Errorf("owner guard gauge = %v, want 0", v)
+	}
+
+	var before strings.Builder
+	if err := reg.WriteText(&before); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(before.String(), `store="a"`) {
+		t.Fatalf("series for a missing before prune:\n%s", before.String())
+	}
+	set.prune(map[string]bool{}, avail)
+	if len(set.owners) != 0 {
+		t.Errorf("owners after prune = %d, want 0", len(set.owners))
+	}
+	var after strings.Builder
+	if err := reg.WriteText(&after); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(after.String(), `store="a"`) {
+		t.Errorf("series for a still exposed after prune:\n%s", after.String())
+	}
+}

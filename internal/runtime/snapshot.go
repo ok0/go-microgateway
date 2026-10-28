@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net/http"
 	"slices"
+	"strings"
 
 	"github.com/ok0/lychgate/config"
 	"github.com/ok0/lychgate/internal/auth"
@@ -31,6 +32,7 @@ type Deps struct {
 	Dial          upstream.DialFunc // nil dials TCP
 	Resolver      upstream.Resolver
 	KeySetFetcher auth.Fetcher // nil uses auth.NewHTTPFetcher(nil)
+	Stores        *StoreSet    // nil registers no store types
 }
 
 type Snapshot struct {
@@ -44,6 +46,8 @@ type Snapshot struct {
 	series      *Series
 	retryRoutes []string
 	rateLimits  []rateLimitRoute
+	stores      *StoreSet
+	built       []*builtStore
 }
 
 type routeEntry struct {
@@ -85,6 +89,32 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 		return nil, err
 	}
 
+	stores := d.Stores
+	if stores == nil {
+		stores = NewStoreSet(nil)
+	}
+	errs := stores.Resolve(cfg)
+	errs = append(errs, ResolveMiddlewares(cfg, reg)...)
+	built, berrs := buildStores(cfg, stores, tx, clk, logger, series)
+	errs = append(errs, berrs...)
+
+	named := make(map[string]middleware.Middleware, len(cfg.Middlewares))
+	for i, def := range cfg.Middlewares {
+		if !reg.Known(def.Type) {
+			continue
+		}
+		mw, err := reg.Build(def)
+		if err != nil {
+			path := fmt.Sprintf("middlewares[%d]", i)
+			errs = append(errs, config.FieldError{Path: path, Line: cfg.Line(path), Msg: fmt.Sprintf("%q: %v", def.Name, err)})
+			continue
+		}
+		named[def.Name] = mw
+	}
+	if len(errs) > 0 {
+		return nil, config.NewValidationError(errs)
+	}
+
 	fetcher := d.KeySetFetcher
 	if fetcher == nil {
 		fetcher = auth.NewHTTPFetcher(nil)
@@ -111,31 +141,12 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 		ups[cfg.Upstreams[i].Name] = u
 	}
 
-	named := make(map[string]middleware.Middleware, len(cfg.Middlewares))
-	var mwErrs []config.FieldError
-	for i, def := range cfg.Middlewares {
-		if !reg.Known(def.Type) {
-			path := fmt.Sprintf("middlewares[%d].type", i)
-			mwErrs = append(mwErrs, config.FieldError{Path: path, Line: cfg.Line(path), Msg: fmt.Sprintf("unknown middleware type %q", def.Type)})
-			continue
-		}
-		mw, err := reg.Build(def)
-		if err != nil {
-			path := fmt.Sprintf("middlewares[%d]", i)
-			mwErrs = append(mwErrs, config.FieldError{Path: path, Line: cfg.Line(path), Msg: fmt.Sprintf("%q: %v", def.Name, err)})
-			continue
-		}
-		named[def.Name] = mw
-	}
-	if len(mwErrs) > 0 {
-		return nil, &config.ValidationError{Errors: mwErrs}
-	}
-
 	accessLog := cfg.Global.Log.AccessLog == nil || *cfg.Global.Log.AccessLog
 
 	entries := make([]router.Entry, 0, len(cfg.Routes))
 	var retryRoutes []string
 	var rateLimits []rateLimitRoute
+	storePolicies := make(map[string][]string)
 	for i := range cfg.Routes {
 		r := &cfg.Routes[i]
 		up := ups[r.Upstream]
@@ -182,12 +193,15 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 			})
 		}
 		if r.RateLimit != nil {
-			mw, rl, err := buildRateLimit(tx, r, clk, logger, series)
+			mw, rl, err := buildRateLimit(tx, r, clk, logger, series, built)
 			if err != nil {
 				return nil, err
 			}
 			stages[middleware.StageRateLimit] = mw
 			rateLimits = append(rateLimits, rl)
+			if rl.storeName != "" {
+				storePolicies[rl.storeName] = append(storePolicies[rl.storeName], rl.name+"="+rl.policy)
+			}
 		}
 		if r.Retry != nil && slices.Contains(order, middleware.StageRetry) {
 			b, err := retryBudget(tx, r.Name, *r.Retry, clk)
@@ -211,7 +225,7 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 				Path:     r.Match.Path,
 				PathType: router.PathType(r.Match.PathType),
 				Methods:  r.Match.Methods,
-				Headers:  r.Match.Headers,
+				Headers:  revealHeaders(r.Match.Headers),
 				Priority: r.Priority,
 				Order:    i,
 			},
@@ -233,6 +247,17 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 		Duration: series.Duration,
 	})
 
+	builtList := make([]*builtStore, 0, len(built))
+	for i := range cfg.Stores {
+		b, ok := built[cfg.Stores[i].Name]
+		if !ok || slices.Contains(builtList, b) {
+			continue
+		}
+		slices.Sort(storePolicies[b.name])
+		b.policies = strings.Join(storePolicies[b.name], ",")
+		builtList = append(builtList, b)
+	}
+
 	s := &Snapshot{
 		Config:      cfg,
 		Fingerprint: cfg.Fingerprint(),
@@ -242,6 +267,8 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 		series:      series,
 		retryRoutes: retryRoutes,
 		rateLimits:  rateLimits,
+		stores:      stores,
+		built:       builtList,
 	}
 	root := []middleware.Middleware{
 		middleware.RequestID(cfg.Global.RequestIDHeader),
@@ -254,6 +281,29 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 	}
 	s.handler = middleware.Chain(http.HandlerFunc(s.dispatch), root...)
 	return s, nil
+}
+
+// ResolveMiddlewares reports the middleware definitions whose type is not registered in reg. It constructs nothing.
+func ResolveMiddlewares(cfg *config.Config, reg *middleware.Registry) []config.FieldError {
+	var errs []config.FieldError
+	for i, def := range cfg.Middlewares {
+		if !reg.Known(def.Type) {
+			path := fmt.Sprintf("middlewares[%d].type", i)
+			errs = append(errs, config.FieldError{Path: path, Line: cfg.Line(path), Msg: fmt.Sprintf("unknown middleware type %q", def.Type)})
+		}
+	}
+	return errs
+}
+
+func revealHeaders(m map[string]config.Secret) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v.Reveal()
+	}
+	return out
 }
 
 func (s *Snapshot) dispatch(w http.ResponseWriter, r *http.Request) {
@@ -283,17 +333,61 @@ func (s *Snapshot) Activate() {
 		s.series.Retries.With(n)
 		s.series.RetryBudgetExhausted.With(n)
 	}
+	for _, b := range s.built {
+		s.stores.own(b.guard, b.policies)
+		s.series.StoreErrors.With(b.name, "take")
+	}
 	for _, rl := range s.rateLimits {
 		s.series.RateLimited.With(rl.name)
+		if rl.store != nil {
+			s.series.RateLimitKeys.With(rl.name).Set(float64(rl.store.Len()))
+		}
+		if rl.storeName != "" {
+			s.series.StoreFallback.With(rl.name, rl.policy)
+		}
+	}
+}
+
+// RefreshRateLimitKeys sets the key-count gauge of every rate-limited route that has an in-memory store.
+func (s *Snapshot) RefreshRateLimitKeys() {
+	for _, rl := range s.rateLimits {
+		if rl.store == nil {
+			continue
+		}
 		s.series.RateLimitKeys.With(rl.name).Set(float64(rl.store.Len()))
 	}
 }
 
-// RefreshRateLimitKeys sets the key-count gauge of every rate-limited route from its store.
-func (s *Snapshot) RefreshRateLimitKeys() {
-	for _, rl := range s.rateLimits {
-		s.series.RateLimitKeys.With(rl.name).Set(float64(rl.store.Len()))
+// PruneGauges deletes the gauge series of rate-limited routes, upstreams and stores that no snapshot in live
+// owns. Counters and histograms are never deleted: deleting a counter would lose increments not yet scraped,
+// so cumulative series of removed names are kept.
+func PruneGauges(live []*Snapshot) {
+	if len(live) == 0 {
+		return
 	}
+	routes := make(map[string]bool)
+	upstreams := make(map[string]bool)
+	stores := make(map[string]bool)
+	for _, s := range live {
+		for _, rl := range s.rateLimits {
+			if rl.store != nil {
+				routes[rl.name] = true
+			}
+		}
+		for name := range s.Upstreams {
+			upstreams[name] = true
+		}
+		for _, b := range s.built {
+			stores[b.name] = true
+		}
+	}
+	head := live[0]
+	sr := head.series
+	sr.RateLimitKeys.DeleteFunc(func(v []string) bool { return !routes[v[0]] })
+	sr.Upstream.HostHealthy.DeleteFunc(func(v []string) bool { return !upstreams[v[0]] })
+	sr.Upstream.PanicMode.DeleteFunc(func(v []string) bool { return !upstreams[v[0]] })
+	sr.Upstream.BreakerState.DeleteFunc(func(v []string) bool { return !upstreams[v[0]] })
+	head.stores.prune(stores, sr.StoreAvailable)
 }
 
 func (s *Snapshot) ServeHTTP(w http.ResponseWriter, r *http.Request) {

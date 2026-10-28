@@ -16,26 +16,67 @@ import (
 const KindRateLimit = "ratelimit"
 
 type rateLimitRoute struct {
-	name  string
-	store *memstore.RateLimiter
+	name      string
+	storeName string
+	policy    string
+	store     *memstore.RateLimiter
 }
 
-func buildRateLimit(tx *state.Tx, r *config.Route, clk clock.Clock, logger *slog.Logger, series *Series) (middleware.Middleware, rateLimitRoute, error) {
+func buildRateLimit(tx *state.Tx, r *config.Route, clk clock.Clock, logger *slog.Logger, series *Series, stores map[string]*builtStore) (middleware.Middleware, rateLimitRoute, error) {
 	lim, ok := r.RateLimit.StoreLimit()
 	if !ok {
 		return nil, rateLimitRoute{}, fmt.Errorf("route %q: invalid rate_limit", r.Name)
 	}
-	ms, err := state.Get(tx, KindRateLimit, r.Name, fp(*r.RateLimit), func() (*memstore.RateLimiter, error) {
-		return memstore.NewRateLimiter(memstore.RateLimiterOptions{MaxKeys: *r.RateLimit.MaxKeys, Clock: clk}), nil
-	})
-	if err != nil {
-		return nil, rateLimitRoute{}, err
-	}
-	kf, err := ratelimit.NewKeyFunc(r.RateLimit.Key.Source, r.RateLimit.Key.Name)
-	if err != nil {
-		return nil, rateLimitRoute{}, err
-	}
-	l := ratelimit.New(ratelimit.Policy{ID: ratelimit.PolicyID(r.Name, lim), Limit: lim, Store: ms, Logger: logger, Clock: clk})
+	rl := r.RateLimit
 	name := r.Name
-	return ratelimit.Middleware(l, kf, func() { series.RateLimited.With(name).Inc() }), rateLimitRoute{name: name, store: ms}, nil
+
+	var ms *memstore.RateLimiter
+	if rl.Store == "" || rl.OnStoreError == "local" {
+		m, err := state.Get(tx, KindRateLimit, name, fp(*rl), func() (*memstore.RateLimiter, error) {
+			return memstore.NewRateLimiter(memstore.RateLimiterOptions{MaxKeys: *rl.MaxKeys, Clock: clk}), nil
+		})
+		if err != nil {
+			return nil, rateLimitRoute{}, err
+		}
+		ms = m
+	}
+	kf, err := ratelimit.NewKeyFunc(rl.Key.Source, rl.Key.Name)
+	if err != nil {
+		return nil, rateLimitRoute{}, err
+	}
+	id := ratelimit.PolicyID(name, lim)
+
+	if rl.Store == "" {
+		l := ratelimit.New(ratelimit.Policy{ID: id, Limit: lim, Store: ms, Logger: logger, Clock: clk})
+		return ratelimit.Middleware(l, kf, func() { series.RateLimited.With(name).Inc() }), rateLimitRoute{name: name, store: ms}, nil
+	}
+
+	bs, ok := stores[rl.Store]
+	if !ok {
+		return nil, rateLimitRoute{}, fmt.Errorf("route %q: store %q is not built", name, rl.Store)
+	}
+	onError, err := ratelimit.ParseOnError(rl.OnStoreError)
+	if err != nil {
+		return nil, rateLimitRoute{}, fmt.Errorf("route %q: %w", name, err)
+	}
+	storeName := rl.Store
+	pol := ratelimit.Policy{
+		ID:             id,
+		Limit:          lim,
+		Store:          bs.backend,
+		Logger:         logger,
+		Clock:          clk,
+		Guard:          bs.guard.g,
+		Timeout:        rl.StoreTimeout.Std(),
+		OnError:        onError,
+		DenyRetryAfter: bs.openTimeout,
+		StoreName:      storeName,
+		OnStoreError:   func() { series.StoreErrors.With(storeName, "take").Inc() },
+		OnFallback:     func(p ratelimit.OnError) { series.StoreFallback.With(name, p.String()).Inc() },
+	}
+	if ms != nil {
+		pol.Local = ms
+	}
+	l := ratelimit.New(pol)
+	return ratelimit.Middleware(l, kf, func() { series.RateLimited.With(name).Inc() }), rateLimitRoute{name: name, storeName: storeName, policy: rl.OnStoreError, store: ms}, nil
 }
