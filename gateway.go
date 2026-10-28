@@ -43,6 +43,8 @@ type Gateway struct {
 	ready    atomic.Bool
 	admin    http.Handler
 	live     atomic.Int64 // generations whose resources are not yet released; observed by tests
+	seriesMu sync.Mutex
+	liveGens map[*generation]struct{}
 }
 
 type Option func(*options)
@@ -58,6 +60,7 @@ type options struct {
 	resolver     upstream.Resolver
 	fetcher      KeySetFetcher
 	httpClient   *http.Client
+	stores       []storeRegistration
 	err          error
 }
 
@@ -105,7 +108,27 @@ func newOptions(opts []Option) options {
 	for _, opt := range opts {
 		opt(&o)
 	}
+	if o.err == nil {
+		o.err = checkStoreRegistrations(o.stores)
+	}
 	return o
+}
+
+func (o options) middlewareRegistry() (*middleware.Registry, error) {
+	reg := middleware.NewRegistry()
+	for _, r := range o.middlewares {
+		err := reg.Register(r.typeName, func(def config.Middleware) (middleware.Middleware, error) {
+			mw, err := r.f(MiddlewareParams{Name: def.Name, Type: def.Type, params: def.Params})
+			if err != nil {
+				return nil, errors.New(runtime.ScrubText(err.Error(), def.Params.StringLeaves()))
+			}
+			return mw, nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("lychgate: WithMiddleware(%q): %w", r.typeName, err)
+		}
+	}
+	return reg, nil
 }
 
 func New(cfg *config.Config, opts ...Option) (*Gateway, error) {
@@ -116,18 +139,14 @@ func New(cfg *config.Config, opts ...Option) (*Gateway, error) {
 	if o.err != nil {
 		return nil, o.err
 	}
-	cfg = cfg.Clone()
-	if err := cfg.Validate(); err != nil {
+	reg, err := o.middlewareRegistry()
+	if err != nil {
 		return nil, err
 	}
-	reg := middleware.NewRegistry()
-	for _, r := range o.middlewares {
-		err := reg.Register(r.typeName, func(def config.Middleware) (middleware.Middleware, error) {
-			return r.f(MiddlewareParams{Name: def.Name, Type: def.Type, params: def.Params})
-		})
-		if err != nil {
-			return nil, fmt.Errorf("lychgate: WithMiddleware(%q): %w", r.typeName, err)
-		}
+	set := storeSet(o.stores)
+	cfg = cfg.Clone()
+	if err := cfg.Validate(); err != nil {
+		return nil, withResolution(err, cfg, set, reg)
 	}
 	mreg := metrics.NewRegistry()
 	rs, err := registerReloadSeries(mreg)
@@ -145,14 +164,15 @@ func New(cfg *config.Config, opts ...Option) (*Gateway, error) {
 		fetcher = auth.NewHTTPFetcher(o.httpClient)
 	}
 	g := &Gateway{
-		state:   state.NewRegistry(o.logger),
-		deps:    runtime.Deps{Logger: o.logger, Clock: o.clk, Rand: rnd, Metrics: mreg, Middlewares: reg, Dial: o.dial, Resolver: o.resolver, KeySetFetcher: fetcher},
-		parts:   o.participants,
-		lookup:  o.lookup,
-		logger:  o.logger,
-		clk:     o.clk,
-		metrics: mreg,
-		reloads: rs,
+		state:    state.NewRegistry(o.logger),
+		deps:     runtime.Deps{Logger: o.logger, Clock: o.clk, Rand: rnd, Metrics: mreg, Middlewares: reg, Dial: o.dial, Resolver: o.resolver, KeySetFetcher: fetcher, Stores: set},
+		parts:    o.participants,
+		lookup:   o.lookup,
+		logger:   o.logger,
+		clk:      o.clk,
+		metrics:  mreg,
+		reloads:  rs,
+		liveGens: make(map[*generation]struct{}),
 	}
 	digest, applies, err := g.prepare(cfg)
 	if err != nil {

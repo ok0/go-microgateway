@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"time"
 
@@ -45,7 +44,7 @@ func (g *Gateway) Reload(cfg *config.Config) error {
 	return g.reload("api", func() (*config.Config, error) {
 		c := cfg.Clone()
 		if err := c.Validate(); err != nil {
-			return nil, err
+			return nil, withResolution(err, c, g.deps.Stores, g.deps.Middlewares)
 		}
 		return c, nil
 	})
@@ -189,25 +188,46 @@ func (g *Gateway) build(cfg *config.Config, fp string) (*generation, error) {
 		return nil, err
 	}
 	lease := tx.Commit()
-	return &generation{
+	gen := &generation{
 		snap:        snap,
 		fingerprint: fp,
-		release: func() error {
-			err := lease.Release()
-			g.live.Add(-1)
-			return err
-		},
-		logger: g.logger,
-	}, nil
+		logger:      g.logger,
+	}
+	gen.release = func() error {
+		err := lease.Release()
+		g.dropGeneration(gen)
+		g.live.Add(-1)
+		return err
+	}
+	return gen, nil
 }
 
 func (g *Gateway) install(gen *generation, applies []func()) {
+	g.seriesMu.Lock()
+	g.liveGens[gen] = struct{}{}
 	g.live.Add(1)
 	gen.snap.Activate()
 	g.cur.Store(gen)
+	g.seriesMu.Unlock()
 	for _, apply := range applies {
 		apply()
 	}
+}
+
+// dropGeneration forgets a drained generation and prunes the gauge series that no remaining generation owns.
+// When no generation remains, the gateway is closed and nothing is pruned.
+func (g *Gateway) dropGeneration(gen *generation) {
+	g.seriesMu.Lock()
+	defer g.seriesMu.Unlock()
+	delete(g.liveGens, gen)
+	if len(g.liveGens) == 0 {
+		return
+	}
+	snaps := make([]*runtime.Snapshot, 0, len(g.liveGens))
+	for live := range g.liveGens {
+		snaps = append(snaps, live.snap)
+	}
+	runtime.PruneGauges(snaps)
 }
 
 func (g *Gateway) parseOptions() []config.ParseOption {
@@ -241,9 +261,7 @@ func diffNamed[T any](old, cur []T, name func(T) string) nameDiff {
 			d.added++
 			continue
 		}
-		oj, errO := json.Marshal(o)
-		cj, errC := json.Marshal(v)
-		if errO != nil || errC != nil || string(oj) != string(cj) {
+		if config.FingerprintOf(o) != config.FingerprintOf(v) {
 			d.changed++
 		}
 	}

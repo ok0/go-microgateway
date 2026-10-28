@@ -28,6 +28,8 @@ func (s adminSource) Upstreams() []upstream.Status {
 }
 
 func (s adminSource) Metrics() *metrics.Registry {
+	s.g.seriesMu.Lock()
+	defer s.g.seriesMu.Unlock()
 	snap := s.g.cur.Load().snap
 	for _, u := range snap.Config.Upstreams {
 		snap.Upstreams[u.Name].RefreshHealth()
