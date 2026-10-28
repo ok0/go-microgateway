@@ -287,6 +287,7 @@ func watchPaths(configPath string, cfg *config.Config) []string {
 			paths = append(paths, l.TLS.CertFile, l.TLS.KeyFile)
 		}
 	}
+	paths = append(paths, cfg.KeyFiles()...)
 	return paths
 }
 

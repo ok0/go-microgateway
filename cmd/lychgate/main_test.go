@@ -3,7 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +18,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ok0/lychgate/config"
 )
 
 func runCmd(t *testing.T, args ...string) (int, string, string) {
@@ -287,12 +293,25 @@ func TestRunExample(t *testing.T) {
 
 	t.Run("users api", func(t *testing.T) {
 		resp, body := doGet(t, client, public, "/api/users/42", "", nil)
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401; body %s", resp.StatusCode, body)
+		}
+		if got := resp.Header.Get("WWW-Authenticate"); got != "ApiKey" {
+			t.Errorf("WWW-Authenticate = %q, want ApiKey", got)
+		}
+		resp, body = doGet(t, client, public, "/api/users/42", "", http.Header{"X-Api-Key": {"example-api-key-alice"}})
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("status = %d, want 200; body %s", resp.StatusCode, body)
 		}
 		echo := decodeEcho(t, body)
 		if echo.Backend != "users" || echo.Path != "/api/users/42" {
 			t.Errorf("echo = %+v, want backend users path /api/users/42", echo)
+		}
+		if got := echo.Headers.Get("X-Consumer-Id"); got != "alice" {
+			t.Errorf("backend X-Consumer-Id = %q, want alice", got)
+		}
+		if _, ok := echo.Headers["X-Api-Key"]; ok {
+			t.Error("backend received X-Api-Key, want it removed")
 		}
 	})
 
@@ -588,5 +607,75 @@ func TestValidateUnregisteredType(t *testing.T) {
 	code, _, errs := runCmd(t, "validate", "-config", path)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr:\n%s", code, errs)
+	}
+}
+
+func TestWatchPathsIncludesKeyFiles(t *testing.T) {
+	dir := t.TempDir()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pub.pem"), pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const keys = "keys:\n  - id: file-key\n    hash: \"sha256:9771189e33ad49531f98873eb4e4458ce1c96f313fe15c6d753f4c7b6ad4eba5\"\n    consumer: alice\n"
+	if err := os.WriteFile(filepath.Join(dir, "keys.yaml"), []byte(keys), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	src := minimalConfig + `auth:
+  api_keys:
+    - name: file
+      key_file: keys.yaml
+  jwt:
+    - name: pk
+      issuer: https://auth.example.com
+      audiences: [example-api]
+      keys:
+        - algorithm: EdDSA
+          public_key_file: pub.pem
+`
+	path := filepath.Join(dir, "lychgate.yaml")
+	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := watchPaths(path, cfg)
+	want := []string{path, filepath.Join(dir, "keys.yaml"), filepath.Join(dir, "pub.pem")}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("watchPaths = %q, want %q", got, want)
+	}
+}
+
+func TestValidateAuthErrors(t *testing.T) {
+	code, _, errs := runCmd(t, "validate", "-config", "../../config/testdata/auth_errors.yaml")
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; stderr:\n%s", code, errs)
+	}
+	paths := []string{
+		"auth.jwt[0].issuer",
+		"auth.jwt[1].audiences",
+		"auth.jwt[2].keys[0].secret",
+		"auth.jwt[2].max_token_bytes",
+		"auth.jwt[3].keys[0].public_key",
+		"auth.jwt[4].keys[0].algorithm",
+		"auth.jwt[5].jwks.ttl",
+		"auth.api_keys[0].keys[0].hash",
+		"routes[0].auth.providers[0]",
+		"routes[1].auth.providers[0]",
+		"routes[2].auth.allow_anonymous",
+		"routes[3].pipeline",
+	}
+	for _, p := range paths {
+		if !strings.Contains(errs, p+" (line ") {
+			t.Errorf("stderr lacks an error for %s with a line number\nstderr:\n%s", p, errs)
+		}
 	}
 }
