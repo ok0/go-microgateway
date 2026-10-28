@@ -68,8 +68,8 @@ func (g *Gateway) ReloadFile(path string) error {
 }
 
 // WatchFile reloads the configuration from path whenever its content changes, using the reload settings of the active
-// configuration. It blocks until ctx is done and then returns nil. It returns an error at once when path cannot be
-// stat'ed, and ErrClosed when the gateway is closed while watching.
+// configuration. Key files referenced by the configuration are watched too. It blocks until ctx is done and then returns
+// nil. It returns an error at once when path cannot be stat'ed, and ErrClosed when the gateway is closed while watching.
 func (g *Gateway) WatchFile(ctx context.Context, path string) error {
 	g.mu.Lock()
 	closed := g.closed
@@ -79,7 +79,7 @@ func (g *Gateway) WatchFile(ctx context.Context, path string) error {
 	}
 	rc := g.Config().Global.Reload
 	return reload.New(reload.Options{
-		Paths:        func() []string { return []string{path} },
+		Paths:        func() []string { return append([]string{path}, g.Config().KeyFiles()...) },
 		Debounce:     rc.Debounce.Std(),
 		PollInterval: rc.PollInterval.Std(),
 		Clock:        g.clk,

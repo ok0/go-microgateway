@@ -12,6 +12,7 @@ import (
 
 	"github.com/ok0/lychgate/config"
 	"github.com/ok0/lychgate/internal/admin"
+	"github.com/ok0/lychgate/internal/auth"
 	"github.com/ok0/lychgate/internal/clock"
 	"github.com/ok0/lychgate/internal/hooks"
 	"github.com/ok0/lychgate/internal/httperr"
@@ -55,6 +56,9 @@ type options struct {
 	dial         upstream.DialFunc
 	rnd          clock.Rand
 	resolver     upstream.Resolver
+	fetcher      KeySetFetcher
+	httpClient   *http.Client
+	err          error
 }
 
 func init() {
@@ -108,11 +112,14 @@ func New(cfg *config.Config, opts ...Option) (*Gateway, error) {
 	if cfg == nil {
 		return nil, errors.New("lychgate: nil config")
 	}
+	o := newOptions(opts)
+	if o.err != nil {
+		return nil, o.err
+	}
 	cfg = cfg.Clone()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	o := newOptions(opts)
 	reg := middleware.NewRegistry()
 	for _, r := range o.middlewares {
 		err := reg.Register(r.typeName, func(def config.Middleware) (middleware.Middleware, error) {
@@ -131,9 +138,15 @@ func New(cfg *config.Config, opts ...Option) (*Gateway, error) {
 	if rnd == nil {
 		rnd = clock.NewRand(rand.Uint64())
 	}
+	var fetcher auth.Fetcher
+	if o.fetcher != nil {
+		fetcher = o.fetcher
+	} else {
+		fetcher = auth.NewHTTPFetcher(o.httpClient)
+	}
 	g := &Gateway{
 		state:   state.NewRegistry(o.logger),
-		deps:    runtime.Deps{Logger: o.logger, Clock: o.clk, Rand: rnd, Metrics: mreg, Middlewares: reg, Dial: o.dial, Resolver: o.resolver},
+		deps:    runtime.Deps{Logger: o.logger, Clock: o.clk, Rand: rnd, Metrics: mreg, Middlewares: reg, Dial: o.dial, Resolver: o.resolver, KeySetFetcher: fetcher},
 		parts:   o.participants,
 		lookup:  o.lookup,
 		logger:  o.logger,
@@ -158,6 +171,9 @@ func New(cfg *config.Config, opts ...Option) (*Gateway, error) {
 
 func NewFromYAML(data []byte, opts ...Option) (*Gateway, error) {
 	o := newOptions(opts)
+	if o.err != nil {
+		return nil, o.err
+	}
 	var cfg *config.Config
 	var err error
 	if o.lookup != nil {
