@@ -22,11 +22,15 @@ func (s adminSource) Upstreams() []upstream.Status {
 	snap := s.g.cur.Load().snap
 	out := make([]upstream.Status, 0, len(snap.Config.Upstreams))
 	for _, u := range snap.Config.Upstreams {
-		out = append(out, upstream.Status{Name: u.Name, Hosts: snap.Upstreams[u.Name].Snapshot()})
+		out = append(out, snap.Upstreams[u.Name].Status())
 	}
 	return out
 }
 
 func (s adminSource) Metrics() *metrics.Registry {
+	snap := s.g.cur.Load().snap
+	for _, u := range snap.Config.Upstreams {
+		snap.Upstreams[u.Name].RefreshHealth()
+	}
 	return s.g.metrics
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -52,6 +53,8 @@ type options struct {
 	middlewares  []registration
 	participants []hooks.Participant
 	dial         upstream.DialFunc
+	rnd          clock.Rand
+	resolver     upstream.Resolver
 }
 
 func init() {
@@ -85,6 +88,14 @@ func withDialer(d upstream.DialFunc) Option {
 	return func(o *options) { o.dial = d }
 }
 
+func withRand(r clock.Rand) Option {
+	return func(o *options) { o.rnd = r }
+}
+
+func withResolver(r upstream.Resolver) Option {
+	return func(o *options) { o.resolver = r }
+}
+
 func newOptions(opts []Option) options {
 	o := options{logger: slog.Default(), clk: clock.Real()}
 	for _, opt := range opts {
@@ -116,9 +127,13 @@ func New(cfg *config.Config, opts ...Option) (*Gateway, error) {
 	if err != nil {
 		return nil, err
 	}
+	rnd := o.rnd
+	if rnd == nil {
+		rnd = clock.NewRand(rand.Uint64())
+	}
 	g := &Gateway{
 		state:   state.NewRegistry(o.logger),
-		deps:    runtime.Deps{Logger: o.logger, Clock: o.clk, Metrics: mreg, Middlewares: reg, Dial: o.dial},
+		deps:    runtime.Deps{Logger: o.logger, Clock: o.clk, Rand: rnd, Metrics: mreg, Middlewares: reg, Dial: o.dial, Resolver: o.resolver},
 		parts:   o.participants,
 		lookup:  o.lookup,
 		logger:  o.logger,

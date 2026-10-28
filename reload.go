@@ -203,6 +203,7 @@ func (g *Gateway) build(cfg *config.Config, fp string) (*generation, error) {
 
 func (g *Gateway) install(gen *generation, applies []func()) {
 	g.live.Add(1)
+	gen.snap.Activate()
 	g.cur.Store(gen)
 	for _, apply := range applies {
 		apply()
