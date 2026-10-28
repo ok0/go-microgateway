@@ -15,6 +15,8 @@ type Series struct {
 	RetryBudgetExhausted *metrics.CounterVec
 	AuthFailures         *metrics.CounterVec
 	JWKSRefreshes        *metrics.CounterVec
+	RateLimited          *metrics.CounterVec
+	RateLimitKeys        *metrics.GaugeVec
 }
 
 // RegisterSeries registers (or, for an identical earlier registration, reuses) the series in r.
@@ -75,5 +77,13 @@ func RegisterSeries(r *metrics.Registry) (*Series, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Series{Requests: requests, Duration: duration, Attempts: attempts, Upstream: um, Retries: retries, RetryBudgetExhausted: exhausted, AuthFailures: authFailures, JWKSRefreshes: jwksRefreshes}, nil
+	rateLimited, err := r.Counter("lychgate_rate_limited_total", "Requests rejected with 429 by the rate_limit stage, by route.", "route")
+	if err != nil {
+		return nil, err
+	}
+	rateLimitKeys, err := r.Gauge("lychgate_ratelimit_keys", "Keys held by the route's in-memory rate-limit store.", "route")
+	if err != nil {
+		return nil, err
+	}
+	return &Series{Requests: requests, Duration: duration, Attempts: attempts, Upstream: um, Retries: retries, RetryBudgetExhausted: exhausted, AuthFailures: authFailures, JWKSRefreshes: jwksRefreshes, RateLimited: rateLimited, RateLimitKeys: rateLimitKeys}, nil
 }

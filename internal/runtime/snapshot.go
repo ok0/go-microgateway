@@ -43,6 +43,7 @@ type Snapshot struct {
 	notFound    http.Handler
 	series      *Series
 	retryRoutes []string
+	rateLimits  []rateLimitRoute
 }
 
 type routeEntry struct {
@@ -134,6 +135,7 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 
 	entries := make([]router.Entry, 0, len(cfg.Routes))
 	var retryRoutes []string
+	var rateLimits []rateLimitRoute
 	for i := range cfg.Routes {
 		r := &cfg.Routes[i]
 		up := ups[r.Upstream]
@@ -178,6 +180,14 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 				Logger:         logger,
 				OnFailure:      func(reason auth.Reason) { series.AuthFailures.With(name, string(reason)).Inc() },
 			})
+		}
+		if r.RateLimit != nil {
+			mw, rl, err := buildRateLimit(tx, r, clk, logger, series)
+			if err != nil {
+				return nil, err
+			}
+			stages[middleware.StageRateLimit] = mw
+			rateLimits = append(rateLimits, rl)
 		}
 		if r.Retry != nil && slices.Contains(order, middleware.StageRetry) {
 			b, err := retryBudget(tx, r.Name, *r.Retry, clk)
@@ -231,6 +241,7 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 		notFound:    notFound,
 		series:      series,
 		retryRoutes: retryRoutes,
+		rateLimits:  rateLimits,
 	}
 	root := []middleware.Middleware{
 		middleware.RequestID(cfg.Global.RequestIDHeader),
@@ -271,6 +282,17 @@ func (s *Snapshot) Activate() {
 	for _, n := range s.retryRoutes {
 		s.series.Retries.With(n)
 		s.series.RetryBudgetExhausted.With(n)
+	}
+	for _, rl := range s.rateLimits {
+		s.series.RateLimited.With(rl.name)
+		s.series.RateLimitKeys.With(rl.name).Set(float64(rl.store.Len()))
+	}
+}
+
+// RefreshRateLimitKeys sets the key-count gauge of every rate-limited route from its store.
+func (s *Snapshot) RefreshRateLimitKeys() {
+	for _, rl := range s.rateLimits {
+		s.series.RateLimitKeys.With(rl.name).Set(float64(rl.store.Len()))
 	}
 }
 
