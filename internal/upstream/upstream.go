@@ -244,14 +244,18 @@ func Build(cfg config.Upstream, d Deps) (*Upstream, error) {
 	d = d.withDefaults()
 	static := make([]hostSpec, 0, len(cfg.Hosts))
 	for i, hc := range cfg.Hosts {
-		pu, err := url.Parse(hc.URL)
+		raw := hc.URL.Reveal()
+		pu, err := url.Parse(raw)
 		if err != nil {
+			if redacted := config.RedactURL(raw); redacted != raw {
+				return nil, fmt.Errorf("upstream %q: host %d: invalid URL %q", cfg.Name, i, redacted)
+			}
 			inner := err
 			var ue *url.Error
 			if errors.As(err, &ue) {
 				inner = ue.Err
 			}
-			return nil, fmt.Errorf("upstream %q: host %d: invalid URL %q: %w", cfg.Name, i, config.RedactURL(hc.URL), inner)
+			return nil, fmt.Errorf("upstream %q: host %d: invalid URL %q: %w", cfg.Name, i, config.RedactURL(raw), inner)
 		}
 		weight := 1
 		if hc.Weight != nil {

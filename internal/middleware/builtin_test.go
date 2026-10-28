@@ -28,8 +28,8 @@ func errorCode(t *testing.T, rec *httptest.ResponseRecorder) string {
 
 func TestHeadersRequest(t *testing.T) {
 	p := config.HeadersParams{Request: config.HeaderOps{
-		Add:    map[string]string{"X-Add": "a"},
-		Set:    map[string]string{"X-Set": "s"},
+		Add:    map[string]config.Secret{"X-Add": config.NewSecret("a")},
+		Set:    map[string]config.Secret{"X-Set": config.NewSecret("s")},
 		Remove: []string{"X-Gone"},
 	}}
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -51,8 +51,8 @@ func TestHeadersRequest(t *testing.T) {
 
 func TestHeadersResponseOnWriteHeader(t *testing.T) {
 	p := config.HeadersParams{Response: config.HeaderOps{
-		Set:    map[string]string{"X-Up": "2"},
-		Add:    map[string]string{"X-A": "a"},
+		Set:    map[string]config.Secret{"X-Up": config.NewSecret("2")},
+		Add:    map[string]config.Secret{"X-A": config.NewSecret("a")},
 		Remove: []string{"X-B"},
 	}}
 	rec := httptest.NewRecorder()
@@ -74,7 +74,7 @@ func TestHeadersResponseOnWriteHeader(t *testing.T) {
 
 func TestHeadersResponseImplicit(t *testing.T) {
 	p := config.HeadersParams{Response: config.HeaderOps{
-		Set: map[string]string{"X-Set": "s"},
+		Set: map[string]config.Secret{"X-Set": config.NewSecret("s")},
 	}}
 	rec := httptest.NewRecorder()
 	Headers(p)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -90,7 +90,7 @@ func TestHeadersResponseImplicit(t *testing.T) {
 
 func TestHeadersFlushAndInformational(t *testing.T) {
 	p := config.HeadersParams{Response: config.HeaderOps{
-		Add: map[string]string{"X-Count": "1"},
+		Add: map[string]config.Secret{"X-Count": config.NewSecret("1")},
 	}}
 	rec := httptest.NewRecorder()
 	var flushErr error
@@ -196,7 +196,7 @@ func TestSizeLimitAfterResponseStarted(t *testing.T) {
 
 func corsMiddleware(t *testing.T, params map[string]any) Middleware {
 	t.Helper()
-	v, err := config.Middleware{Name: "c", Type: "cors", Params: params}.BuiltinParams()
+	v, err := config.Middleware{Name: "c", Type: "cors", Params: config.NewSecretParams(params)}.BuiltinParams()
 	if err != nil {
 		t.Fatalf("BuiltinParams: %v", err)
 	}

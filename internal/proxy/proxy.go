@@ -107,10 +107,10 @@ func applyHeaderOps(h http.Header, ops config.HeaderOps) {
 		h.Del(k)
 	}
 	for _, k := range slices.Sorted(maps.Keys(ops.Set)) {
-		h.Set(k, ops.Set[k])
+		h.Set(k, ops.Set[k].Reveal())
 	}
 	for _, k := range slices.Sorted(maps.Keys(ops.Add)) {
-		h.Add(k, ops.Add[k])
+		h.Add(k, ops.Add[k].Reveal())
 	}
 }
 

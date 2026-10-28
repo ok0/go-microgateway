@@ -41,7 +41,7 @@ func dur(d time.Duration) config.Duration { return config.Duration(d) }
 func hosts(urls ...string) []config.Host {
 	out := make([]config.Host, 0, len(urls))
 	for _, u := range urls {
-		out = append(out, config.Host{URL: u})
+		out = append(out, config.Host{URL: config.NewSecretURL(u)})
 	}
 	return out
 }
@@ -151,9 +151,9 @@ var allAlgorithms = []string{"", "round_robin", "weighted_round_robin", "random"
 
 func TestRoundRobin(t *testing.T) {
 	u := build(t, config.Upstream{Name: "u", LoadBalancer: config.LoadBalancer{Algorithm: "round_robin"}, Hosts: []config.Host{
-		{URL: "http://a:1", Weight: w(1)},
-		{URL: "http://b:1", Weight: w(2)},
-		{URL: "http://c:1", Weight: w(0)},
+		{URL: config.NewSecretURL("http://a:1"), Weight: w(1)},
+		{URL: config.NewSecretURL("http://b:1"), Weight: w(2)},
+		{URL: config.NewSecretURL("http://c:1"), Weight: w(0)},
 	}})
 	want := []string{"a:1", "b:1", "a:1", "b:1", "a:1", "b:1"}
 	for i, wantHost := range want {
@@ -169,9 +169,9 @@ func TestRoundRobin(t *testing.T) {
 
 func TestRoundRobinEven(t *testing.T) {
 	u := build(t, config.Upstream{Name: "u", LoadBalancer: config.LoadBalancer{Algorithm: "round_robin"}, Hosts: []config.Host{
-		{URL: "http://a:1"},
-		{URL: "http://b:1", Weight: w(1)},
-		{URL: "http://c:1", Weight: w(5)},
+		{URL: config.NewSecretURL("http://a:1")},
+		{URL: config.NewSecretURL("http://b:1"), Weight: w(1)},
+		{URL: config.NewSecretURL("http://c:1"), Weight: w(5)},
 	}})
 	counts := pickCounts(t, u, nil, 300)
 	for _, h := range u.Hosts() {
@@ -183,8 +183,8 @@ func TestRoundRobinEven(t *testing.T) {
 
 func TestAcquireSkipsTried(t *testing.T) {
 	u := build(t, config.Upstream{Name: "u", Hosts: []config.Host{
-		{URL: "http://a:1"},
-		{URL: "http://b:1"},
+		{URL: config.NewSecretURL("http://a:1")},
+		{URL: config.NewSecretURL("http://b:1")},
 	}})
 	a, b := u.Hosts()[0], u.Hosts()[1]
 
@@ -207,8 +207,8 @@ func TestAcquireSkipsTried(t *testing.T) {
 
 func TestNoEligibleHosts(t *testing.T) {
 	u := build(t, config.Upstream{Name: "u", Hosts: []config.Host{
-		{URL: "http://a:1", Weight: w(0)},
-		{URL: "http://b:1", Weight: w(0)},
+		{URL: config.NewSecretURL("http://a:1"), Weight: w(0)},
+		{URL: config.NewSecretURL("http://b:1"), Weight: w(0)},
 	}})
 	_, _, err := u.Acquire(nil, nil, false)
 	if !errors.Is(err, ErrNoHosts) {
@@ -223,8 +223,8 @@ func TestAllWeightZeroNoHosts(t *testing.T) {
 	for _, algo := range allAlgorithms {
 		t.Run("algorithm="+algo, func(t *testing.T) {
 			u := build(t, config.Upstream{Name: "u", LoadBalancer: config.LoadBalancer{Algorithm: algo}, Hosts: []config.Host{
-				{URL: "http://a:1", Weight: w(0)},
-				{URL: "http://b:1", Weight: w(0)},
+				{URL: config.NewSecretURL("http://a:1"), Weight: w(0)},
+				{URL: config.NewSecretURL("http://b:1"), Weight: w(0)},
 			}})
 			for i := 0; i < 100; i++ {
 				if _, _, err := u.Acquire(nil, nil, false); !errors.Is(err, ErrNoHosts) {
@@ -244,9 +244,9 @@ func TestWeightZeroNeverSelected(t *testing.T) {
 					Name:         "u",
 					LoadBalancer: config.LoadBalancer{Algorithm: algo, Hash: config.Hash{Source: "header", Name: "X-K"}},
 					Hosts: []config.Host{
-						{URL: "http://a:1", Weight: w(1)},
-						{URL: "http://b:1", Weight: w(0)},
-						{URL: "http://c:1", Weight: w(3)},
+						{URL: config.NewSecretURL("http://a:1"), Weight: w(1)},
+						{URL: config.NewSecretURL("http://b:1"), Weight: w(0)},
+						{URL: config.NewSecretURL("http://c:1"), Weight: w(3)},
 					},
 				}
 				if panicMode {
@@ -305,9 +305,9 @@ func TestPanicMode(t *testing.T) {
 	cfg := config.Upstream{
 		Name: "u",
 		Hosts: []config.Host{
-			{URL: "http://a:1", Weight: w(1)},
-			{URL: "http://b:1", Weight: w(1)},
-			{URL: "http://c:1", Weight: w(0)},
+			{URL: config.NewSecretURL("http://a:1"), Weight: w(1)},
+			{URL: config.NewSecretURL("http://b:1"), Weight: w(1)},
+			{URL: config.NewSecretURL("http://c:1"), Weight: w(0)},
 		},
 		PassiveHealth: &config.PassiveHealth{
 			ConsecutiveFailures: 1,
@@ -463,8 +463,8 @@ func TestHashKeySources(t *testing.T) {
 
 func TestStatus(t *testing.T) {
 	cfg := config.Upstream{Name: "u", Hosts: []config.Host{
-		{URL: "http://a:1", Weight: w(1)},
-		{URL: "http://b:1", Weight: w(3)},
+		{URL: config.NewSecretURL("http://a:1"), Weight: w(1)},
+		{URL: config.NewSecretURL("http://b:1"), Weight: w(3)},
 	}}
 	reg := state.NewRegistry(nil)
 	t.Cleanup(reg.Close)
@@ -591,7 +591,7 @@ func TestBuildUsesDial(t *testing.T) {
 	reg := state.NewRegistry(nil)
 	cfg := config.Upstream{
 		Name:     "u",
-		Hosts:    []config.Host{{URL: "http://backend.test:8080"}},
+		Hosts:    []config.Host{{URL: config.NewSecretURL("http://backend.test:8080")}},
 		Timeouts: config.Timeouts{Connect: config.Duration(3 * time.Second)},
 	}
 	tx := reg.Begin()
@@ -624,8 +624,8 @@ func carryBase() config.Upstream {
 	return config.Upstream{
 		Name: "u",
 		Hosts: []config.Host{
-			{URL: "http://h1:1", Weight: w(1)},
-			{URL: "http://h2:1", Weight: w(1)},
+			{URL: config.NewSecretURL("http://h1:1"), Weight: w(1)},
+			{URL: config.NewSecretURL("http://h2:1"), Weight: w(1)},
 		},
 		Timeouts: config.Timeouts{
 			Connect:        config.Duration(time.Second),
@@ -783,11 +783,26 @@ func TestTransportFingerprint(t *testing.T) {
 	}
 }
 
+func TestBuildInvalidURLHidesCredentials(t *testing.T) {
+	reg := state.NewRegistry(nil)
+	tx := reg.Begin()
+	_, err := Build(config.Upstream{Name: "u", Hosts: hosts("http://u:p%zz@h:1")}, Deps{State: tx})
+	tx.Abort()
+	if err == nil {
+		t.Fatal("Build error = nil, want invalid URL error")
+	}
+	for _, leak := range []string{"p%zz", "%zz"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("build error surfaces credentials: %v", err)
+		}
+	}
+}
+
 func TestBuildBadURLCreatesNothing(t *testing.T) {
 	reg := state.NewRegistry(nil)
 	tx := reg.Begin()
 	cfg := carryBase()
-	cfg.Hosts[1].URL = "http://[::1"
+	cfg.Hosts[1].URL = config.NewSecretURL("http://[::1")
 	_, err := Build(cfg, Deps{State: tx})
 	tx.Abort()
 	if err == nil {
@@ -1421,9 +1436,9 @@ func TestPanicModeHonorsBreakers(t *testing.T) {
 	reg := state.NewRegistry(nil)
 	t.Cleanup(reg.Close)
 	cfg := rrBreakerCfg(
-		config.Host{URL: "http://a:1", Weight: w(1)},
-		config.Host{URL: "http://b:1", Weight: w(1)},
-		config.Host{URL: "http://c:1", Weight: w(0)},
+		config.Host{URL: config.NewSecretURL("http://a:1"), Weight: w(1)},
+		config.Host{URL: config.NewSecretURL("http://b:1"), Weight: w(1)},
+		config.Host{URL: config.NewSecretURL("http://c:1"), Weight: w(0)},
 	)
 	cfg.PassiveHealth = &config.PassiveHealth{
 		ConsecutiveFailures: 1,
@@ -1481,8 +1496,8 @@ func TestAllOpenVsNoHosts(t *testing.T) {
 	t.Cleanup(reg.Close)
 
 	zero, _ := buildDeps(t, reg, rrBreakerCfg(
-		config.Host{URL: "http://a:1", Weight: w(0)},
-		config.Host{URL: "http://b:1", Weight: w(0)},
+		config.Host{URL: config.NewSecretURL("http://a:1"), Weight: w(0)},
+		config.Host{URL: config.NewSecretURL("http://b:1"), Weight: w(0)},
 	), Deps{Clock: fake})
 	if _, _, err := zero.Acquire(nil, nil, true); !errors.Is(err, ErrNoHosts) || errors.Is(err, ErrAllOpen) {
 		t.Fatalf("all weight zero: err = %v, want ErrNoHosts", err)

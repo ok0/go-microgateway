@@ -40,9 +40,9 @@ func TestRegisterErrors(t *testing.T) {
 func TestBuild(t *testing.T) {
 	t.Run("builtin", func(t *testing.T) {
 		r := NewRegistry()
-		def := config.Middleware{Name: "h", Type: "headers", Params: map[string]any{
+		def := config.Middleware{Name: "h", Type: "headers", Params: config.NewSecretParams(map[string]any{
 			"response": map[string]any{"set": map[string]any{"X-A": "1"}},
-		}}
+		})}
 		mw, err := r.Build(def)
 		if err != nil {
 			t.Fatalf("Build: %v", err)
@@ -68,7 +68,7 @@ func TestBuild(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		def := config.Middleware{Name: "n", Type: "custom", Params: map[string]any{"k": "v"}}
+		def := config.Middleware{Name: "n", Type: "custom", Params: config.NewSecretParams(map[string]any{"k": "v"})}
 		out, err := r.Build(def)
 		if err != nil {
 			t.Fatalf("Build: %v", err)

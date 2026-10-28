@@ -22,7 +22,7 @@ func testConfig(t *testing.T, mutate func(*config.Config)) *config.Config {
 	cfg := &config.Config{
 		Version:   1,
 		Listeners: []config.Listener{{Name: "public", Address: "127.0.0.1:0"}},
-		Upstreams: []config.Upstream{{Name: "u", Hosts: []config.Host{{URL: "http://127.0.0.1:1"}}}},
+		Upstreams: []config.Upstream{{Name: "u", Hosts: []config.Host{{URL: config.NewSecretURL("http://127.0.0.1:1")}}}},
 		Routes:    []config.Route{{Name: "r", Upstream: "u"}},
 		Admin:     config.Admin{Address: "127.0.0.1:0"},
 	}

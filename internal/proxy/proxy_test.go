@@ -28,7 +28,7 @@ import (
 
 func newUpstream(t *testing.T, rawURL string) *upstream.Upstream {
 	t.Helper()
-	return newUpstreamWith(t, config.Upstream{Name: "u", Hosts: []config.Host{{URL: rawURL}}}, upstream.Deps{})
+	return newUpstreamWith(t, config.Upstream{Name: "u", Hosts: []config.Host{{URL: config.NewSecretURL(rawURL)}}}, upstream.Deps{})
 }
 
 func newUpstreamWith(t *testing.T, cfg config.Upstream, d upstream.Deps) *upstream.Upstream {
@@ -109,8 +109,8 @@ func TestApplyHeaderOps(t *testing.T) {
 	h.Set("X-Gateway", "edge")
 	applyHeaderOps(h, config.HeaderOps{
 		Remove: []string{"X-Debug"},
-		Set:    map[string]string{"X-Env": "example"},
-		Add:    map[string]string{"X-Gateway": "lychgate"},
+		Set:    map[string]config.Secret{"X-Env": config.NewSecret("example")},
+		Add:    map[string]config.Secret{"X-Gateway": config.NewSecret("lychgate")},
 	})
 	if got := h.Values("X-Debug"); len(got) != 0 {
 		t.Errorf("X-Debug = %v, want removed", got)
@@ -360,7 +360,7 @@ func TestResponseHeaderTimeoutFakeClock(t *testing.T) {
 	fake := clock.NewFake(time.Unix(0, 0))
 	up := newUpstreamWith(t, config.Upstream{
 		Name:          "u",
-		Hosts:         []config.Host{{URL: "http://127.0.0.1:9001"}},
+		Hosts:         []config.Host{{URL: config.NewSecretURL("http://127.0.0.1:9001")}},
 		Timeouts:      config.Timeouts{ResponseHeader: config.Duration(time.Hour)},
 		PassiveHealth: &config.PassiveHealth{},
 	}, upstream.Deps{Dial: silentDial(t), Clock: fake})
@@ -410,7 +410,7 @@ func TestHeaderTimerStopped(t *testing.T) {
 	fake := clock.NewFake(time.Unix(0, 0))
 	up := newUpstreamWith(t, config.Upstream{
 		Name:     "u",
-		Hosts:    []config.Host{{URL: backend.URL}},
+		Hosts:    []config.Host{{URL: config.NewSecretURL(backend.URL)}},
 		Timeouts: config.Timeouts{ResponseHeader: config.Duration(time.Hour)},
 	}, upstream.Deps{Clock: fake})
 	tr := &AttemptTransport{Upstream: up, Clock: fake}
@@ -509,7 +509,7 @@ func TestBreakerStageRejects(t *testing.T) {
 	um := upstreamMetrics(t)
 	up := newUpstreamWith(t, config.Upstream{
 		Name:           "u",
-		Hosts:          []config.Host{{URL: "http://127.0.0.1:9001"}},
+		Hosts:          []config.Host{{URL: config.NewSecretURL("http://127.0.0.1:9001")}},
 		CircuitBreaker: cbConfig(1),
 	}, upstream.Deps{Clock: clock.NewFake(time.Unix(0, 0)), Metrics: um})
 
@@ -582,7 +582,7 @@ func TestBreakerStageOutcomes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			up := newUpstreamWith(t, config.Upstream{
 				Name:           "u",
-				Hosts:          []config.Host{{URL: "http://127.0.0.1:9001"}},
+				Hosts:          []config.Host{{URL: config.NewSecretURL("http://127.0.0.1:9001")}},
 				CircuitBreaker: cbConfig(0),
 			}, upstream.Deps{Clock: clock.NewFake(time.Unix(0, 0))})
 
@@ -612,7 +612,7 @@ func TestBreakerStageOutcomes(t *testing.T) {
 	t.Run("hijack success", func(t *testing.T) {
 		up := newUpstreamWith(t, config.Upstream{
 			Name:           "u",
-			Hosts:          []config.Host{{URL: "http://127.0.0.1:9001"}},
+			Hosts:          []config.Host{{URL: config.NewSecretURL("http://127.0.0.1:9001")}},
 			CircuitBreaker: cbConfig(0),
 		}, upstream.Deps{Clock: clock.NewFake(time.Unix(0, 0))})
 		srv := httptest.NewServer(BreakerStage(up)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -639,7 +639,7 @@ func TestBreakerStageOutcomes(t *testing.T) {
 	t.Run("panic re-panics and is ignored", func(t *testing.T) {
 		up := newUpstreamWith(t, config.Upstream{
 			Name:           "u",
-			Hosts:          []config.Host{{URL: "http://127.0.0.1:9001"}},
+			Hosts:          []config.Host{{URL: config.NewSecretURL("http://127.0.0.1:9001")}},
 			CircuitBreaker: cbConfig(0),
 		}, upstream.Deps{Clock: clock.NewFake(time.Unix(0, 0))})
 		h := BreakerStage(up)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -720,7 +720,7 @@ func TestAttemptTokenCompleted(t *testing.T) {
 			fake := clock.NewFake(time.Unix(0, 0))
 			cfg := config.Upstream{
 				Name:           "u",
-				Hosts:          []config.Host{{URL: tt.url}},
+				Hosts:          []config.Host{{URL: config.NewSecretURL(tt.url)}},
 				CircuitBreaker: cbConfig(0),
 			}
 			deps := upstream.Deps{Clock: fake}

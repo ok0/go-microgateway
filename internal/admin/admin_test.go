@@ -47,10 +47,10 @@ func newFake(t *testing.T) *fakeSource {
 		},
 		Auth: config.Auth{
 			JWT: []config.JWTProvider{{
-				Keys: []config.JWTKey{{Secret: testSecret}},
+				Keys: []config.JWTKey{{Secret: config.NewSecret(testSecret)}},
 			}},
 			APIKeys: []config.APIKeyProvider{{
-				Keys: []config.APIKey{{Hash: testKeyHash}},
+				Keys: []config.APIKey{{Hash: config.NewSecret(testKeyHash)}},
 			}},
 		},
 	}
