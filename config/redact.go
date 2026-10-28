@@ -29,8 +29,8 @@ func (c *Config) Line(path string) int {
 }
 
 // Redacted returns a deep copy of c in which every non-empty JWT key secret and every API key hash
-// is replaced by "REDACTED", and the userinfo of every upstream host URL and JWKS URL is replaced by
-// "REDACTED" as described in RedactURL. c itself is not modified.
+// is replaced by "REDACTED", and the userinfo and query values of every upstream host URL and JWKS URL
+// are replaced by "REDACTED" as described in RedactURL. c itself is not modified.
 func (c *Config) Redacted() *Config {
 	r := deepCopy(reflect.ValueOf(c)).Interface().(*Config)
 	for i := range r.Auth.JWT {
@@ -58,14 +58,18 @@ func (c *Config) Redacted() *Config {
 	return r
 }
 
-// RedactURL returns raw with any userinfo replaced by REDACTED; unparseable input is redacted heuristically.
+// RedactURL returns raw with any userinfo replaced by REDACTED and every query parameter value replaced by
+// REDACTED; parameter names and their order are kept. Unparseable input is redacted heuristically.
 func RedactURL(raw string) string {
 	if strings.Contains(raw, "://") {
 		if u, err := url.Parse(raw); err == nil {
-			if u.User == nil {
+			if u.User == nil && u.RawQuery == "" {
 				return raw
 			}
-			u.User = url.User("REDACTED")
+			if u.User != nil {
+				u.User = url.User("REDACTED")
+			}
+			u.RawQuery = redactQuery(u.RawQuery)
 			return u.String()
 		}
 	}
@@ -77,11 +81,39 @@ func RedactURL(raw string) string {
 	if i := strings.IndexAny(raw[start:], "/?#"); i >= 0 {
 		end = start + i
 	}
-	at := strings.LastIndex(raw[start:end], "@")
-	if at < 0 {
-		return raw
+	out := raw
+	if at := strings.LastIndex(raw[start:end], "@"); at >= 0 {
+		out = raw[:start] + "REDACTED" + raw[start+at:]
 	}
-	return raw[:start] + "REDACTED" + raw[start+at:]
+	return redactHeuristicQuery(out)
+}
+
+// redactQuery replaces each parameter value in a raw query string with REDACTED. A parameter without "="
+// is kept unchanged.
+func redactQuery(q string) string {
+	if q == "" {
+		return q
+	}
+	parts := strings.Split(q, "&")
+	for i, p := range parts {
+		if k, _, found := strings.Cut(p, "="); found {
+			parts[i] = k + "=REDACTED"
+		}
+	}
+	return strings.Join(parts, "&")
+}
+
+// redactHeuristicQuery applies redactQuery to the text between the first "?" before any "#" and the "#" or the end.
+func redactHeuristicQuery(s string) string {
+	limit := len(s)
+	if h := strings.IndexByte(s, '#'); h >= 0 {
+		limit = h
+	}
+	q := strings.IndexByte(s[:limit], '?')
+	if q < 0 {
+		return s
+	}
+	return s[:q+1] + redactQuery(s[q+1:limit]) + s[limit:]
 }
 
 // Fingerprint returns the lowercase hex SHA-256 of the JSON encoding of c. encoding/json sorts map

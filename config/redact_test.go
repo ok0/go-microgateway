@@ -104,11 +104,21 @@ func TestRedactURL(t *testing.T) {
 		{"http://u:p w@h:80/%zz", "http://REDACTED@h:80/%zz"},
 		{"u:p@h/x", "REDACTED@h/x"},
 		{"", ""},
+		{"http://u:p@h:1/x?token=abc&v=1#f", "http://REDACTED@h:1/x?token=REDACTED&v=REDACTED#f"},
+		{"http://h:1/?flag", "http://h:1/?flag"},
+		{"http://h:1/x", "http://h:1/x"},
 	}
 	for _, tc := range cases {
 		if got := RedactURL(tc.in); got != tc.want {
 			t.Errorf("RedactURL(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestRedactURLUnparseableQuery(t *testing.T) {
+	got := RedactURL("http://u:p@h:1/%zz?token=abc")
+	if strings.Contains(got, "p@") || strings.Contains(got, "abc") {
+		t.Errorf("RedactURL left a credential or query value: %q", got)
 	}
 }
 
