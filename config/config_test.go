@@ -411,8 +411,83 @@ func TestDefaults(t *testing.T) {
 	if r == nil {
 		t.Fatal("retry not decoded")
 	}
-	if r.Attempts != 3 || !reflect.DeepEqual(r.OnStatuses, []int{502, 503, 504}) {
+	if r.Attempts == nil || *r.Attempts != 3 || !reflect.DeepEqual(r.OnStatuses, []int{502, 503, 504}) {
 		t.Errorf("retry defaults = %+v", r)
+	}
+	if r.MaxBodyBytes == nil || *r.MaxBodyBytes != 65536 {
+		t.Errorf("default max_body_bytes not 65536: %v", r.MaxBodyBytes)
+	}
+	if r.Budget.Ratio == nil || *r.Budget.Ratio != 0.1 {
+		t.Errorf("default budget ratio not 0.1: %v", r.Budget.Ratio)
+	}
+	if r.Budget.MinPerSecond == nil || *r.Budget.MinPerSecond != 10 {
+		t.Errorf("default budget min_per_second not 10: %v", r.Budget.MinPerSecond)
+	}
+
+	c, err = Parse([]byte(strings.Replace(minimalYAML, "    hosts:\n", "    circuit_breaker: {}\n    hosts:\n", 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb := c.Upstreams[0].CircuitBreaker
+	if cb == nil || cb.ConsecutiveFailures == nil || *cb.ConsecutiveFailures != 5 {
+		t.Errorf("default consecutive_failures not 5: %+v", cb)
+	}
+	if cb == nil || cb.Buckets == nil || *cb.Buckets != 10 {
+		t.Errorf("default buckets not 10: %+v", cb)
+	}
+	if cb == nil || cb.MinRequests == nil || *cb.MinRequests != 20 {
+		t.Errorf("default min_requests not 20: %+v", cb)
+	}
+	if cb == nil || cb.FailureRatio == nil || *cb.FailureRatio != 0.5 {
+		t.Errorf("default failure_ratio not 0.5: %+v", cb)
+	}
+	if cb == nil || cb.HalfOpenProbes == nil || *cb.HalfOpenProbes != 3 {
+		t.Errorf("default half_open_probes not 3: %+v", cb)
+	}
+	if cb == nil || cb.SuccessThreshold == nil || *cb.SuccessThreshold != 2 {
+		t.Errorf("default success_threshold not 2: %+v", cb)
+	}
+}
+
+func TestResilienceDefaultsKeepExplicitZero(t *testing.T) {
+	const explicit = `version: 1
+listeners:
+  - name: public
+    address: ":8080"
+upstreams:
+  - name: users
+    hosts:
+      - url: "http://127.0.0.1:9001"
+    circuit_breaker:
+      consecutive_failures: 0
+routes:
+  - name: all
+    upstream: users
+    retry:
+      max_body_bytes: 0
+      budget:
+        ratio: 0
+        min_per_second: 0
+`
+	c, err := Parse([]byte(explicit))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if cb := c.Upstreams[0].CircuitBreaker; cb == nil || cb.ConsecutiveFailures == nil || *cb.ConsecutiveFailures != 0 {
+		t.Errorf("explicit consecutive_failures 0 not kept: %+v", cb)
+	}
+	rt := c.Routes[0].Retry
+	if rt == nil || rt.MaxBodyBytes == nil || *rt.MaxBodyBytes != 0 {
+		t.Errorf("explicit max_body_bytes 0 not kept: %+v", rt)
+	}
+	if rt == nil || rt.Budget.Ratio == nil || *rt.Budget.Ratio != 0 {
+		t.Errorf("explicit budget ratio 0 not kept: %+v", rt)
+	}
+	if rt == nil || rt.Budget.MinPerSecond == nil || *rt.Budget.MinPerSecond != 0 {
+		t.Errorf("explicit budget min_per_second 0 not kept: %+v", rt)
 	}
 }
 

@@ -214,24 +214,24 @@ type ActiveHealth struct {
 	ExpectedStatuses []string `yaml:"expected_statuses" json:"expected_statuses"`
 }
 
-// CircuitBreaker stops traffic after repeated failures. Fields left at their zero value take the defaults noted on each field.
+// CircuitBreaker stops traffic after repeated failures. Pointer fields take their default only when absent; other fields left at their zero value take the defaults noted on each field.
 type CircuitBreaker struct {
 	// Window is the sliding window over which failures are counted. Default 10s.
 	Window Duration `yaml:"window" json:"window"`
-	// Buckets is the number of slices the window is divided into. Default 10.
-	Buckets int `yaml:"buckets" json:"buckets"`
-	// MinRequests is the request count needed in the window before the ratio is evaluated. Default 20.
-	MinRequests int `yaml:"min_requests" json:"min_requests"`
-	// FailureRatio opens the breaker when failures reach this fraction. Default 0.5.
-	FailureRatio float64 `yaml:"failure_ratio" json:"failure_ratio"`
-	// ConsecutiveFailures opens the breaker after this many failures in a row. Default 5.
-	ConsecutiveFailures int `yaml:"consecutive_failures" json:"consecutive_failures"`
+	// Buckets is the number of slices the window is divided into. Default 10 when absent; 1-1000; window/buckets must be at least 1ms.
+	Buckets *int `yaml:"buckets" json:"buckets"`
+	// MinRequests is the request count needed in the window before the ratio is evaluated. Default 20 when absent; must be >= 1.
+	MinRequests *int `yaml:"min_requests" json:"min_requests"`
+	// FailureRatio opens the breaker when failures reach this fraction. Default 0.5 when absent; must be in (0, 1].
+	FailureRatio *float64 `yaml:"failure_ratio" json:"failure_ratio"`
+	// ConsecutiveFailures opens the breaker after this many failures in a row. Default 5 when absent; 0 disables the consecutive rule.
+	ConsecutiveFailures *int `yaml:"consecutive_failures" json:"consecutive_failures"`
 	// OpenTimeout is how long the breaker stays open before probing. Default 30s.
 	OpenTimeout Duration `yaml:"open_timeout" json:"open_timeout"`
-	// HalfOpenProbes is the number of trial requests allowed while half open. Default 3.
-	HalfOpenProbes int `yaml:"half_open_probes" json:"half_open_probes"`
-	// SuccessThreshold is the successful probes needed to close the breaker. Default 2.
-	SuccessThreshold int `yaml:"success_threshold" json:"success_threshold"`
+	// HalfOpenProbes is the number of trial requests allowed while half open. Default 3 when absent; must be >= 1 and >= success_threshold.
+	HalfOpenProbes *int `yaml:"half_open_probes" json:"half_open_probes"`
+	// SuccessThreshold is the successful probes needed to close the breaker. Default 2 when absent; must be >= 1.
+	SuccessThreshold *int `yaml:"success_threshold" json:"success_threshold"`
 }
 
 // Auth declares the authentication providers available to routes.
@@ -470,15 +470,15 @@ type RouteBreaker struct {
 	Enabled *bool `yaml:"enabled" json:"enabled"`
 }
 
-// Retry configures retries of failed exchanges. Fields left at their zero value take the defaults noted on each field.
+// Retry configures retries of failed exchanges. Pointer fields take their default only when absent; other fields left at their zero value take the defaults noted on each field.
 type Retry struct {
-	// Attempts is the total number of tries, between 1 and 10. Default 3.
-	Attempts int `yaml:"attempts" json:"attempts"`
+	// Attempts is the total number of tries including the first. Default 3 when absent; 1-10.
+	Attempts *int `yaml:"attempts" json:"attempts"`
 	// BaseDelay is the first backoff delay. Default 25ms.
 	BaseDelay Duration `yaml:"base_delay" json:"base_delay"`
 	// MaxDelay caps the backoff delay. Default 250ms.
 	MaxDelay Duration `yaml:"max_delay" json:"max_delay"`
-	// OnStatuses lists response statuses that trigger a retry. Default [502, 503, 504], applied only when nil.
+	// OnStatuses lists response statuses that trigger a retry; statuses 400-599. Default [502, 503, 504], applied only when nil.
 	OnStatuses []int `yaml:"on_statuses" json:"on_statuses"`
 	// Methods lists methods that may be retried. Default [GET, HEAD, OPTIONS, PUT, DELETE], applied only when nil.
 	Methods []string `yaml:"methods" json:"methods"`
@@ -486,13 +486,13 @@ type Retry struct {
 	IdempotencyKey IdempotencyKey `yaml:"idempotency_key" json:"idempotency_key"`
 	// Budget limits how many retries may be issued relative to traffic.
 	Budget RetryBudget `yaml:"budget" json:"budget"`
-	// MaxBodyBytes is the largest request body that is buffered for retry. Default 65536.
-	MaxBodyBytes int64 `yaml:"max_body_bytes" json:"max_body_bytes"`
+	// MaxBodyBytes is the largest request body that is buffered for retry. Default 65536 when absent; 0 disables body buffering, so requests with a body are only retried on a connect failure before any byte was sent.
+	MaxBodyBytes *int64 `yaml:"max_body_bytes" json:"max_body_bytes"`
 }
 
 // IdempotencyKey controls the idempotency key header. Fields left at their zero value take the defaults noted on each field.
 type IdempotencyKey struct {
-	// Enabled sends an idempotency key header with retried requests.
+	// Enabled lets methods outside methods be retried when the request carries a non-empty Header.
 	Enabled bool `yaml:"enabled" json:"enabled"`
 	// Header is the header name for the key. Default "Idempotency-Key".
 	Header string `yaml:"header" json:"header"`
@@ -500,10 +500,10 @@ type IdempotencyKey struct {
 
 // RetryBudget bounds retries as a share of traffic. Fields left at their zero value take the defaults noted on each field.
 type RetryBudget struct {
-	// Ratio is the retry share of requests, in [0, 1]. Default 0.1.
-	Ratio float64 `yaml:"ratio" json:"ratio"`
-	// MinPerSecond is the retry rate always allowed regardless of traffic. Default 10.
-	MinPerSecond float64 `yaml:"min_per_second" json:"min_per_second"`
+	// Ratio is the retry share of requests, in [0, 1]. Default 0.1 when absent; 0 is kept.
+	Ratio *float64 `yaml:"ratio" json:"ratio"`
+	// MinPerSecond is the retry rate always allowed regardless of traffic. Default 10 when absent; 0 is kept.
+	MinPerSecond *float64 `yaml:"min_per_second" json:"min_per_second"`
 	// Window is the period the budget is measured over. Default 10s.
 	Window Duration `yaml:"window" json:"window"`
 }

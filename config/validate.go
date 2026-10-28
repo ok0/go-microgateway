@@ -339,26 +339,32 @@ func checkUpstreamHealth(ck *checker, p string, u *Upstream) {
 	if cb := u.CircuitBreaker; cb != nil {
 		cp := p + ".circuit_breaker"
 		requirePositive(ck, cp+".window", cb.Window)
-		if cb.Buckets < 1 {
+		buckets := *cb.Buckets
+		switch {
+		case buckets < 1:
 			ck.add(cp+".buckets", "must be >= 1")
+		case buckets > 1000:
+			ck.add(cp+".buckets", "must be <= 1000")
+		case cb.Window > 0 && time.Duration(cb.Window)/time.Duration(buckets) < time.Millisecond:
+			ck.add(cp+".buckets", "window / buckets must be at least 1ms")
 		}
-		if cb.MinRequests < 1 {
+		if *cb.MinRequests < 1 {
 			ck.add(cp+".min_requests", "must be >= 1")
 		}
-		if f := cb.FailureRatio; !(f > 0 && f <= 1) || math.IsInf(f, 0) {
+		if f := *cb.FailureRatio; !(f > 0 && f <= 1) || math.IsInf(f, 0) {
 			ck.add(cp+".failure_ratio", "must be in (0, 1]")
 		}
-		if cb.ConsecutiveFailures < 1 {
-			ck.add(cp+".consecutive_failures", "must be >= 1")
+		if v := cb.ConsecutiveFailures; v != nil && *v < 0 {
+			ck.add(cp+".consecutive_failures", "must be >= 0")
 		}
 		requirePositive(ck, cp+".open_timeout", cb.OpenTimeout)
-		if cb.HalfOpenProbes < 1 {
+		if *cb.HalfOpenProbes < 1 {
 			ck.add(cp+".half_open_probes", "must be >= 1")
 		}
-		if cb.SuccessThreshold < 1 {
+		if *cb.SuccessThreshold < 1 {
 			ck.add(cp+".success_threshold", "must be >= 1")
 		}
-		if cb.HalfOpenProbes < cb.SuccessThreshold {
+		if *cb.HalfOpenProbes < *cb.SuccessThreshold {
 			ck.add(cp+".half_open_probes", "must be >= success_threshold")
 		}
 	}
@@ -707,7 +713,7 @@ func checkRateLimit(ck *checker, p string, rl *RateLimit) {
 }
 
 func checkRetry(ck *checker, p string, rt *Retry) {
-	if rt.Attempts < 1 || rt.Attempts > 10 {
+	if a := *rt.Attempts; a < 1 || a > 10 {
 		ck.add(p+".attempts", "must be between 1 and 10")
 	}
 	requirePositive(ck, p+".base_delay", rt.BaseDelay)
@@ -715,8 +721,8 @@ func checkRetry(ck *checker, p string, rt *Retry) {
 		ck.add(p+".max_delay", "must be >= base_delay")
 	}
 	for j, s := range rt.OnStatuses {
-		if s < 100 || s > 599 {
-			ck.add(fmt.Sprintf("%s.on_statuses[%d]", p, j), "must be between 100 and 599")
+		if s < 400 || s > 599 {
+			ck.add(fmt.Sprintf("%s.on_statuses[%d]", p, j), "must be between 400 and 599")
 		}
 	}
 	for j, m := range rt.Methods {
@@ -728,14 +734,14 @@ func checkRetry(ck *checker, p string, rt *Retry) {
 		ck.add(p+".idempotency_key.header", "is required when enabled")
 	}
 	b := rt.Budget
-	if !(b.Ratio >= 0 && b.Ratio <= 1) || math.IsInf(b.Ratio, 0) {
+	if v := b.Ratio; v != nil && (!(*v >= 0 && *v <= 1) || math.IsInf(*v, 0)) {
 		ck.add(p+".budget.ratio", "must be in [0, 1]")
 	}
-	if !(b.MinPerSecond >= 0) || math.IsInf(b.MinPerSecond, 0) {
+	if v := b.MinPerSecond; v != nil && (!(*v >= 0) || math.IsInf(*v, 0)) {
 		ck.add(p+".budget.min_per_second", "must be a finite number >= 0")
 	}
 	requirePositive(ck, p+".budget.window", b.Window)
-	if rt.MaxBodyBytes < 0 {
+	if v := rt.MaxBodyBytes; v != nil && *v < 0 {
 		ck.add(p+".max_body_bytes", "must not be negative")
 	}
 }

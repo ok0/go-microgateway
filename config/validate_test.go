@@ -139,7 +139,7 @@ func TestSemanticChecks(t *testing.T) {
 			c.Routes = append(c.Routes, r)
 		}, "routes[2]", "conflicts with route"},
 		{"breaker probes below success threshold", func(c *Config) {
-			c.Upstreams[0].CircuitBreaker.HalfOpenProbes = 1
+			c.Upstreams[0].CircuitBreaker.HalfOpenProbes = intPtr(1)
 		}, "upstreams[0].circuit_breaker.half_open_probes", "must be >= success_threshold"},
 		{"jwt leeway above 5m", func(c *Config) {
 			c.Auth.JWT[0].Leeway = Duration(6 * time.Minute)
@@ -218,6 +218,68 @@ func TestSemanticChecks(t *testing.T) {
 		{"host url with credentials and invalid port", func(c *Config) {
 			c.Upstreams[0].Hosts[0].URL = "http://user:s3cret@h:bad"
 		}, "upstreams[0].hosts[0].url", "invalid URL"},
+		{"breaker buckets zero", func(c *Config) {
+			c.Upstreams[0].CircuitBreaker.Buckets = intPtr(0)
+		}, "upstreams[0].circuit_breaker.buckets", "must be >= 1"},
+		{"breaker buckets above 1000", func(c *Config) {
+			c.Upstreams[0].CircuitBreaker.Buckets = intPtr(1001)
+		}, "upstreams[0].circuit_breaker.buckets", "must be <= 1000"},
+		{"breaker window too short for buckets", func(c *Config) {
+			c.Upstreams[0].CircuitBreaker.Window = Duration(5 * time.Millisecond)
+			c.Upstreams[0].CircuitBreaker.Buckets = intPtr(10)
+		}, "upstreams[0].circuit_breaker.buckets", "at least 1ms"},
+		{"breaker failure ratio zero", func(c *Config) {
+			c.Upstreams[0].CircuitBreaker.FailureRatio = floatPtr(0)
+		}, "upstreams[0].circuit_breaker.failure_ratio", "must be in (0, 1]"},
+		{"breaker failure ratio above one", func(c *Config) {
+			c.Upstreams[0].CircuitBreaker.FailureRatio = floatPtr(1.5)
+		}, "upstreams[0].circuit_breaker.failure_ratio", "must be in (0, 1]"},
+		{"breaker negative consecutive failures", func(c *Config) {
+			c.Upstreams[0].CircuitBreaker.ConsecutiveFailures = intPtr(-1)
+		}, "upstreams[0].circuit_breaker.consecutive_failures", "must be >= 0"},
+		{"breaker negative open timeout", func(c *Config) {
+			c.Upstreams[0].CircuitBreaker.OpenTimeout = Duration(-time.Second)
+		}, "upstreams[0].circuit_breaker.open_timeout", "must be positive"},
+		{"breaker negative window in go-built config", func(c *Config) {
+			c.Upstreams[0].CircuitBreaker.Window = Duration(-1)
+		}, "upstreams[0].circuit_breaker.window", "must be positive"},
+		{"breaker half open probes below success threshold", func(c *Config) {
+			c.Upstreams[0].CircuitBreaker.SuccessThreshold = intPtr(2)
+			c.Upstreams[0].CircuitBreaker.HalfOpenProbes = intPtr(1)
+		}, "upstreams[0].circuit_breaker.half_open_probes", "must be >= success_threshold"},
+		{"retry attempts zero", func(c *Config) {
+			c.Routes[0].Retry = &Retry{Attempts: intPtr(0)}
+		}, "routes[0].retry.attempts", "must be between 1 and 10"},
+		{"retry attempts above ten", func(c *Config) {
+			c.Routes[0].Retry = &Retry{Attempts: intPtr(11)}
+		}, "routes[0].retry.attempts", "must be between 1 and 10"},
+		{"retry max delay below base delay", func(c *Config) {
+			c.Routes[0].Retry = &Retry{Attempts: intPtr(3), BaseDelay: Duration(300 * time.Millisecond), MaxDelay: Duration(250 * time.Millisecond)}
+		}, "routes[0].retry.max_delay", "must be >= base_delay"},
+		{"retry budget ratio above one", func(c *Config) {
+			c.Routes[0].Retry = &Retry{Attempts: intPtr(3), Budget: RetryBudget{Ratio: floatPtr(1.5)}}
+		}, "routes[0].retry.budget.ratio", "must be in [0, 1]"},
+		{"retry budget ratio negative", func(c *Config) {
+			c.Routes[0].Retry = &Retry{Attempts: intPtr(3), Budget: RetryBudget{Ratio: floatPtr(-0.1)}}
+		}, "routes[0].retry.budget.ratio", "must be in [0, 1]"},
+		{"retry budget min per second negative", func(c *Config) {
+			c.Routes[0].Retry = &Retry{Attempts: intPtr(3), Budget: RetryBudget{MinPerSecond: floatPtr(-1)}}
+		}, "routes[0].retry.budget.min_per_second", "must be a finite number"},
+		{"retry lowercase method", func(c *Config) {
+			c.Routes[0].Retry = &Retry{Attempts: intPtr(3), Methods: []string{"get"}}
+		}, "routes[0].retry.methods[0]", "invalid method"},
+		{"retry on_statuses below 400", func(c *Config) {
+			c.Routes[0].Retry = &Retry{Attempts: intPtr(3), OnStatuses: []int{200}}
+		}, "routes[0].retry.on_statuses[0]", "must be between 400 and 599"},
+		{"retry on_statuses above 599", func(c *Config) {
+			c.Routes[0].Retry = &Retry{Attempts: intPtr(3), OnStatuses: []int{600}}
+		}, "routes[0].retry.on_statuses[0]", "must be between 400 and 599"},
+		{"retry negative max body bytes", func(c *Config) {
+			c.Routes[0].Retry = &Retry{Attempts: intPtr(3), MaxBodyBytes: int64Ptr(-1)}
+		}, "routes[0].retry.max_body_bytes", "must not be negative"},
+		{"retry before circuit breaker in pipeline", func(c *Config) {
+			c.Routes[0].Pipeline = []string{"retry", "circuit_breaker"}
+		}, "routes[0].pipeline[0]", "must be the last stage"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -343,5 +405,152 @@ func TestHostURLErrorOmitsCredentials(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "s3cret") {
 		t.Errorf("error leaks credential: %v", err)
+	}
+}
+
+func TestResilienceErrorsAllAtOnce(t *testing.T) {
+	src := `version: 1
+listeners:
+  - name: public
+    address: ":8080"
+upstreams:
+  - name: users
+    hosts:
+      - url: "http://127.0.0.1:9001"
+    circuit_breaker:
+      window: 5ms
+      buckets: 10
+      failure_ratio: 1.5
+      consecutive_failures: -1
+      open_timeout: -1s
+      success_threshold: 2
+      half_open_probes: 1
+routes:
+  - name: all
+    upstream: users
+    pipeline:
+      - retry
+      - circuit_breaker
+    retry:
+      attempts: 11
+      base_delay: 300ms
+      max_delay: 250ms
+      on_statuses: [200]
+      methods: [get]
+      max_body_bytes: -1
+      budget:
+        ratio: 1.5
+        min_per_second: -1
+`
+	withUnknown := strings.Replace(src, "      budget:\n", "      backoff: 1s\n      budget:\n", 1)
+	_, err := Parse([]byte(withUnknown))
+	if errs := fieldErrors(t, err); !hasPath(errs, "routes[0].retry.backoff") {
+		t.Fatalf("no decode error at routes[0].retry.backoff: %v", err)
+	} else {
+		for _, fe := range errs {
+			if fe.Path == "routes[0].retry.backoff" && fe.Line != lineOf(withUnknown, "backoff: 1s") {
+				t.Errorf("unknown key at line %d, want %d", fe.Line, lineOf(withUnknown, "backoff: 1s"))
+			}
+		}
+	}
+
+	_, err = Parse([]byte(src))
+	errs := fieldErrors(t, err)
+	want := []string{
+		"upstreams[0].circuit_breaker.buckets",
+		"upstreams[0].circuit_breaker.failure_ratio",
+		"upstreams[0].circuit_breaker.consecutive_failures",
+		"upstreams[0].circuit_breaker.open_timeout",
+		"upstreams[0].circuit_breaker.half_open_probes",
+		"routes[0].retry.attempts",
+		"routes[0].retry.max_delay",
+		"routes[0].retry.budget.ratio",
+		"routes[0].retry.budget.min_per_second",
+		"routes[0].retry.methods[0]",
+		"routes[0].retry.on_statuses[0]",
+		"routes[0].retry.max_body_bytes",
+		"routes[0].pipeline[0]",
+	}
+	for _, w := range want {
+		found := false
+		for _, fe := range errs {
+			if fe.Path == w {
+				found = true
+				if fe.Line <= 0 {
+					t.Errorf("%s has no line number", w)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("no error at %s; got %v", w, err)
+		}
+	}
+}
+
+func TestResilienceExplicitZeroRejected(t *testing.T) {
+	src := `version: 1
+listeners:
+  - name: public
+    address: ":8080"
+upstreams:
+  - name: users
+    hosts:
+      - url: "http://127.0.0.1:9001"
+    circuit_breaker:
+      buckets: 0
+      min_requests: 0
+      failure_ratio: 0
+      half_open_probes: 0
+      success_threshold: 0
+routes:
+  - name: all
+    upstream: users
+    retry:
+      attempts: 0
+`
+	_, err := Parse([]byte(src))
+	errs := fieldErrors(t, err)
+	want := []struct {
+		path string
+		msg  string
+		key  string
+	}{
+		{"upstreams[0].circuit_breaker.buckets", "must be >= 1", "buckets: 0"},
+		{"upstreams[0].circuit_breaker.min_requests", "must be >= 1", "min_requests: 0"},
+		{"upstreams[0].circuit_breaker.failure_ratio", "must be in (0, 1]", "failure_ratio: 0"},
+		{"upstreams[0].circuit_breaker.half_open_probes", "must be >= 1", "half_open_probes: 0"},
+		{"upstreams[0].circuit_breaker.success_threshold", "must be >= 1", "success_threshold: 0"},
+		{"routes[0].retry.attempts", "must be between 1 and 10", "attempts: 0"},
+	}
+	if len(errs) != len(want) {
+		t.Fatalf("got %d errors, want %d: %v", len(errs), len(want), err)
+	}
+	for _, fe := range errs {
+		known := false
+		for _, w := range want {
+			if fe.Path == w.path {
+				known = true
+			}
+		}
+		if !known {
+			t.Errorf("unexpected error at %s: %s", fe.Path, fe.Msg)
+		}
+	}
+	for _, w := range want {
+		found := false
+		for _, fe := range errs {
+			if fe.Path == w.path {
+				found = true
+				if fe.Msg != w.msg {
+					t.Errorf("%s message %q, want %q", w.path, fe.Msg, w.msg)
+				}
+				if fe.Line != lineOf(src, w.key) {
+					t.Errorf("%s at line %d, want %d", w.path, fe.Line, lineOf(src, w.key))
+				}
+			}
+		}
+		if !found {
+			t.Errorf("no error at %s; got %v", w.path, err)
+		}
 	}
 }

@@ -35,6 +35,10 @@ func floatPtr(v float64) *float64 {
 	return &v
 }
 
+func int64Ptr(v int64) *int64 {
+	return &v
+}
+
 func defDur(p *Duration, v time.Duration) {
 	if *p == 0 {
 		*p = Duration(v)
@@ -125,13 +129,25 @@ func (c *Config) applyDefaults() {
 		}
 		if cb := u.CircuitBreaker; cb != nil {
 			defDur(&cb.Window, 10*time.Second)
-			defInt(&cb.Buckets, 10)
-			defInt(&cb.MinRequests, 20)
-			defFloat(&cb.FailureRatio, 0.5)
-			defInt(&cb.ConsecutiveFailures, 5)
+			if cb.Buckets == nil {
+				cb.Buckets = intPtr(10)
+			}
+			if cb.MinRequests == nil {
+				cb.MinRequests = intPtr(20)
+			}
+			if cb.FailureRatio == nil {
+				cb.FailureRatio = floatPtr(0.5)
+			}
+			if cb.ConsecutiveFailures == nil {
+				cb.ConsecutiveFailures = intPtr(5)
+			}
 			defDur(&cb.OpenTimeout, 30*time.Second)
-			defInt(&cb.HalfOpenProbes, 3)
-			defInt(&cb.SuccessThreshold, 2)
+			if cb.HalfOpenProbes == nil {
+				cb.HalfOpenProbes = intPtr(3)
+			}
+			if cb.SuccessThreshold == nil {
+				cb.SuccessThreshold = intPtr(2)
+			}
 		}
 	}
 
@@ -175,7 +191,9 @@ func (c *Config) applyDefaults() {
 			defBool(&rb.Enabled, true)
 		}
 		if rt := r.Retry; rt != nil {
-			defInt(&rt.Attempts, 3)
+			if rt.Attempts == nil {
+				rt.Attempts = intPtr(3)
+			}
 			defDur(&rt.BaseDelay, 25*time.Millisecond)
 			defDur(&rt.MaxDelay, 250*time.Millisecond)
 			if rt.OnStatuses == nil {
@@ -185,11 +203,15 @@ func (c *Config) applyDefaults() {
 				rt.Methods = []string{"GET", "HEAD", "OPTIONS", "PUT", "DELETE"}
 			}
 			defStr(&rt.IdempotencyKey.Header, "Idempotency-Key")
-			defFloat(&rt.Budget.Ratio, 0.1)
-			defFloat(&rt.Budget.MinPerSecond, 10)
+			if rt.Budget.Ratio == nil {
+				rt.Budget.Ratio = floatPtr(0.1)
+			}
+			if rt.Budget.MinPerSecond == nil {
+				rt.Budget.MinPerSecond = floatPtr(10)
+			}
 			defDur(&rt.Budget.Window, 10*time.Second)
-			if rt.MaxBodyBytes == 0 {
-				rt.MaxBodyBytes = 65536
+			if rt.MaxBodyBytes == nil {
+				rt.MaxBodyBytes = int64Ptr(65536)
 			}
 		}
 	}
