@@ -1,7 +1,10 @@
 // Package hooks exposes gateway extension points to the microgateway binary without making them public API.
 package hooks
 
-import "github.com/ok0/go-microgateway/config"
+import (
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
+)
 
 // Participant takes part in every configuration load of a gateway, the initial one and every reload.
 type Participant interface {
@@ -15,3 +18,8 @@ type Participant interface {
 // WithParticipant returns a microgateway.Option, typed as any, that adds p to a gateway. Package microgateway sets it
 // when it is initialized; it is nil until then.
 var WithParticipant func(p Participant) any
+
+// WithClock returns a microgateway.Option, typed as any, that makes a gateway use c for every timer and
+// timestamp. Package microgateway sets it when it is initialized; it is nil until then. It lets tests outside the
+// root package drive a gateway with a fake clock.
+var WithClock func(c clock.Clock) any

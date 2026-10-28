@@ -70,6 +70,9 @@ func init() {
 			o.participants = append(o.participants, p)
 		})
 	}
+	hooks.WithClock = func(c clock.Clock) any {
+		return withClock(c)
+	}
 }
 
 func WithLogger(l *slog.Logger) Option {
