@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/ok0/lychgate/internal/reqctx"
@@ -64,6 +65,19 @@ func TestWrite(t *testing.T) {
 	}
 }
 
+func TestWriteUnavailable(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	Write(rec, req, http.StatusServiceUnavailable, CodeUnavailable, Message(CodeUnavailable))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"service_unavailable"`) {
+		t.Errorf("body = %q, want code service_unavailable", rec.Body.String())
+	}
+}
+
 func TestMessages(t *testing.T) {
 	codes := []string{
 		CodeRouteNotFound,
@@ -79,6 +93,7 @@ func TestMessages(t *testing.T) {
 		CodeClientClosed,
 		CodeNotFound,
 		CodeMethodNotAllowed,
+		CodeUnavailable,
 	}
 	for _, code := range codes {
 		if msg := Message(code); msg == "" || msg == "error" {

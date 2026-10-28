@@ -25,6 +25,7 @@ const (
 	CodeClientClosed      = "client_closed_request"
 	CodeNotFound          = "not_found"
 	CodeMethodNotAllowed  = "method_not_allowed"
+	CodeUnavailable       = "service_unavailable"
 )
 
 const StatusClientClosed = 499
@@ -110,6 +111,8 @@ func Message(code string) string {
 		return "not found"
 	case CodeMethodNotAllowed:
 		return "method not allowed"
+	case CodeUnavailable:
+		return "the gateway is not accepting requests"
 	default:
 		return "error"
 	}
