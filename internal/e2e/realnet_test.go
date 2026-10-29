@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/ok0/go-microgateway"
 )
 
 func TestFileEditUnderLoadTCP(t *testing.T) {
@@ -116,5 +117,20 @@ func TestRealnetAuthJWKS(t *testing.T) {
 	g.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+}
+
+func TestConnectTimeoutRealClockTCP(t *testing.T) {
+	logs := &logBuf{}
+	doc := oneUpstreamDoc("http://"+tcpNetwork{}.blackhole(t), "    timeouts:\n      connect: 50ms\n      response_header: 1h\n")
+	g := tcpNetwork{}.gateway(t, doc, microgateway.WithLogger(newJSONLogger(logs)))
+	ts := tcpNetwork{}.serve(t, g)
+	r := awaitUpstreamReply(t, startUpstreamReply(tcpNetwork{}.client(t, nil), getRequest(t, ts.URL+"/")))
+	if r.status != http.StatusBadGateway || r.code != "bad_gateway" {
+		t.Fatalf("reply = %d %q, want 502 bad_gateway", r.status, r.code)
+	}
+	recs := logs.records(t, "upstream error")
+	if len(recs) != 1 || recs[0]["error"] != "dial tcp: connect timeout" {
+		t.Fatalf("upstream error records = %v, want one with error \"dial tcp: connect timeout\"; 10.255.255.1 must black-hole on this host (VPN off)", recs)
 	}
 }
