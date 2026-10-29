@@ -515,8 +515,8 @@ func TestNewTransport(t *testing.T) {
 	if tr.TLSHandshakeTimeout != 2*time.Second {
 		t.Errorf("TLSHandshakeTimeout = %v", tr.TLSHandshakeTimeout)
 	}
-	if tr.ResponseHeaderTimeout != 3*time.Second {
-		t.Errorf("ResponseHeaderTimeout = %v", tr.ResponseHeaderTimeout)
+	if tr.ResponseHeaderTimeout != 0 {
+		t.Errorf("ResponseHeaderTimeout = %v, want 0 (the header limit is enforced by the proxy timer)", tr.ResponseHeaderTimeout)
 	}
 	if tr.IdleConnTimeout != 4*time.Second {
 		t.Errorf("IdleConnTimeout = %v", tr.IdleConnTimeout)
@@ -527,8 +527,11 @@ func TestNewTransport(t *testing.T) {
 	if tr.MaxConnsPerHost != 9 {
 		t.Errorf("MaxConnsPerHost = %d", tr.MaxConnsPerHost)
 	}
-	if d := newDialer(cfg).Timeout; d != time.Second {
-		t.Errorf("dialer timeout = %v", d)
+	if d := newDialer(); d.Timeout != 0 {
+		t.Errorf("dialer Timeout = %v, want 0", d.Timeout)
+	}
+	if d := newDialer(); d.KeepAlive != 30*time.Second {
+		t.Errorf("dialer KeepAlive = %v, want 30s", d.KeepAlive)
 	}
 	if tr.Protocols.HTTP2() {
 		t.Error("HTTP2 enabled, want disabled")
@@ -540,7 +543,7 @@ func TestNewTransport(t *testing.T) {
 	}
 }
 
-func TestNewTransportInjectedClockHasNoWallLimits(t *testing.T) {
+func TestNewTransportHasNoWallTwinsUnderAnyClock(t *testing.T) {
 	cfg := config.Upstream{
 		Name: "u",
 		Timeouts: config.Timeouts{
@@ -551,15 +554,33 @@ func TestNewTransportInjectedClockHasNoWallLimits(t *testing.T) {
 		},
 		Pool: config.Pool{MaxIdlePerHost: 7, MaxConnsPerHost: 9},
 	}
-	tr := NewTransport(cfg, nil, clock.NewFake(testStart))
-	if tr.ResponseHeaderTimeout != 0 {
-		t.Errorf("ResponseHeaderTimeout = %v, want 0", tr.ResponseHeaderTimeout)
+	clocks := []struct {
+		name string
+		clk  clock.Clock
+	}{
+		{"nil", nil},
+		{"real", clock.Real()},
+		{"fake", clock.NewFake(testStart)},
 	}
-	if tr.TLSHandshakeTimeout != 2*time.Second {
-		t.Errorf("TLSHandshakeTimeout = %v", tr.TLSHandshakeTimeout)
-	}
-	if tr.IdleConnTimeout != 4*time.Second {
-		t.Errorf("IdleConnTimeout = %v", tr.IdleConnTimeout)
+	for _, c := range clocks {
+		t.Run(c.name, func(t *testing.T) {
+			tr := NewTransport(cfg, nil, c.clk)
+			if tr.ResponseHeaderTimeout != 0 {
+				t.Errorf("ResponseHeaderTimeout = %v, want 0", tr.ResponseHeaderTimeout)
+			}
+			if tr.TLSHandshakeTimeout != 2*time.Second {
+				t.Errorf("TLSHandshakeTimeout = %v", tr.TLSHandshakeTimeout)
+			}
+			if tr.IdleConnTimeout != 4*time.Second {
+				t.Errorf("IdleConnTimeout = %v", tr.IdleConnTimeout)
+			}
+			if tr.MaxIdleConnsPerHost != 7 {
+				t.Errorf("MaxIdleConnsPerHost = %d", tr.MaxIdleConnsPerHost)
+			}
+			if tr.MaxConnsPerHost != 9 {
+				t.Errorf("MaxConnsPerHost = %d", tr.MaxConnsPerHost)
+			}
+		})
 	}
 }
 
@@ -600,14 +621,24 @@ func TestConnectTimeoutFakeClock(t *testing.T) {
 
 func TestBuildUsesDial(t *testing.T) {
 	errDial := errors.New("dial seam")
+	fake := clock.NewFake(testStart)
 	var mu sync.Mutex
-	var gotAddr string
-	var gotDeadline bool
+	var addrs []string
+	var sawDeadline, sawNoDone bool
+	hang := false
+	started := make(chan struct{})
 	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		mu.Lock()
-		defer mu.Unlock()
-		gotAddr = addr
-		_, gotDeadline = ctx.Deadline()
+		addrs = append(addrs, addr)
+		_, ok := ctx.Deadline()
+		sawDeadline = sawDeadline || ok
+		sawNoDone = sawNoDone || ctx.Done() == nil
+		h := hang
+		mu.Unlock()
+		if h {
+			close(started)
+			<-ctx.Done()
+		}
 		return nil, errDial
 	}
 
@@ -618,7 +649,7 @@ func TestBuildUsesDial(t *testing.T) {
 		Timeouts: config.Timeouts{Connect: config.Duration(3 * time.Second)},
 	}
 	tx := reg.Begin()
-	u, err := Build(cfg, Deps{State: tx, Dial: dial})
+	u, err := Build(cfg, Deps{State: tx, Dial: dial, Clock: fake})
 	if err != nil {
 		tx.Abort()
 		t.Fatal(err)
@@ -629,17 +660,74 @@ func TestBuildUsesDial(t *testing.T) {
 		_ = lease.Release()
 	})
 
-	_, err = u.Transport.RoundTrip(httptest.NewRequest("GET", "http://backend.test:8080/", nil))
-	if !errors.Is(err, errDial) {
-		t.Fatalf("err = %v, want errDial", err)
+	// The request carries a deadline of its own; the injected dial must still see none.
+	reqCtx, cancelReq := context.WithTimeout(context.Background(), time.Hour)
+	defer cancelReq()
+	req := httptest.NewRequest("GET", "http://backend.test:8080/", nil).WithContext(reqCtx)
+
+	// 1. A dial error before the connect limit is returned as is, and the timer is stopped.
+	_, err = u.Transport.RoundTrip(req)
+	if !errors.Is(err, errDial) || errors.Is(err, errConnectTimeout) {
+		t.Fatalf("err = %v, want errDial and not errConnectTimeout", err)
 	}
+	if n := fake.Waiters(); n != 0 {
+		t.Fatalf("Waiters() = %d after a failed dial, want 0 (connect timer stopped)", n)
+	}
+
+	// 2. A hung dial is ended by the single connect timer on the injected clock.
+	mu.Lock()
+	hang = true
+	mu.Unlock()
+	ch := make(chan error, 1)
+	go func() {
+		resp, err := u.Transport.RoundTrip(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		ch <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(transportGuard):
+		t.Fatalf("hang guard: injected dial not started within %v; fake waiters=%d", transportGuard, fake.Waiters())
+	}
+	dueWithin(t, fake, 1, 3*time.Second, "connect timer armed")
+	if n := fake.Waiters(); n != 1 {
+		t.Fatalf("Waiters() = %d during the dial, want 1 (one connect timer, no other limit)", n)
+	}
+	if n := fake.Due(3*time.Second - time.Nanosecond); n != 0 {
+		t.Fatalf("Due(3s-1ns) = %d, want 0 (connect timer is exactly the configured 3s)", n)
+	}
+	fake.Advance(3 * time.Second)
+	select {
+	case err = <-ch:
+	case <-time.After(transportGuard):
+		t.Fatalf("hang guard: RoundTrip not returned within %v after the connect limit", transportGuard)
+	}
+	var oe *net.OpError
+	if !errors.As(err, &oe) || oe.Op != "dial" || oe.Err != errConnectTimeout {
+		t.Fatalf("err = %v, want *net.OpError{Op: dial, Err: errConnectTimeout}", err)
+	}
+	if errors.Is(err, errDial) {
+		t.Fatalf("err = %v, the dialer's error must be replaced by the connect timeout", err)
+	}
+	if status, _ := httperr.FromError(err); status != 502 {
+		t.Errorf("status = %d, want 502", status)
+	}
+	if n := fake.Waiters(); n != 0 {
+		t.Fatalf("Waiters() = %d after the connect limit, want 0", n)
+	}
+
 	mu.Lock()
 	defer mu.Unlock()
-	if gotAddr != "backend.test:8080" {
-		t.Errorf("dialed addr = %q, want backend.test:8080", gotAddr)
+	if len(addrs) != 2 || addrs[0] != "backend.test:8080" || addrs[1] != "backend.test:8080" {
+		t.Errorf("dialed addrs = %q, want the unresolved backend.test:8080 twice", addrs)
 	}
-	if !gotDeadline {
-		t.Error("dial context has no deadline, want connect timeout")
+	if sawDeadline {
+		t.Error("injected dial saw a deadline, want none (the connect limit is the injected-clock timer only)")
+	}
+	if sawNoDone {
+		t.Error("injected dial context has no Done channel, want cancellation to reach it")
 	}
 }
 
