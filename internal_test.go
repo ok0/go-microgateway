@@ -19,6 +19,8 @@ import (
 	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/hooks"
 	"github.com/ok0/go-microgateway/internal/leakcheck"
+	"github.com/ok0/go-microgateway/internal/middleware"
+	"github.com/ok0/go-microgateway/internal/runtime"
 )
 
 const listenersYAML = "listeners:\n  - name: public\n    address: \"127.0.0.1:0\"\n"
@@ -521,4 +523,71 @@ func TestStoreParamsNeverFormat(t *testing.T) {
 	secrets := []string{pw, par, deep, lst, "918273645", "36bc9a4d", upw, uq}
 	leakcheck.Check(t, "StoreParams", p, secrets...)
 	leakcheck.Check(t, "*StoreParams", &p, secrets...)
+}
+
+func TestLoadOptionsReportsCapabilityMismatch(t *testing.T) {
+	set := runtime.NewStoreSet(map[string]runtime.StoreType{"plain": {}})
+	reg := middleware.NewRegistry()
+	doc := "version: 1\n" + listenersYAML + `upstreams:
+  - name: up
+    hosts:
+      - url: "http://127.0.0.1:1"
+global:
+  drain_timeout: soon
+stores:
+  - name: s
+    type: plain
+routes:
+  - name: r
+    upstream: up
+    rate_limit: {rate: 5, per: 1s, store: s}
+`
+	_, err := config.Parse([]byte(doc), loadOptions(nil, set, reg)...)
+	var ve *config.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("error = %v, want a validation error", err)
+	}
+	if len(ve.Errors) != 2 {
+		t.Fatalf("got %d errors, want 2: %v", len(ve.Errors), ve.Errors)
+	}
+	drain, rl := ve.Errors[0], ve.Errors[1]
+	if drain.Path != "global.drain_timeout" || drain.Line != 10 || !strings.Contains(drain.Msg, "soon") {
+		t.Fatalf("first error = %+v, want global.drain_timeout on line 10 naming %q", drain, "soon")
+	}
+	if rl.Path != "routes[0].rate_limit.store" || rl.Line != 17 || rl.Msg != `store "s" (type "plain") does not support rate limiting` {
+		t.Fatalf("second error = %+v, want routes[0].rate_limit.store on line 17 reporting the capability mismatch", rl)
+	}
+}
+
+func TestResolveDoesNotModifyConfig(t *testing.T) {
+	doc := "version: 1\n" + listenersYAML + `upstreams:
+  - name: up
+    hosts:
+      - url: "http://127.0.0.1:1"
+stores:
+  - name: s
+    type: nosuch
+middlewares:
+  - name: m
+    type: mystery
+routes:
+  - name: r
+    upstream: up
+`
+	cfg, err := config.Parse([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := cfg.Clone()
+	fp := cfg.Fingerprint()
+	errs := resolve(cfg, runtime.NewStoreSet(nil), middleware.NewRegistry())
+	if len(errs) != 2 {
+		t.Fatalf("got %d errors, want 2: %v", len(errs), errs)
+	}
+	if cfg.Fingerprint() != fp {
+		t.Fatal("resolve changed the fingerprint of the config")
+	}
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("resolve modified the config")
+	}
 }

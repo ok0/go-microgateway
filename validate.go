@@ -42,10 +42,28 @@ func withResolution(err error, cfg *config.Config, set *runtime.StoreSet, reg *m
 		}
 		all = append(all, ve.Errors...)
 	}
-	all = append(all, set.Resolve(cfg)...)
-	all = append(all, runtime.ResolveMiddlewares(cfg, reg)...)
+	all = append(all, resolve(cfg, set, reg)...)
 	if len(all) == 0 {
 		return nil
 	}
 	return config.NewValidationError(all)
+}
+
+// resolve reports the store and middleware types cfg uses that set and reg do not register, and the rate-limit
+// routes whose store type cannot rate limit. It constructs nothing and does not modify cfg.
+func resolve(cfg *config.Config, set *runtime.StoreSet, reg *middleware.Registry) []config.FieldError {
+	return append(set.Resolve(cfg), runtime.ResolveMiddlewares(cfg, reg)...)
+}
+
+// loadOptions returns the parse options of a gateway whose registered types are set and reg: the problems resolve
+// finds are reported together with the schema problems of the document, and environment references resolve
+// through lookup when it is not nil.
+func loadOptions(lookup func(string) (string, bool), set *runtime.StoreSet, reg *middleware.Registry) []config.ParseOption {
+	opts := []config.ParseOption{config.WithCheck(func(c *config.Config) []config.FieldError {
+		return resolve(c, set, reg)
+	})}
+	if lookup != nil {
+		opts = append(opts, config.WithEnvLookup(lookup))
+	}
+	return opts
 }

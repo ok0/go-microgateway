@@ -214,18 +214,19 @@ func New(cfg *config.Config, opts ...Option) (*Gateway, error) {
 	return g, nil
 }
 
+// NewFromYAML parses data as a configuration document and returns a gateway serving it, like New. When the document
+// is not valid it returns one *config.ValidationError listing every problem: schema errors together with the store
+// and middleware types that opts do not register, the same report microgateway validate prints.
 func NewFromYAML(data []byte, opts ...Option) (*Gateway, error) {
 	o := newOptions(opts)
 	if o.err != nil {
 		return nil, o.err
 	}
-	var cfg *config.Config
-	var err error
-	if o.lookup != nil {
-		cfg, err = config.Parse(data, config.WithEnvLookup(o.lookup))
-	} else {
-		cfg, err = config.Parse(data)
+	reg, err := o.middlewareRegistry()
+	if err != nil {
+		return nil, err
 	}
+	cfg, err := config.Parse(data, loadOptions(o.lookup, storeSet(o.stores), reg)...)
 	if err != nil {
 		return nil, err
 	}

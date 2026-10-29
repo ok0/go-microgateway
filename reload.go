@@ -52,6 +52,7 @@ func (g *Gateway) Reload(cfg *config.Config) error {
 
 // ReloadYAML parses data as a configuration document and makes it the active configuration when it is valid and
 // differs from the active one. On failure the previous configuration remains active and the error is returned.
+// An invalid document yields one *config.ValidationError listing every problem, including store and middleware types the gateway does not register.
 func (g *Gateway) ReloadYAML(data []byte) error {
 	return g.reload("yaml", func() (*config.Config, error) {
 		return config.Parse(data, g.parseOptions()...)
@@ -60,6 +61,7 @@ func (g *Gateway) ReloadYAML(data []byte) error {
 
 // ReloadFile reads the configuration document at path and makes it the active configuration when it is valid and
 // differs from the active one. On failure the previous configuration remains active and the error is returned.
+// An invalid document yields one *config.ValidationError listing every problem, including store and middleware types the gateway does not register.
 func (g *Gateway) ReloadFile(path string) error {
 	return g.reload("file", func() (*config.Config, error) {
 		return config.LoadFile(path, g.parseOptions()...)
@@ -231,10 +233,7 @@ func (g *Gateway) dropGeneration(gen *generation) {
 }
 
 func (g *Gateway) parseOptions() []config.ParseOption {
-	if g.lookup != nil {
-		return []config.ParseOption{config.WithEnvLookup(g.lookup)}
-	}
-	return nil
+	return loadOptions(g.lookup, g.deps.Stores, g.deps.Middlewares)
 }
 
 func short(fp string) string {
