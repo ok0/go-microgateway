@@ -21,6 +21,7 @@ type ParseOption func(*parseOptions)
 type parseOptions struct {
 	lookup  func(string) (string, bool)
 	baseDir string
+	checks  []func(*Config) []FieldError
 }
 
 // WithEnvLookup replaces the function used to resolve ${VAR} references. The default is os.LookupEnv.
@@ -37,10 +38,24 @@ func WithBaseDir(dir string) ParseOption {
 	}
 }
 
+// WithCheck adds f to the checks Parse and LoadFile run. f runs on every document that decodes, after
+// environment substitution, key loading and defaults, also when other problems were found. It must not modify
+// the configuration. Its errors join the single *ValidationError, except an error whose path equals, or is nested
+// under, the path of a problem already reported, so each field is reported once. f does not run when the
+// document cannot be decoded at all.
+func WithCheck(f func(*Config) []FieldError) ParseOption {
+	return func(o *parseOptions) {
+		if f != nil {
+			o.checks = append(o.checks, f)
+		}
+	}
+}
+
 // Parse decodes, substitutes environment references in, applies defaults to, and validates a
 // configuration document. Key files named by the document are always read: relative paths resolve
 // against the directory set by WithBaseDir, or else against the working directory. Relative TLS file
-// paths are not resolved. On failure it returns nil and a *ValidationError that lists every problem found.
+// paths are not resolved. On failure it returns nil and a *ValidationError that lists every problem found,
+// including those reported by WithCheck.
 func Parse(data []byte, opts ...ParseOption) (*Config, error) {
 	return load(data, "", opts)
 }
@@ -117,6 +132,23 @@ func load(data []byte, dir string, opts []ParseOption) (*Config, error) {
 	if !rootFailure {
 		for _, fe := range cfg.validate() {
 			if !underPath(fe.Path, decoded) {
+				errs = append(errs, fe)
+			}
+		}
+	}
+	if !rootFailure && len(o.checks) > 0 {
+		cfg.lines = idx
+		reported := make(map[string]bool, len(errs))
+		for _, fe := range errs {
+			if fe.Path != "" {
+				reported[fe.Path] = true
+			}
+		}
+		for _, check := range o.checks {
+			for _, fe := range check(cfg) {
+				if fe.Path != "" && underPath(fe.Path, reported) {
+					continue
+				}
 				errs = append(errs, fe)
 			}
 		}
