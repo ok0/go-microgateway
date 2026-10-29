@@ -22,7 +22,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,6 +38,7 @@ import (
 	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/hooks"
 	"github.com/ok0/go-microgateway/internal/httperr"
+	"github.com/ok0/go-microgateway/internal/testwait"
 	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
@@ -143,23 +146,10 @@ func serve(t *testing.T, g *microgateway.Gateway, req *http.Request) (*http.Resp
 	return resp, e
 }
 
-func eventually(t *testing.T, cond func() bool) {
+// eventually waits until cond holds; what and state (may be nil) describe the wait if the hang guard expires.
+func eventually(t *testing.T, what string, cond func() bool, state func() string) {
 	t.Helper()
-	deadline := time.NewTimer(5 * time.Second)
-	defer deadline.Stop()
-	tick := time.NewTimer(5 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		if cond() {
-			return
-		}
-		select {
-		case <-deadline.C:
-			t.Fatal("condition not met within 5s")
-		case <-tick.C:
-			tick.Reset(5 * time.Millisecond)
-		}
-	}
+	testwait.Until(t, what, cond, state)
 }
 
 func gwWith(t *testing.T, doc string, opts ...microgateway.Option) *microgateway.Gateway {
@@ -236,6 +226,13 @@ func counters(g *microgateway.Gateway) (success, failure, unchanged float64) {
 	return s.ReloadSuccess, s.ReloadFailure, s.ReloadUnchanged
 }
 
+func countersState(g *microgateway.Gateway) func() string {
+	return func() string {
+		s, f, u := counters(g)
+		return fmt.Sprintf("reloads success=%v failure=%v unchanged=%v", s, f, u)
+	}
+}
+
 func metricsText(t *testing.T, g *microgateway.Gateway) string {
 	t.Helper()
 	rec := httptest.NewRecorder()
@@ -270,22 +267,13 @@ func statusOf(client *http.Client, url string) int {
 
 func awaitSignal(t *testing.T, ch <-chan struct{}, what string) {
 	t.Helper()
-	select {
-	case <-ch:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timed out waiting for %s", what)
-	}
+	testwait.Done(t, what, ch, nil)
 }
 
 func awaitWatch(t *testing.T, done <-chan error) error {
 	t.Helper()
-	select {
-	case err := <-done:
-		return err
-	case <-time.After(10 * time.Second):
-		t.Fatal("WatchFile did not return")
-	}
-	return nil
+	err, _ := testwait.Recv(t, "WatchFile to return", done, nil)
+	return err
 }
 
 const metricPrefix = "microgateway_"
@@ -380,16 +368,11 @@ func metricsHasLine(body, line string) bool {
 
 func recvLine(t *testing.T, lines <-chan string) string {
 	t.Helper()
-	select {
-	case line, ok := <-lines:
-		if !ok {
-			t.Fatal("stream ended before the expected line")
-		}
-		return line
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for a stream line")
+	line, ok := testwait.Recv(t, "next stream line", lines, nil)
+	if !ok {
+		t.Fatal("stream ended before the expected line")
 	}
-	return ""
+	return line
 }
 
 type getResult struct {
@@ -415,16 +398,11 @@ func startGet(client *http.Client, url string) <-chan getResult {
 
 func awaitGet(t *testing.T, ch <-chan getResult) getResult {
 	t.Helper()
-	select {
-	case r := <-ch:
-		if r.err != nil {
-			t.Fatal(r.err)
-		}
-		return r
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for response")
+	r, _ := testwait.Recv(t, "response", ch, nil)
+	if r.err != nil {
+		t.Fatal(r.err)
 	}
-	return getResult{}
+	return r
 }
 
 func series(name string, labels ...string) string {
@@ -1199,6 +1177,106 @@ func failingBackend(t *testing.T, n testNetwork, name string) *backendHandle {
 
 func waitProbes(t *testing.T, fake *clock.Fake, completed func() float64, want float64, armed int) {
 	t.Helper()
-	eventually(t, func() bool { return completed() == want })
+	eventually(t, fmt.Sprintf("%v completed probes", want), func() bool { return completed() == want }, func() string {
+		return fmt.Sprintf("completed probes = %v", completed())
+	})
 	fake.BlockUntil(armed)
+}
+
+// goroutineInfo is one live goroutine: its kind (creating go statement, fixed for its lifetime) and its stack.
+type goroutineInfo struct{ kind, stack string }
+
+// goroutineSnap holds the goroutines alive at one moment, by goroutine ID.
+type goroutineSnap map[int64]goroutineInfo
+
+func snapGoroutines() goroutineSnap {
+	buf := make([]byte, 1<<16)
+	var n int
+	for {
+		n = runtime.Stack(buf, true)
+		if n < len(buf) {
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	snap := goroutineSnap{}
+	for _, block := range strings.Split(string(buf[:n]), "\n\n") {
+		lines := strings.Split(block, "\n")
+		fields := strings.Fields(lines[0])
+		if len(fields) < 2 || fields[0] != "goroutine" {
+			continue
+		}
+		id, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		entry, creator, site := "", "", false
+		for _, line := range lines[1:] {
+			if rest, ok := strings.CutPrefix(line, "created by "); ok {
+				creator, _, _ = strings.Cut(rest, " in goroutine ")
+				site = true
+				continue
+			}
+			if site && strings.HasPrefix(line, "\t") {
+				loc, _, _ := strings.Cut(strings.TrimSpace(line), " +0x")
+				creator += " " + loc
+				site = false
+				continue
+			}
+			if line == "" || strings.HasPrefix(line, "\t") || line == "...additional frames elided..." {
+				continue
+			}
+			entry = line
+		}
+		kind := creator
+		if kind == "" {
+			if strings.HasSuffix(entry, ")") {
+				entry = entry[:strings.LastIndex(entry, "(")]
+			}
+			kind = entry
+		}
+		snap[id] = goroutineInfo{kind: kind, stack: block}
+	}
+	return snap
+}
+
+// goroutinesBeyond describes each kind of goroutine started after pre whose live count exceeds its count in base.
+func goroutinesBeyond(pre, base goroutineSnap) []string {
+	baseline := map[string]int{}
+	for id, g := range base {
+		if _, ok := pre[id]; !ok {
+			baseline[g.kind]++
+		}
+	}
+	now := snapGoroutines()
+	counts := map[string]int{}
+	examples := map[string]int64{}
+	for id, g := range now {
+		if _, ok := pre[id]; ok {
+			continue
+		}
+		counts[g.kind]++
+		if ex, seen := examples[g.kind]; !seen || id < ex {
+			examples[g.kind] = id
+		}
+	}
+	var out []string
+	for kind, count := range counts {
+		if count > baseline[kind] {
+			out = append(out, fmt.Sprintf("%d goroutines of kind %s (baseline %d), for example:\n%s",
+				count, kind, baseline[kind], now[examples[kind]].stack))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// awaitGoroutinesSettled waits until no kind of goroutine started after pre is more numerous than at base: goroutines
+// that predate pre (earlier tests) are ignored, transient ones only delay the wait, and a leaked one is named on the
+// hang guard.
+func awaitGoroutinesSettled(t *testing.T, what string, pre, base goroutineSnap) {
+	t.Helper()
+	eventually(t, what, func() bool { return len(goroutinesBeyond(pre, base)) == 0 }, func() string {
+		return strings.Join(goroutinesBeyond(pre, base), "\n\n")
+	})
 }

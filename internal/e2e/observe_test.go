@@ -75,7 +75,7 @@ routes:
 	}
 	_ = conn.Close()
 
-	eventually(t, func() bool { return len(logs.requests()) == 3 })
+	eventually(t, "three request log records", func() bool { return len(logs.requests()) == 3 }, func() string { return fmt.Sprintf("records=%d", len(logs.requests())) })
 	recs := logs.requests()
 	if len(recs) != 3 {
 		t.Fatalf("request records = %d, want 3", len(recs))
@@ -321,28 +321,28 @@ func TestAdminHandler(t *testing.T) {
 		g.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/hold", nil))
 	}()
 	var list []upstream.Status
-	eventually(t, func() bool {
+	eventually(t, "/upstreams to report one held request in flight", func() bool {
 		rec := adminGet(t, h, http.MethodGet, "/upstreams")
 		list = nil
 		if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
 			t.Fatal(err)
 		}
 		return len(list) == 1 && len(list[0].Hosts) == 1 && list[0].Hosts[0].InFlight == 1
-	})
+	}, nil)
 	host := list[0].Hosts[0]
 	if list[0].Name != "up" || host.URL != hold.URL || !host.Healthy || host.Ejected || host.BreakerState != "closed" || host.Weight != 1 {
 		t.Fatalf("upstream status = %+v", list[0])
 	}
 	close(hold.release)
 	<-done
-	eventually(t, func() bool {
+	eventually(t, "/upstreams to report no request in flight", func() bool {
 		rec := adminGet(t, h, http.MethodGet, "/upstreams")
 		var l []upstream.Status
 		if err := json.Unmarshal(rec.Body.Bytes(), &l); err != nil {
 			t.Fatal(err)
 		}
 		return len(l) == 1 && len(l[0].Hosts) == 1 && l[0].Hosts[0].InFlight == 0
-	})
+	}, nil)
 
 	rec = adminGet(t, h, http.MethodGet, "/metrics")
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {

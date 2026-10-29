@@ -192,7 +192,9 @@ func TestInstancesIsolateCursorAndInFlight(t *testing.T) {
 	if r := awaitGet(t, held); r.status != http.StatusOK {
 		t.Fatalf("held status = %d, want 200", r.status)
 	}
-	eventually(t, func() bool { return hostByURL(upstreamStatus(t, gA, "up"), h1.URL).InFlight == 0 })
+	eventually(t, "in-flight on h1 of instance A to return to 0", func() bool { return hostByURL(upstreamStatus(t, gA, "up"), h1.URL).InFlight == 0 }, func() string {
+		return fmt.Sprintf("in_flight=%d", hostByURL(upstreamStatus(t, gA, "up"), h1.URL).InFlight)
+	})
 }
 
 func TestInstancesIsolateDNS(t *testing.T) {
@@ -224,7 +226,7 @@ func TestInstancesIsolateDNS(t *testing.T) {
 	fakeA.Advance(5 * time.Second)
 
 	changed := []string{"http://10.0.0.1:8080", "http://10.0.0.3:8080"}
-	eventually(t, func() bool { return slices.Equal(miHostURLs(t, gA), changed) })
+	eventually(t, "instance A to adopt the changed DNS host set", func() bool { return slices.Equal(miHostURLs(t, gA), changed) }, func() string { return fmt.Sprint(miHostURLs(t, gA)) })
 	if got := miHostURLs(t, gB); !slices.Equal(got, initial) {
 		t.Fatalf("B hosts after A refresh = %v, want %v", got, initial)
 	}

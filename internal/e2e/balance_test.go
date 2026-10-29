@@ -446,7 +446,7 @@ func TestConsistentHashEndToEnd(t *testing.T) {
 		codes := make([]int, held)
 		var wg sync.WaitGroup
 		for i := range held {
-			eventually(t, func() bool { return balInFlightTotal(t, g) == int64(i) })
+			eventually(t, fmt.Sprintf("%d held requests in flight", i), func() bool { return balInFlightTotal(t, g) == int64(i) }, func() string { return fmt.Sprintf("in_flight=%d", balInFlightTotal(t, g)) })
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -457,7 +457,7 @@ func TestConsistentHashEndToEnd(t *testing.T) {
 				codes[i] = rec.Code
 			}()
 		}
-		eventually(t, func() bool { return balInFlightTotal(t, g) == held })
+		eventually(t, fmt.Sprintf("%d held requests in flight", held), func() bool { return balInFlightTotal(t, g) == held }, func() string { return fmt.Sprintf("in_flight=%d", balInFlightTotal(t, g)) })
 
 		bound := int64(math.Ceil(1.25 * held / float64(len(gates))))
 		for _, h := range upstreamStatus(t, g, "up").Hosts {

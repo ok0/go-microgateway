@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -356,6 +355,7 @@ func TestInFlightAcrossReloadRecordsOnce(t *testing.T) {
 }
 
 func TestResilienceReloadsNoLeak(t *testing.T) {
+	pre := snapGoroutines()
 	n := newMemNetwork()
 	be := newRSBackend(t, n, nil)
 	fake := clock.NewFake(time.Now())
@@ -365,20 +365,13 @@ func TestResilienceReloadsNoLeak(t *testing.T) {
 		}}.yaml()
 	}
 	g := n.gateway(t, doc(2), withClock(fake))
-	base := runtime.NumGoroutine()
+	base := snapGoroutines()
 	for i := range 100 {
 		if err := g.ReloadYAML([]byte(doc(2 + (i+1)%2))); err != nil {
 			t.Fatal(err)
 		}
 	}
-	eventually(t, func() bool {
-		cur := runtime.NumGoroutine()
-		diff := cur - base
-		if diff < 0 {
-			diff = -diff
-		}
-		return diff*10 <= base
-	})
+	awaitGoroutinesSettled(t, "goroutines of retired generations to exit after 100 reloads", pre, base)
 }
 
 func h3Upstreams(g *microgateway.Gateway) ([]upstream.Status, error) {
@@ -751,7 +744,7 @@ func TestInstancesBackoffRandomnessIndependent(t *testing.T) {
 		t.Fatalf("B pending backoff waiters = %d, want 1", got)
 	}
 	fake.Advance(1)
-	eventually(t, func() bool { return b.be.hitCount() == 2 })
+	eventually(t, "second hit on B", func() bool { return b.be.hitCount() == 2 }, func() string { return fmt.Sprint(b.be.hitCount()) })
 	if got := (<-res).code; got != http.StatusServiceUnavailable {
 		t.Fatalf("B status = %d, want 503", got)
 	}
@@ -818,7 +811,7 @@ func TestInstancesProbeIndependently(t *testing.T) {
 			t.Fatalf("rejected request: status = %d body = %s, want 503 circuit_open", res.code, res.body)
 		}
 	}
-	eventually(t, func() bool { return held.Load() == 6 })
+	eventually(t, "6 held requests", func() bool { return held.Load() == 6 }, func() string { return fmt.Sprint(held.Load()) })
 	if got := peak.Load(); got != 6 {
 		t.Fatalf("peak concurrently held requests = %d, want 6", got)
 	}

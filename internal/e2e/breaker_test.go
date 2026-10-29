@@ -247,7 +247,7 @@ func TestBreakerIgnores4xxAndCancel(t *testing.T) {
 			if err := <-done; !errors.Is(err, context.Canceled) {
 				t.Fatalf("client error = %v, want context.Canceled", err)
 			}
-			eventually(t, func() bool { return rsStatus(t, g).Breaker.InFlight == 0 })
+			eventually(t, "breaker in-flight to return to 0", func() bool { return rsStatus(t, g).Breaker.InFlight == 0 }, func() string { return fmt.Sprintf("in_flight=%d", rsStatus(t, g).Breaker.InFlight) })
 		}
 		st := rsStatus(t, g)
 		if st.BreakerState != "closed" {

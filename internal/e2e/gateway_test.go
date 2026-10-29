@@ -19,6 +19,7 @@ import (
 	"github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/reqctx"
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
 func TestNewFromYAMLInvalid(t *testing.T) {
@@ -119,7 +120,9 @@ func TestCloseNoLeak(t *testing.T) {
 	if err := g.Close(); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, func() bool { return runtime.NumGoroutine() <= base })
+	eventually(t, "goroutines to return to the baseline", func() bool { return runtime.NumGoroutine() <= base }, func() string {
+		return fmt.Sprintf("goroutines=%d base=%d", runtime.NumGoroutine(), base)
+	})
 }
 
 func TestErrors(t *testing.T) {
@@ -376,18 +379,18 @@ func TestWebSocketEcho(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := conn.SetDeadline(time.Now().Add(testwait.Guard(t))); err != nil {
 		t.Fatal(err)
 	}
 
 	_, err = io.WriteString(conn, "GET /ws HTTP/1.1\r\nHost: gw.test\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("write upgrade request: %v", err)
 	}
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodGet})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("read upgrade response: %v", err)
 	}
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("status = %d, want 101", resp.StatusCode)
@@ -395,11 +398,11 @@ func TestWebSocketEcho(t *testing.T) {
 
 	for _, msg := range []string{"hello\n", "again\n"} {
 		if _, err := io.WriteString(conn, msg); err != nil {
-			t.Fatal(err)
+			t.Fatalf("write echo: %v", err)
 		}
 		line, err := br.ReadString('\n')
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("read echo: %v", err)
 		}
 		if line != msg {
 			t.Fatalf("echo = %q, want %q", line, msg)

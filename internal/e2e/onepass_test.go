@@ -272,10 +272,10 @@ func TestOnePassWatchFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	const msg = "configuration reload failed; previous configuration remains active"
-	eventually(t, func() bool {
+	eventually(t, "failed reload counted and logged", func() bool {
 		_, f, _ := counters(g)
 		return f >= 1 && len(buf.records(t, msg)) > 0
-	})
+	}, countersState(g))
 	if got := servedBy(g, "/x"); got != "A" {
 		t.Fatalf("served by %q after bad document, want A", got)
 	}
@@ -303,7 +303,7 @@ func TestOnePassWatchFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte(watchDoc(beB.URL, "/x")), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, func() bool { return servedBy(g, "/x") == "B" })
+	eventually(t, "/x served by B", func() bool { return servedBy(g, "/x") == "B" }, func() string { return servedBy(g, "/x") })
 	cancel()
 	if err := awaitWatch(t, done); err != nil {
 		t.Fatalf("WatchFile = %v, want nil", err)

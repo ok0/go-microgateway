@@ -22,6 +22,7 @@ import (
 	"github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/httperr"
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
 // auPEM returns pub as a PKIX "PUBLIC KEY" PEM document.
@@ -327,17 +328,17 @@ func TestWatchFileReloadsKeyFile(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- g.WatchFile(ctx, cfgPath) }()
-	eventually(t, func() bool {
+	eventually(t, "initial WatchFile attempt to count as unchanged", func() bool {
 		_, _, u := counters(g)
 		return u == 1
-	})
+	}, countersState(g))
 
 	tmp := filepath.Join(dir, "keys.yaml.tmp")
 	apkWrite(t, tmp, apkKeysFile(hashB))
 	if err := os.Rename(tmp, keysPath); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, func() bool { return e.get(g, "/x", apkHdr(keyB)).Code == http.StatusOK })
+	eventually(t, "API key B accepted after the key-file rename", func() bool { return e.get(g, "/x", apkHdr(keyB)).Code == http.StatusOK }, nil)
 	auAssert401(t, e.get(g, "/x", apkHdr(keyA)), "ApiKey")
 
 	cancel()
@@ -973,14 +974,7 @@ func TestAuthJWKSHungFetcher(t *testing.T) {
 	if got := auFailures(t, g, "jwt", "keys_unavailable"); got != 1 {
 		t.Errorf("keys_unavailable failures = %v, want 1", got)
 	}
-	eventually(t, func() bool {
-		select {
-		case <-h.cancelled:
-			return true
-		default:
-			return false
-		}
-	})
+	testwait.Done(t, "hung JWKS fetch to be cancelled", h.cancelled, nil)
 }
 
 func TestAuthJWKSDownAtStartAndReload(t *testing.T) {
@@ -1185,7 +1179,9 @@ func TestAuthJWKSReloadState(t *testing.T) {
 	if err := g.ReloadYAML([]byte(auJWKSDoc(be.URL, jwksTestURL, "", "3", false))); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, func() bool { return inspect(g).StateEntries == before-1 })
+	eventually(t, "state entries to drop by one", func() bool { return inspect(g).StateEntries == before-1 }, func() string {
+		return fmt.Sprintf("StateEntries=%d", inspect(g).StateEntries)
+	})
 }
 
 // auJWTDoc returns a configuration with one JWT provider p. settings is indented under the provider, keys is the

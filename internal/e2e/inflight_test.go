@@ -14,6 +14,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
 func TestFileEditUnderLoad(t *testing.T) {
@@ -36,7 +39,8 @@ routes:
 
 	dir := t.TempDir()
 	path := writeConfig(t, dir, docA)
-	g := n.gateway(t, docA)
+	fake := clock.NewFake(time.Now())
+	g := n.gateway(t, docA, withClock(fake))
 	ts := n.serve(t, g)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -44,24 +48,29 @@ routes:
 	watchDone := make(chan error, 1)
 	go func() { watchDone <- g.WatchFile(ctx, path) }()
 
-	var stop atomic.Bool
+	var stop, live atomic.Bool
 	var total, failures atomic.Int64
+	var afterLive [8]atomic.Int64
 	var wg sync.WaitGroup
 	defer func() {
 		stop.Store(true)
 		wg.Wait()
 	}()
-	for range 8 {
+	for i := range 8 {
 		client := n.client(t, nil)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer client.CloseIdleConnections()
 			for !stop.Load() {
+				post := live.Load()
 				total.Add(1)
 				resp, err := client.Get(ts.URL + "/a")
 				if err != nil {
 					failures.Add(1)
+					if post {
+						afterLive[i].Add(1)
+					}
 					continue
 				}
 				_, _ = io.Copy(io.Discard, resp.Body)
@@ -69,26 +78,58 @@ routes:
 				if resp.StatusCode != http.StatusOK {
 					failures.Add(1)
 				}
+				if post {
+					afterLive[i].Add(1)
+				}
 			}
 		}()
 	}
 
-	eventually(t, func() bool {
+	eventually(t, "initial WatchFile attempt to count as unchanged", func() bool {
 		_, _, u := counters(g)
 		return u == 1
-	})
+	}, countersState(g))
 
 	if err := os.WriteFile(path, []byte(docB), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	start := time.Now()
+	debounce := g.Config().Global.Reload.Debounce.Std()
+	var advanced time.Duration
+	eventually(t, "edited configuration to be applied", func() bool {
+		if s, _, _ := counters(g); s >= 1 {
+			return true
+		}
+		if fake.Due(debounce) > 0 {
+			fake.Advance(debounce)
+			advanced += debounce
+		}
+		return false
+	}, func() string {
+		return fmt.Sprintf("%s; gateway clock advanced %v; due within debounce=%d", countersState(g)(), advanced, fake.Due(debounce))
+	})
 	probe := n.client(t, nil)
-	eventually(t, func() bool { return statusOf(probe, ts.URL+"/b") == http.StatusOK })
-	if elapsed := time.Since(start); elapsed >= 2*time.Second {
-		t.Fatalf("new route live after %v, want < 2s", elapsed)
+	eventually(t, "route /b to serve 200", func() bool {
+		return statusOf(probe, ts.URL+"/b") == http.StatusOK
+	}, nil)
+	if advanced >= 2*time.Second {
+		t.Fatalf("new route live after %v of gateway clock time, want < 2s", advanced)
 	}
 
-	<-time.After(300 * time.Millisecond)
+	live.Store(true)
+	eventually(t, "every load worker to finish 10 requests started after the new route went live", func() bool {
+		for i := range afterLive {
+			if afterLive[i].Load() < 10 {
+				return false
+			}
+		}
+		return true
+	}, func() string {
+		counts := make([]int64, len(afterLive))
+		for i := range afterLive {
+			counts[i] = afterLive[i].Load()
+		}
+		return fmt.Sprintf("completed after live per worker=%v", counts)
+	})
 	stop.Store(true)
 	wg.Wait()
 
@@ -280,16 +321,16 @@ routes:
 	}
 
 	conn := n.dial(t, ts)
-	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+	if err := conn.SetDeadline(time.Now().Add(testwait.Guard(t))); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := io.WriteString(conn, "GET /ws HTTP/1.1\r\nHost: gw.test\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"); err != nil {
-		t.Fatal(err)
+		t.Fatalf("write upgrade request: %v", err)
 	}
 	br := bufio.NewReader(conn)
 	wsResp, err := http.ReadResponse(br, &http.Request{Method: http.MethodGet})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("read upgrade response: %v", err)
 	}
 	if wsResp.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("upgrade status = %d, want 101", wsResp.StatusCode)
@@ -297,11 +338,11 @@ routes:
 	wsEcho := func(msg string) {
 		t.Helper()
 		if _, err := io.WriteString(conn, msg); err != nil {
-			t.Fatal(err)
+			t.Fatalf("write echo: %v", err)
 		}
 		line, err := br.ReadString('\n')
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("read echo: %v", err)
 		}
 		if line != msg {
 			t.Fatalf("echo = %q, want %q", line, msg)
@@ -335,7 +376,9 @@ routes:
 	sseClient.CloseIdleConnections()
 	probe.CloseIdleConnections()
 
-	eventually(t, func() bool { return inspect(g).LiveGenerations == 1 })
+	eventually(t, "one live generation after removal", func() bool { return inspect(g).LiveGenerations == 1 }, func() string {
+		return fmt.Sprintf("LiveGenerations=%d", inspect(g).LiveGenerations)
+	})
 	if got := inspect(g).StateEntries; got != refLen {
 		t.Fatalf("state entries = %d, want %d", got, refLen)
 	}
@@ -387,14 +430,23 @@ routes:
 		t.Fatalf("front connections = %d, want 1", got)
 	}
 
-	eventually(t, func() bool { return runtime.NumGoroutine() <= base+base/10 })
-	eventually(t, func() bool { return inspect(g).LiveGenerations == 1 })
-	eventually(t, func() bool { return ts.Open.Load() == 0 })
-	eventually(t, func() bool { return be.Open.Load() == 1 })
+	eventually(t, "goroutines to return within 10% of the baseline", func() bool { return runtime.NumGoroutine() <= base+base/10 }, func() string {
+		return fmt.Sprintf("goroutines=%d base=%d", runtime.NumGoroutine(), base)
+	})
+	eventually(t, "one live generation", func() bool { return inspect(g).LiveGenerations == 1 }, nil)
+	eventually(t, "front connections to close", func() bool { return ts.Open.Load() == 0 }, func() string {
+		return fmt.Sprintf("open=%d", ts.Open.Load())
+	})
+	eventually(t, "one backend connection to stay open", func() bool { return be.Open.Load() == 1 }, func() string {
+		return fmt.Sprintf("open=%d", be.Open.Load())
+	})
 	if _, ok := n.openConns(); ok {
-		eventually(t, func() bool {
+		eventually(t, "two memNetwork connections open", func() bool {
 			open, _ := n.openConns()
 			return open == 2
+		}, func() string {
+			open, _ := n.openConns()
+			return fmt.Sprintf("open=%d", open)
 		})
 	}
 }

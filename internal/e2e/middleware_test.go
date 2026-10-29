@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ok0/go-microgateway"
+	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/leakcheck"
 )
 
@@ -242,18 +243,24 @@ func TestRouteTimeout504(t *testing.T) {
 }
 
 func TestRouteTimeoutSSE(t *testing.T) {
+	fake := clock.NewFake(time.Now())
+	steps := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
 	be := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		for i := 1; i <= 3; i++ {
 			_, _ = fmt.Fprintf(w, "data: %d\n\n", i)
 			_ = http.NewResponseController(w).Flush()
 			if i < 3 {
-				time.Sleep(50 * time.Millisecond)
+				select {
+				case <-steps[i-1]:
+				case <-r.Context().Done():
+					return
+				}
 			}
 		}
 	}))
 	t.Cleanup(be.Close)
-	g := gwWith(t, routeDoc(be.URL, "    timeout: 2s\n"))
+	g := gwWith(t, routeDoc(be.URL, "    timeout: 2s\n"), withClock(fake))
 	gwTS := httptest.NewServer(g)
 	t.Cleanup(gwTS.Close)
 
@@ -274,6 +281,10 @@ func TestRouteTimeoutSSE(t *testing.T) {
 		}
 		if strings.HasPrefix(line, "data: ") {
 			events = append(events, strings.TrimSpace(line))
+			if n := len(events); n < 3 {
+				fake.Advance(50 * time.Millisecond)
+				close(steps[n-1])
+			}
 		}
 	}
 	if want := []string{"data: 1", "data: 2", "data: 3"}; !slices.Equal(events, want) {
@@ -459,6 +470,9 @@ func TestSizeLimitThroughGateway(t *testing.T) {
 	if e := decodeErr(t, resp); e.Code != "payload_too_large" {
 		t.Fatalf("code = %q, want payload_too_large", e.Code)
 	}
+	eventually(t, "the oversized chunked request to reach the backend", func() bool { return hits.Load() == 1 }, func() string {
+		return fmt.Sprintf("backend hits = %d", hits.Load())
+	})
 
 	before := hits.Load()
 	small := httptest.NewRecorder()

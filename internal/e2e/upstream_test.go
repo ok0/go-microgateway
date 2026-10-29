@@ -19,6 +19,7 @@ import (
 	"github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/testwait"
 	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
@@ -131,7 +132,9 @@ routes:
 	if r := awaitGet(t, held); r.status != http.StatusOK {
 		t.Fatalf("held status = %d, want 200", r.status)
 	}
-	eventually(t, func() bool { return upstreamHosts(t, g)["u1"][0].InFlight == 0 })
+	eventually(t, "in-flight on u1 to return to 0", func() bool { return upstreamHosts(t, g)["u1"][0].InFlight == 0 }, func() string {
+		return fmt.Sprintf("in_flight=%d", upstreamHosts(t, g)["u1"][0].InFlight)
+	})
 }
 
 func TestTransportRecreatedOnTimeoutChange(t *testing.T) {
@@ -389,18 +392,18 @@ func TestDNSRefreshKeepsStateOfUnchangedHosts(t *testing.T) {
 
 	heldA := startGet(client, ts.URL+"/hold")
 	heldB := startGet(client, ts.URL+"/hold")
-	eventually(t, func() bool {
+	eventually(t, "one held request in flight on 10.0.0.2 and on 10.0.0.3", func() bool {
 		st := upstreamStatus(t, g, "dns")
 		return hostByURL(st, "http://10.0.0.2:8080").InFlight == 1 && hostByURL(st, "http://10.0.0.3:8080").InFlight == 1
-	})
+	}, nil)
 
 	fake.BlockUntil(3)
 	res.set([]string{"10.0.0.4", "10.0.0.3", "10.0.0.1"})
 	fake.Advance(dnsRefreshInterval)
 	wantAfter := []string{"http://10.0.0.1:8080", "http://10.0.0.3:8080", "http://10.0.0.4:8080"}
-	eventually(t, func() bool {
+	eventually(t, "refreshed DNS host set and two change records", func() bool {
 		return slices.Equal(dnsHostURLs(upstreamStatus(t, g, "dns")), wantAfter) && len(logs.records(t, "upstream dns host set changed")) == 2
-	})
+	}, func() string { return fmt.Sprint(dnsHostURLs(upstreamStatus(t, g, "dns"))) })
 
 	st := upstreamStatus(t, g, "dns")
 	if h := hostByURL(st, "http://10.0.0.1:8080"); !h.Ejected || h.EjectionCount != 1 {
@@ -446,9 +449,10 @@ func TestDNSRefreshKeepsStateOfUnchangedHosts(t *testing.T) {
 	fake.BlockUntil(1)
 	res.fail(errors.New("servfail"))
 	fake.Advance(dnsRefreshInterval)
-	eventually(t, func() bool {
-		return metricsHasLine(metricsText(t, g), `microgateway_upstream_dns_refresh_total{upstream="dns",result="error"} 1`)
-	})
+	eventually(t, "DNS refresh error counted and logged", func() bool {
+		return metricsHasLine(metricsText(t, g), `microgateway_upstream_dns_refresh_total{upstream="dns",result="error"} 1`) &&
+			len(logs.records(t, "upstream dns lookup failed")) == 1
+	}, func() string { return fmt.Sprint(len(logs.records(t, "upstream dns lookup failed"))) })
 	if got := dnsHostURLs(upstreamStatus(t, g, "dns")); !slices.Equal(got, wantAfter) {
 		t.Fatalf("hosts after error answer = %v, want %v", got, wantAfter)
 	}
@@ -459,9 +463,10 @@ func TestDNSRefreshKeepsStateOfUnchangedHosts(t *testing.T) {
 	fake.BlockUntil(1)
 	res.set(nil)
 	fake.Advance(dnsRefreshInterval)
-	eventually(t, func() bool {
-		return metricsHasLine(metricsText(t, g), `microgateway_upstream_dns_refresh_total{upstream="dns",result="empty"} 1`)
-	})
+	eventually(t, "empty DNS answer counted and logged", func() bool {
+		return metricsHasLine(metricsText(t, g), `microgateway_upstream_dns_refresh_total{upstream="dns",result="empty"} 1`) &&
+			len(logs.records(t, "upstream dns lookup returned no addresses")) == 1
+	}, func() string { return fmt.Sprint(len(logs.records(t, "upstream dns lookup returned no addresses"))) })
 	if got := dnsHostURLs(upstreamStatus(t, g, "dns")); !slices.Equal(got, wantAfter) {
 		t.Fatalf("hosts after empty answer = %v, want %v", got, wantAfter)
 	}
@@ -494,9 +499,9 @@ func TestDNSFirstLookupFailure(t *testing.T) {
 	res.set([]string{"10.0.0.1"})
 	fake.BlockUntil(1)
 	fake.Advance(dnsRefreshInterval)
-	eventually(t, func() bool {
+	eventually(t, "host set to be 10.0.0.1 only", func() bool {
 		return slices.Equal(dnsHostURLs(upstreamStatus(t, g, "dns")), []string{"http://10.0.0.1:8080"})
-	})
+	}, func() string { return fmt.Sprint(dnsHostURLs(upstreamStatus(t, g, "dns"))) })
 	getOK(t, client, ts.URL+"/")
 }
 
@@ -749,43 +754,30 @@ func startUpstreamReply(client *http.Client, req *http.Request) <-chan upstreamR
 
 func awaitUpstreamReply(t *testing.T, ch <-chan upstreamReply) upstreamReply {
 	t.Helper()
-	select {
-	case r := <-ch:
-		if r.err != nil {
-			t.Fatal(r.err)
-		}
-		return r
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for response")
+	r, _ := testwait.Recv(t, "upstream reply", ch, nil)
+	if r.err != nil {
+		t.Fatal(r.err)
 	}
-	return upstreamReply{}
+	return r
 }
 
 func awaitArmedOrReply(t *testing.T, fake *clock.Fake, ch <-chan upstreamReply, want int) (upstreamReply, bool) {
 	t.Helper()
-	deadline := time.NewTimer(5 * time.Second)
-	defer deadline.Stop()
-	tick := time.NewTimer(5 * time.Millisecond)
-	defer tick.Stop()
-	for {
+	var r upstreamReply
+	replied := false
+	eventually(t, fmt.Sprintf("%d armed fake timers or a reply", want), func() bool {
 		select {
-		case r := <-ch:
-			if r.err != nil {
-				t.Fatal(r.err)
-			}
-			return r, true
+		case r = <-ch:
+			replied = true
+			return true
 		default:
 		}
-		if fake.Waiters() >= want {
-			return upstreamReply{}, false
-		}
-		select {
-		case <-deadline.C:
-			t.Fatal("neither an armed timer nor a reply within 5s")
-		case <-tick.C:
-			tick.Reset(5 * time.Millisecond)
-		}
+		return fake.Waiters() >= want
+	}, func() string { return fmt.Sprintf("fake waiters=%d", fake.Waiters()) })
+	if replied && r.err != nil {
+		t.Fatal(r.err)
 	}
+	return r, replied
 }
 
 func getRequest(t *testing.T, url string) *http.Request {
@@ -901,7 +893,9 @@ func runTransportLimits(t *testing.T, n testNetwork) {
 		for range 6 {
 			replies = append(replies, startUpstreamReply(client, getRequest(t, ts.URL+"/")))
 		}
-		eventually(t, func() bool { return inFlightOf(t, g, "up") == 6 })
+		eventually(t, "6 requests in flight on up", func() bool { return inFlightOf(t, g, "up") == 6 }, func() string {
+			return fmt.Sprintf("in_flight=%d", inFlightOf(t, g, "up"))
+		})
 		if p := srv.Peak.Load(); p > 2 {
 			t.Fatalf("peak backend connections = %d, want at most 2", p)
 		}
@@ -977,7 +971,9 @@ func runTransportLimits(t *testing.T, n testNetwork) {
 		if got := statusOf(client, ts.URL+"/refused"); got != http.StatusBadGateway {
 			t.Fatalf("refused status = %d, want 502", got)
 		}
-		eventually(t, func() bool { return inFlightOf(t, g, "refused") == 0 })
+		eventually(t, "refused in-flight to return to 0", func() bool { return inFlightOf(t, g, "refused") == 0 }, func() string {
+			return fmt.Sprintf("in_flight=%d", inFlightOf(t, g, "refused"))
+		})
 
 		ctx, cancel := context.WithCancel(context.Background())
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/hold", nil)
@@ -986,14 +982,14 @@ func runTransportLimits(t *testing.T, n testNetwork) {
 		}
 		canceled := startUpstreamReply(client, req)
 		awaitSignal(t, hold.arrived, "held request to reach the backend")
-		eventually(t, func() bool { return inFlightOf(t, g, "hold") == 1 })
+		eventually(t, "held request in flight", func() bool { return inFlightOf(t, g, "hold") == 1 }, func() string {
+			return fmt.Sprintf("in_flight=%d", inFlightOf(t, g, "hold"))
+		})
 		cancel()
-		select {
-		case <-canceled:
-		case <-time.After(5 * time.Second):
-			t.Fatal("canceled request did not return")
-		}
-		eventually(t, func() bool { return inFlightOf(t, g, "hold") == 0 })
+		testwait.Recv(t, "canceled request to return", canceled, nil)
+		eventually(t, "held in-flight to return to 0", func() bool { return inFlightOf(t, g, "hold") == 0 }, func() string {
+			return fmt.Sprintf("in_flight=%d", inFlightOf(t, g, "hold"))
+		})
 
 		wsConn := n.dial(t, ts)
 		if _, err := io.WriteString(wsConn, "GET /ws HTTP/1.1\r\nHost: gw.test\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"); err != nil {
@@ -1017,7 +1013,9 @@ func runTransportLimits(t *testing.T, n testNetwork) {
 			t.Fatalf("ws in_flight while open = %d, want 1", got)
 		}
 		_ = wsConn.Close()
-		eventually(t, func() bool { return inFlightOf(t, g, "ws") == 0 })
+		eventually(t, "ws in-flight to return to 0", func() bool { return inFlightOf(t, g, "ws") == 0 }, func() string {
+			return fmt.Sprintf("in_flight=%d", inFlightOf(t, g, "ws"))
+		})
 	})
 }
 
@@ -1032,5 +1030,7 @@ func TestIdleConnectionsClosed(t *testing.T) {
 	if got := be.New.Load(); got != 1 {
 		t.Fatalf("backend connections = %d, want 1", got)
 	}
-	eventually(t, func() bool { return be.Open.Load() == 0 })
+	eventually(t, "idle backend connection to close", func() bool { return be.Open.Load() == 0 }, func() string {
+		return fmt.Sprintf("open=%d", be.Open.Load())
+	})
 }

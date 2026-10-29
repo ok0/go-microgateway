@@ -21,6 +21,7 @@ import (
 	"github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/testwait"
 	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
@@ -881,13 +882,9 @@ func TestWatchFileMissingPath(t *testing.T) {
 	go func() {
 		done <- g.WatchFile(context.Background(), filepath.Join(t.TempDir(), "missing.yaml"))
 	}()
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("WatchFile of a missing path returned nil")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("WatchFile did not return for a missing path")
+	err, _ := testwait.Recv(t, "WatchFile to return for a missing path", done, nil)
+	if err == nil {
+		t.Fatal("WatchFile of a missing path returned nil")
 	}
 }
 
@@ -903,7 +900,7 @@ func TestWatchFilePicksUpEarlierChange(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- g.WatchFile(ctx, path) }()
 
-	eventually(t, func() bool { return servedBy(g, "/x") == "B" })
+	eventually(t, "/x served by B", func() bool { return servedBy(g, "/x") == "B" }, func() string { return servedBy(g, "/x") })
 	cancel()
 	if err := awaitWatch(t, done); err != nil {
 		t.Fatalf("WatchFile = %v, want nil", err)
@@ -921,16 +918,18 @@ func TestWatchFileCancel(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- g.WatchFile(ctx, path) }()
-	eventually(t, func() bool {
+	eventually(t, "initial WatchFile attempt to count as unchanged", func() bool {
 		_, _, u := counters(g)
 		return u == 1
-	})
+	}, countersState(g))
 
 	cancel()
 	if err := awaitWatch(t, done); err != nil {
 		t.Fatalf("WatchFile after cancel = %v, want nil", err)
 	}
-	eventually(t, func() bool { return runtime.NumGoroutine() <= base })
+	eventually(t, "goroutines to return to the baseline", func() bool { return runtime.NumGoroutine() <= base }, func() string {
+		return fmt.Sprintf("goroutines=%d base=%d", runtime.NumGoroutine(), base)
+	})
 }
 
 func TestWatchFileReturnsErrClosed(t *testing.T) {
@@ -945,10 +944,10 @@ func TestWatchFileReturnsErrClosed(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- g.WatchFile(ctx, path) }()
-	eventually(t, func() bool {
+	eventually(t, "initial WatchFile attempt to count as unchanged", func() bool {
 		_, _, u := counters(g)
 		return u == 1
-	})
+	}, countersState(g))
 
 	if err := g.Close(); err != nil {
 		t.Fatal(err)
@@ -970,10 +969,10 @@ func TestWatchFileAtomicRename(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- g.WatchFile(ctx, path) }()
-	eventually(t, func() bool {
+	eventually(t, "initial WatchFile attempt to count as unchanged", func() bool {
 		_, _, u := counters(g)
 		return u == 1
-	})
+	}, countersState(g))
 
 	tmp := filepath.Join(dir, "config.yaml.tmp")
 	for i := 1; i <= 5; i++ {
@@ -984,7 +983,7 @@ func TestWatchFileAtomicRename(t *testing.T) {
 		if err := os.Rename(tmp, path); err != nil {
 			t.Fatal(err)
 		}
-		eventually(t, func() bool { return servedBy(g, route) == "ok" })
+		eventually(t, fmt.Sprintf("%s served after rename %d", route, i), func() bool { return servedBy(g, route) == "ok" }, func() string { return servedBy(g, route) })
 		if s, _, _ := counters(g); s != float64(i) {
 			t.Fatalf("success after rename %d = %v, want %d", i, s, i)
 		}

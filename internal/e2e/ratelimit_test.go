@@ -342,10 +342,7 @@ func TestRateLimitReloadNoGoroutineLeak(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for i := 0; runtime.NumGoroutine() > base*11/10; i++ {
-		if i == 10000 {
-			t.Fatalf("goroutines = %d after 100 reloads, baseline %d", runtime.NumGoroutine(), base)
-		}
-		runtime.Gosched()
-	}
+	eventually(t, "goroutines to return within 10% of the baseline after 100 reloads", func() bool {
+		return runtime.NumGoroutine() <= base*11/10
+	}, func() string { return fmt.Sprintf("goroutines=%d base=%d", runtime.NumGoroutine(), base) })
 }

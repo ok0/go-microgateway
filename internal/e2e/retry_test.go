@@ -10,7 +10,6 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"runtime"
-	"runtime/pprof"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,45 +18,13 @@ import (
 
 	"github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
-// reGuardLimit bounds waits whose event is already certain: every fake-clock step has been taken and no gateway
-// wall-clock timer is involved. Reaching it means a hang.
-const reGuardLimit = 2 * time.Minute
-
-// reGuard returns the hang-guard duration for a wait in t: reGuardLimit, lowered to end 5 s before t's deadline.
-func reGuard(t *testing.T) time.Duration {
-	d := reGuardLimit
-	if deadline, ok := t.Deadline(); ok {
-		if left := time.Until(deadline) - 5*time.Second; left < d {
-			d = left
-		}
-	}
-	return max(d, time.Second)
-}
-
-// reHang fails t because what was not observed within guard, reporting state and every goroutine.
-func reHang(t *testing.T, what string, guard time.Duration, state string) {
-	t.Helper()
-	var b bytes.Buffer
-	_ = pprof.Lookup("goroutine").WriteTo(&b, 1)
-	t.Fatalf("hang guard: %s not observed within %v\nstate: %s\ngoroutines:\n%s", what, guard, state, b.String())
-}
-
-// reRecv receives from ch and fails t through reHang when the hang guard expires first. state is evaluated only then.
+// reRecv receives from ch and fails t through testwait when the hang guard expires first. state is evaluated only then.
 func reRecv[T any](t *testing.T, what string, ch <-chan T, state func() string) (T, bool) {
 	t.Helper()
-	guard := reGuard(t)
-	timer := time.NewTimer(guard)
-	defer timer.Stop()
-	select {
-	case v, ok := <-ch:
-		return v, ok
-	case <-timer.C:
-	}
-	reHang(t, what, guard, state())
-	var zero T
-	return zero, false
+	return testwait.Recv(t, what, ch, state)
 }
 
 // reTracker counts the requests that h is serving and closes idle each time the count returns to zero.
@@ -220,16 +187,17 @@ func reGet(t *testing.T, env reEnv, method, path string, body io.Reader, hdr htt
 	return r.code, r.hdr, r.body
 }
 
-// reWaitDue waits until n fake-clock waiters are due within the given duration, and fails t through reHang if that
-// does not happen.
+// reWaitDue waits until n fake-clock waiters are due within the given duration.
 func reWaitDue(t *testing.T, env reEnv, n int, within time.Duration, what string) {
 	t.Helper()
-	guard := reGuard(t)
-	ctx, cancel := context.WithTimeout(context.Background(), guard)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := env.fake.WaitDue(ctx, n, within); err != nil {
-		reHang(t, what, guard, env.state(t))
-	}
+	due := make(chan struct{})
+	go func() {
+		defer close(due)
+		_ = env.fake.WaitDue(ctx, n, within)
+	}()
+	testwait.Done(t, what, due, func() string { return env.state(t) })
 }
 
 // reAwaitIdle waits until the gateway has returned from every request handler it started.
@@ -261,22 +229,14 @@ func reAwaitHits(t *testing.T, env reEnv, be *rsBackend, n int64) {
 	}
 }
 
-// reAwaitGoroutines waits until the goroutine count is at most baseline. Goroutine exits raise no event and the count
-// only converges, so the guard catches leaks, not slowness.
+// reAwaitGoroutines waits until the goroutine count is at most baseline.
 func reAwaitGoroutines(t *testing.T, env reEnv, baseline int) {
 	t.Helper()
-	guard := reGuard(t)
-	expired := time.NewTimer(guard)
-	defer expired.Stop()
-	poll := time.NewTicker(5 * time.Millisecond)
-	defer poll.Stop()
-	for runtime.NumGoroutine() > baseline {
-		select {
-		case <-expired.C:
-			reHang(t, fmt.Sprintf("goroutines to return to %d", baseline), guard, env.state(t))
-		case <-poll.C:
-		}
-	}
+	testwait.Until(t, fmt.Sprintf("goroutines to return to %d", baseline), func() bool {
+		return runtime.NumGoroutine() <= baseline
+	}, func() string {
+		return fmt.Sprintf("goroutines=%d\n%s", runtime.NumGoroutine(), env.state(t))
+	})
 }
 
 type reStarted struct {
@@ -907,7 +867,7 @@ func runRetryStreaming(t *testing.T, n testNetwork) {
 		}
 		env := reServe(t, n, fake, doc)
 		conn := n.dial(t, env.s)
-		if err := conn.SetDeadline(time.Now().Add(reGuard(t))); err != nil {
+		if err := conn.SetDeadline(time.Now().Add(testwait.Guard(t))); err != nil {
 			t.Fatal(err)
 		}
 		_, err := io.WriteString(conn, "GET /ws HTTP/1.1\r\nHost: gw.test\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n")

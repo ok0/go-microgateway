@@ -16,6 +16,7 @@ import (
 
 	"github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
 // testNetwork is the network a gateway test runs on: in memory (hermetic) or loopback TCP.
@@ -476,10 +477,15 @@ func TestMemNetwork(t *testing.T) {
 		t.Fatal("dial to unknown address succeeded")
 	}
 	client.CloseIdleConnections()
-	eventually(t, func() bool { return s.Open.Load() == 0 })
-	eventually(t, func() bool {
+	eventually(t, "server connections to close", func() bool { return s.Open.Load() == 0 }, func() string {
+		return fmt.Sprintf("open=%d", s.Open.Load())
+	})
+	eventually(t, "memNetwork connections to close", func() bool {
 		open, _ := n.openConns()
 		return open == 0
+	}, func() string {
+		open, _ := n.openConns()
+		return fmt.Sprintf("open=%d", open)
 	})
 
 	refusedSrv := n.serve(t, echoHandler("refused"))
@@ -496,13 +502,9 @@ func TestMemNetwork(t *testing.T) {
 		holeDone <- err
 	}()
 	holeCancel()
-	select {
-	case err := <-holeDone:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("blackhole dial error = %v, want context.Canceled", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("blackhole dial did not return after cancel")
+	err, _ = testwait.Recv(t, "blackhole dial to return after cancel", holeDone, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("blackhole dial error = %v, want context.Canceled", err)
 	}
 
 	gate := make(chan struct{})
@@ -522,7 +524,9 @@ func TestMemNetwork(t *testing.T) {
 			}
 		}()
 	}
-	eventually(t, func() bool { return peakSrv.Open.Load() == 3 })
+	eventually(t, "3 connections open on the peak server", func() bool { return peakSrv.Open.Load() == 3 }, func() string {
+		return fmt.Sprintf("open=%d", peakSrv.Open.Load())
+	})
 	close(gate)
 	wg.Wait()
 	if got := peakSrv.Peak.Load(); got < 3 {

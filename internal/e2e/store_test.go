@@ -16,7 +16,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -2027,6 +2026,7 @@ func TestStoreReloadRetention(t *testing.T) {
 }
 
 func TestStoreReloadNoGoroutineLeak(t *testing.T) {
+	pre := snapGoroutines()
 	n := newMemNetwork()
 	fake := rlFake()
 	be, _ := rlBackend(t, n)
@@ -2038,7 +2038,7 @@ func TestStoreReloadNoGoroutineLeak(t *testing.T) {
 	g := n.gateway(t, doc(3), withClock(fake), srlType(shared, &calls))
 	t.Cleanup(func() { _ = g.Close() })
 
-	base := runtime.NumGoroutine()
+	base := snapGoroutines()
 	for i := range 100 {
 		failures := 4
 		if i%2 == 1 {
@@ -2048,17 +2048,7 @@ func TestStoreReloadNoGoroutineLeak(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	lo, hi := base*9/10, base*11/10
-	for i := 0; ; i++ {
-		got := runtime.NumGoroutine()
-		if got >= lo && got <= hi {
-			break
-		}
-		if i == 10000 {
-			t.Fatalf("goroutines = %d after 100 reloads, baseline %d, want within [%d, %d]", got, base, lo, hi)
-		}
-		runtime.Gosched()
-	}
+	awaitGoroutinesSettled(t, "goroutines of replaced stores to exit after 100 reloads", pre, base)
 }
 
 func TestStoreGaugePrunedAfterDrain(t *testing.T) {

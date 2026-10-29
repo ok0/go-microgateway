@@ -18,6 +18,7 @@ import (
 )
 
 const (
+	// real-clock limit for hung peers; with a healthy peer the limit runs on the fake clock.
 	otLimit    = 50 * time.Millisecond
 	otRequests = 200
 	otWorkers  = 8
@@ -36,10 +37,10 @@ type otEnv struct {
 	done   atomic.Int64
 }
 
-func otServe(t *testing.T, n testNetwork, doc rsDoc) *otEnv {
+func otServe(t *testing.T, n testNetwork, doc rsDoc, opts ...microgateway.Option) *otEnv {
 	t.Helper()
 	logs := &logBuf{}
-	g := n.gateway(t, doc.yaml(), microgateway.WithLogger(newJSONLogger(logs)))
+	g := n.gateway(t, doc.yaml(), append([]microgateway.Option{microgateway.WithLogger(newJSONLogger(logs))}, opts...)...)
 	gw := &reTracker{h: g}
 	return &otEnv{
 		g:  g,
@@ -61,6 +62,59 @@ func (e *otEnv) state(t *testing.T) string {
 		fmt.Fprintf(&b, "\n%s in_flight=%d", h.URL, h.InFlight)
 	}
 	return b.String()
+}
+
+// runRounds sends n GET requests in rounds of otWorkers on fake. In each round it waits until every request of the
+// round has completed or is parked on stalled with its limit armed and no other attempt in progress, advances fake by
+// otLimit so that exactly the parked limits fire, and collects the round's results. Retry backoffs (1ns) are
+// advanced by a driver that never reaches otLimit.
+func (e *otEnv) runRounds(t *testing.T, n int, fake *clock.Fake, stalled string) []reResult {
+	t.Helper()
+	drv := reDrive(t, fake, time.Nanosecond)
+	defer drv.stop()
+	out := make([]reResult, 0, n)
+	for len(out) < n {
+		size := min(otWorkers, n-len(out))
+		pending := make([]<-chan reResult, 0, size)
+		for range size {
+			pending = append(pending, reDoAsync(e.client, reNewGet(t, context.Background(), e.s.URL+"/")))
+		}
+		var round []reResult
+		var parked int64
+		eventually(t, fmt.Sprintf("round of %d requests to complete or park on %s", size, stalled), func() bool {
+			for i, ch := range pending {
+				if ch == nil {
+					continue
+				}
+				select {
+				case r := <-ch:
+					round = append(round, r)
+					pending[i] = nil
+					e.done.Add(1)
+				default:
+				}
+			}
+			parked = rsHost(t, e.g, stalled).InFlight
+			return len(round)+int(parked) == size && fake.Due(otLimit) == int(parked)
+		}, func() string {
+			return fmt.Sprintf("round results=%d parked=%d due=%d\n%s", len(round), parked, fake.Due(otLimit), e.state(t))
+		})
+		if parked > 0 {
+			fake.Advance(otLimit)
+		}
+		for i, ch := range pending {
+			if ch == nil {
+				continue
+			}
+			r, _ := reRecv(t, "round result after the parked limits fired", ch, func() string { return e.state(t) })
+			e.done.Add(1)
+			round = append(round, r)
+			pending[i] = nil
+		}
+		out = append(out, round...)
+	}
+	reRecv(t, "gateway handlers to return", e.gw.idleCh(), func() string { return e.state(t) })
+	return out
 }
 
 // run sends n GET requests through e.client with otWorkers in flight and returns their results in arrival order.
@@ -151,12 +205,13 @@ func TestOneTimerPerLimit(t *testing.T) {
 	n := newMemNetwork()
 
 	t.Run("header timeout retried on the next host", func(t *testing.T) {
+		fake := clock.NewFake(time.Now())
 		hang := newRSBackend(t, n, otHang)
 		ok := newRSBackend(t, n, nil)
-		e := otServe(t, n, otDoc([]string{hang.URL, ok.URL}, fmt.Sprintf("connect: 1h\nresponse_header: %s\n", otLimit), otRetry))
+		e := otServe(t, n, otDoc([]string{hang.URL, ok.URL}, fmt.Sprintf("connect: 1h\nresponse_header: %s\n", otLimit), otRetry), withClock(fake))
 		before := otRetries(t, e.g)
 
-		results := e.run(t, otRequests)
+		results := e.runRounds(t, otRequests, fake, hang.URL)
 		otCheckAllOK(t, results)
 
 		h1 := otAttempts(t, e.g, hang.srv.Addr, "failure")
@@ -173,12 +228,13 @@ func TestOneTimerPerLimit(t *testing.T) {
 	})
 
 	t.Run("connect timeout retried on the next host", func(t *testing.T) {
+		fake := clock.NewFake(time.Now())
 		hole := n.blackhole(t)
 		ok := newRSBackend(t, n, nil)
-		e := otServe(t, n, otDoc([]string{"http://" + hole, ok.URL}, fmt.Sprintf("connect: %s\nresponse_header: 1h\n", otLimit), otRetry))
+		e := otServe(t, n, otDoc([]string{"http://" + hole, ok.URL}, fmt.Sprintf("connect: %s\nresponse_header: 1h\n", otLimit), otRetry), withClock(fake))
 		before := otRetries(t, e.g)
 
-		results := e.run(t, otRequests)
+		results := e.runRounds(t, otRequests, fake, "http://"+hole)
 		otCheckAllOK(t, results)
 
 		h1 := otAttempts(t, e.g, hole, "failure")
@@ -423,7 +479,10 @@ func TestActiveProbeBoundedWithoutTransportHeaderLimit(t *testing.T) {
 	if h.ActiveCheck == nil || h.ActiveCheck.Status != "unhealthy" || h.Healthy {
 		t.Fatalf("host status = %+v, want unhealthy active check", h)
 	}
-	if got := rsMetricOr0(t, g, "microgateway_upstream_active_checks_total", "upstream", "up", "host", s.label(), "result", "fail"); got < 1 {
-		t.Fatalf("failed active checks for %s = %v, want >= 1", s.label(), got)
+	failed := func() float64 {
+		return rsMetricOr0(t, g, "microgateway_upstream_active_checks_total", "upstream", "up", "host", s.label(), "result", "fail")
 	}
+	eventually(t, "a failed active check to be counted", func() bool { return failed() >= 1 }, func() string {
+		return fmt.Sprintf("failed active checks for %s = %v", s.label(), failed())
+	})
 }

@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -178,6 +176,12 @@ func (s *hostStub) probePeak() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.probePeakVal
+}
+
+func (s *hostStub) probeInFlight() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.probeActive
 }
 
 func (s *hostStub) label() string {
@@ -492,7 +496,7 @@ func runPassiveEjection(t *testing.T, n testNetwork) {
 			if err := <-done; err == nil {
 				t.Fatal("canceled request completed without error")
 			}
-			eventually(t, func() bool { return ignored() == base+float64(k+1) })
+			eventually(t, fmt.Sprintf("ignored attempt %d to be counted", k+1), func() bool { return ignored() == base+float64(k+1) }, func() string { return fmt.Sprint(ignored()) })
 			bad.setMode(stubAnswer)
 			for range 3 {
 				r.expect(http.StatusOK)
@@ -757,12 +761,13 @@ func runActiveHealth(t *testing.T, n testNetwork) {
 		r, hosts := newActiveRig(t, n, 2, "/health", "200-399")
 		a, b := hosts[0], hosts[1]
 		r.expect(http.StatusOK)
-		eventually(t, func() bool {
+		eventually(t, "one request log record", func() bool {
 			return len(r.logs.records(t, "request")) == 1
-		})
+		}, func() string { return fmt.Sprint(len(r.logs.records(t, "request"))) })
 		before := r.attempts(a)
 
 		a.setProbeHold(true)
+		r.fake.BlockUntil(2)
 		r.fake.Advance(10 * time.Second)
 		awaitSignal(t, a.probeArrived, "hung probe to reach the host")
 		waitProbes(t, r.fake, r.activeChecks, 1, 2)
@@ -785,6 +790,9 @@ func runActiveHealth(t *testing.T, n testNetwork) {
 		waitProbes(t, r.fake, r.activeChecks, r.probes, 2)
 		checkActive(t, r.host(a), "unknown", 0, 1, true, time.Time{})
 
+		eventually(t, "hung probe handler to observe the cancelled request", func() bool {
+			return a.probeInFlight() == 0
+		}, func() string { return fmt.Sprint(a.probeInFlight()) })
 		a.setProbeHold(false)
 		r.tick(2, 0)
 		if st := r.host(a); st.ActiveCheck == nil || st.ActiveCheck.Status != "healthy" {
@@ -1204,6 +1212,7 @@ func TestFailedReloadKeepsHealth(t *testing.T) {
 }
 
 func TestHundredReloadsNoGoroutineLeak(t *testing.T) {
+	pre := snapGoroutines()
 	n := newMemNetwork()
 	gate := newHoldGate()
 	hosts := []*hostStub{
@@ -1213,7 +1222,7 @@ func TestHundredReloadsNoGoroutineLeak(t *testing.T) {
 	doc := upstreamDoc{name: "up", urls: urlsOf(hosts), active: activeFlow("/health", "200-399")}
 	r := newHealthRig(t, n, doc, hosts, gate)
 	r.tick(2, 0)
-	baseline := runtime.NumGoroutine()
+	baseline := snapGoroutines()
 
 	for i := range 100 {
 		path := "/health"
@@ -1223,9 +1232,8 @@ func TestHundredReloadsNoGoroutineLeak(t *testing.T) {
 		doc.active = activeFlow(path, "200-399")
 		r.reload(doc)
 	}
-	eventually(t, func() bool {
-		return math.Abs(float64(runtime.NumGoroutine()-baseline)) <= 0.1*float64(baseline)
-	})
+	awaitGoroutinesSettled(t, "goroutines of retired probers to exit after 100 reloads", pre, baseline)
+	r.fake.BlockUntil(len(hosts))
 	if got := r.fake.Waiters(); got != len(hosts) {
 		t.Fatalf("pending timers after reloads = %d, want %d live probers", got, len(hosts))
 	}
