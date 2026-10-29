@@ -55,6 +55,28 @@ func NewValidationError(errs []FieldError) *ValidationError {
 	return newValidationError(errs)
 }
 
+// MergeCheck returns reported followed by the errors of check that are not about a path already reported: a check
+// error is dropped when its path equals, or is nested under (after a "." or "["), the path of an error in reported.
+// Errors without a path are always kept, check errors are compared only with reported, and the order of the kept
+// errors is unchanged. The result is a new slice.
+func MergeCheck(reported, check []FieldError) []FieldError {
+	paths := map[string]bool{}
+	for _, fe := range reported {
+		if fe.Path != "" {
+			paths[fe.Path] = true
+		}
+	}
+	out := make([]FieldError, 0, len(reported)+len(check))
+	out = append(out, reported...)
+	for _, fe := range check {
+		if fe.Path != "" && underPath(fe.Path, paths) {
+			continue
+		}
+		out = append(out, fe)
+	}
+	return out
+}
+
 func compareFieldErrors(a, b FieldError) int {
 	if (a.Line > 0) != (b.Line > 0) {
 		if a.Line > 0 {

@@ -138,20 +138,11 @@ func load(data []byte, dir string, opts []ParseOption) (*Config, error) {
 	}
 	if !rootFailure && len(o.checks) > 0 {
 		cfg.lines = idx
-		reported := make(map[string]bool, len(errs))
-		for _, fe := range errs {
-			if fe.Path != "" {
-				reported[fe.Path] = true
-			}
-		}
+		var found []FieldError
 		for _, check := range o.checks {
-			for _, fe := range check(cfg) {
-				if fe.Path != "" && underPath(fe.Path, reported) {
-					continue
-				}
-				errs = append(errs, fe)
-			}
+			found = append(found, check(cfg)...)
 		}
+		errs = MergeCheck(errs, found)
 	}
 	for i := range errs {
 		if errs[i].Line == 0 && errs[i].Path != "" {
@@ -264,9 +255,9 @@ func excerpt(v string) string {
 	return v
 }
 
-// underPath reports whether path equals, or is nested under, one of the decode error paths.
-func underPath(path string, decoded map[string]bool) bool {
-	for p := range decoded {
+// underPath reports whether path equals, or is nested under, one of the paths in set.
+func underPath(path string, set map[string]bool) bool {
+	for p := range set {
 		if path == p || strings.HasPrefix(path, p+".") || strings.HasPrefix(path, p+"[") {
 			return true
 		}

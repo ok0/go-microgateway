@@ -31,18 +31,19 @@ func checkConfig(c *config.Config, set *runtime.StoreSet, reg *middleware.Regist
 	return withResolution(c.Validate(), c, set, reg)
 }
 
-// withResolution adds the store and middleware resolution problems of cfg to err when err is a validation error,
-// or reports them alone when err is nil. Other errors are returned unchanged.
+// withResolution adds the store and middleware resolution problems of cfg that are not about an already reported
+// path (config.MergeCheck) to err when err is a validation error, or reports them alone when err is nil. Other errors
+// are returned unchanged.
 func withResolution(err error, cfg *config.Config, set *runtime.StoreSet, reg *middleware.Registry) error {
-	var all []config.FieldError
+	var reported []config.FieldError
 	if err != nil {
 		var ve *config.ValidationError
 		if !errors.As(err, &ve) {
 			return err
 		}
-		all = append(all, ve.Errors...)
+		reported = ve.Errors
 	}
-	all = append(all, resolve(cfg, set, reg)...)
+	all := config.MergeCheck(reported, resolve(cfg, set, reg))
 	if len(all) == 0 {
 		return nil
 	}
