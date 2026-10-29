@@ -540,6 +540,29 @@ func TestNewTransport(t *testing.T) {
 	}
 }
 
+func TestNewTransportInjectedClockHasNoWallLimits(t *testing.T) {
+	cfg := config.Upstream{
+		Name: "u",
+		Timeouts: config.Timeouts{
+			Connect:        config.Duration(time.Second),
+			TLSHandshake:   config.Duration(2 * time.Second),
+			ResponseHeader: config.Duration(3 * time.Second),
+			Idle:           config.Duration(4 * time.Second),
+		},
+		Pool: config.Pool{MaxIdlePerHost: 7, MaxConnsPerHost: 9},
+	}
+	tr := NewTransport(cfg, nil, clock.NewFake(testStart))
+	if tr.ResponseHeaderTimeout != 0 {
+		t.Errorf("ResponseHeaderTimeout = %v, want 0", tr.ResponseHeaderTimeout)
+	}
+	if tr.TLSHandshakeTimeout != 2*time.Second {
+		t.Errorf("TLSHandshakeTimeout = %v", tr.TLSHandshakeTimeout)
+	}
+	if tr.IdleConnTimeout != 4*time.Second {
+		t.Errorf("IdleConnTimeout = %v", tr.IdleConnTimeout)
+	}
+}
+
 func TestConnectTimeoutFakeClock(t *testing.T) {
 	fake := clock.NewFake(testStart)
 	cfg := config.Upstream{

@@ -2,7 +2,9 @@ package middleware
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -165,16 +167,43 @@ func TestRequestID(t *testing.T) {
 }
 
 func TestTimeout(t *testing.T) {
-	if Timeout(0) != nil {
+	if Timeout(0, nil) != nil {
 		t.Error("Timeout(0) is not nil")
 	}
 	var ok bool
 	h := Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, ok = r.Context().Deadline()
-	}), Timeout(time.Hour))
+	}), Timeout(time.Hour, nil))
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 	if !ok {
 		t.Error("handler context has no deadline")
+	}
+}
+
+func TestTimeoutFakeClock(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	fk := clock.NewFake(t0)
+	var deadline time.Time
+	var hasDeadline bool
+	var errBefore, errAfter error
+	h := Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deadline, hasDeadline = r.Context().Deadline()
+		errBefore = r.Context().Err()
+		fk.Advance(time.Hour)
+		errAfter = r.Context().Err()
+	}), Timeout(time.Hour, fk))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	if !hasDeadline || !deadline.Equal(t0.Add(time.Hour)) {
+		t.Errorf("deadline = %v, %v, want %v, true", deadline, hasDeadline, t0.Add(time.Hour))
+	}
+	if errBefore != nil {
+		t.Errorf("Err before Advance = %v, want nil", errBefore)
+	}
+	if !errors.Is(errAfter, context.DeadlineExceeded) {
+		t.Errorf("Err after Advance = %v, want DeadlineExceeded", errAfter)
+	}
+	if fk.Waiters() != 0 {
+		t.Errorf("Waiters = %d, want 0", fk.Waiters())
 	}
 }
 

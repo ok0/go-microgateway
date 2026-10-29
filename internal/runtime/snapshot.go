@@ -171,7 +171,7 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 			px.ServeHTTP(w, req)
 		})
 		stages := maps.Clone(named)
-		if t := middleware.Timeout(r.Timeout.Std()); t != nil {
+		if t := middleware.Timeout(r.Timeout.Std(), clk); t != nil {
 			stages[middleware.StageTimeout] = t
 		}
 		if cb {

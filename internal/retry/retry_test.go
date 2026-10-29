@@ -684,6 +684,28 @@ func TestFits(t *testing.T) {
 	}
 }
 
+func TestFitsInjectedClockDeadline(t *testing.T) {
+	fk := clock.NewFake(testStart)
+	ctx, cancel := clock.WithTimeout(context.Background(), fk, 5*time.Second)
+	defer cancel()
+	if !Fits(ctx, fk, 4*time.Second) {
+		t.Fatal("Fits(4s) = false, want true")
+	}
+	if !Fits(ctx, fk, 5*time.Second) {
+		t.Fatal("Fits(5s) = false, want true")
+	}
+	if Fits(ctx, fk, 6*time.Second) {
+		t.Fatal("Fits(6s) = true, want false")
+	}
+	fk.Advance(2 * time.Second)
+	if !Fits(ctx, fk, 3*time.Second) {
+		t.Fatal("after Advance(2s): Fits(3s) = false, want true")
+	}
+	if Fits(ctx, fk, 4*time.Second) {
+		t.Fatal("after Advance(2s): Fits(4s) = true, want false")
+	}
+}
+
 func fieldNames(t reflect.Type) []string {
 	names := make([]string, 0, t.NumField())
 	for i := 0; i < t.NumField(); i++ {

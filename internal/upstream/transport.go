@@ -30,13 +30,13 @@ func connectTimeout(base DialFunc, connect time.Duration, clk clock.Clock) DialF
 		if connect <= 0 {
 			return base(ctx, network, addr)
 		}
-		ctx, cancel := context.WithTimeout(ctx, connect)
+		ctx, cancel := clock.WithTimeoutCause(ctx, clk, connect, errConnectTimeout)
 		defer cancel()
-		ctx, cancelCause := context.WithCancelCause(ctx)
-		defer cancelCause(nil)
-		t := clk.AfterFunc(connect, func() { cancelCause(errConnectTimeout) })
-		conn, err := base(ctx, network, addr)
-		t.Stop()
+		dialCtx := ctx
+		if !clock.IsReal(clk) {
+			dialCtx = clock.WithoutDeadline(ctx)
+		}
+		conn, err := base(dialCtx, network, addr)
 		if err != nil && context.Cause(ctx) == errConnectTimeout {
 			return nil, &net.OpError{Op: "dial", Net: network, Err: errConnectTimeout}
 		}
@@ -45,6 +45,7 @@ func connectTimeout(base DialFunc, connect time.Duration, clk clock.Clock) DialF
 }
 
 func NewTransport(cfg config.Upstream, dial DialFunc, clk clock.Clock) *http.Transport {
+	realClk := clock.IsReal(clk)
 	if clk == nil {
 		clk = clock.Real()
 	}
@@ -52,11 +53,19 @@ func NewTransport(cfg config.Upstream, dial DialFunc, clk clock.Clock) *http.Tra
 	t.Proxy = nil
 	base := dial
 	if base == nil {
-		base = newDialer(cfg).DialContext
+		d := newDialer(cfg)
+		if !realClk {
+			d.Timeout = 0
+		}
+		base = d.DialContext
 	}
 	t.DialContext = connectTimeout(base, cfg.Timeouts.Connect.Std(), clk)
 	t.TLSHandshakeTimeout = cfg.Timeouts.TLSHandshake.Std()
-	t.ResponseHeaderTimeout = cfg.Timeouts.ResponseHeader.Std()
+	if realClk {
+		// With another clock, the connect and response-header limits run only on that clock
+		// (connectTimeout, proxy.AttemptTransport); a wall-clock copy would race it.
+		t.ResponseHeaderTimeout = cfg.Timeouts.ResponseHeader.Std()
+	}
 	t.IdleConnTimeout = cfg.Timeouts.Idle.Std()
 	t.MaxIdleConnsPerHost = cfg.Pool.MaxIdlePerHost
 	t.MaxConnsPerHost = cfg.Pool.MaxConnsPerHost

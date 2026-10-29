@@ -2,7 +2,6 @@
 package middleware
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -11,6 +10,7 @@ import (
 	"runtime/debug"
 	"time"
 
+	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/httperr"
 	"github.com/ok0/go-microgateway/internal/reqctx"
 )
@@ -90,13 +90,14 @@ func ClientIP(t *reqctx.TrustedProxies) Middleware {
 	}
 }
 
-func Timeout(d time.Duration) Middleware {
+// Timeout ends the request context d after the current time of clk (nil: real clock).
+func Timeout(d time.Duration, clk clock.Clock) Middleware {
 	if d <= 0 {
 		return nil
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ctx, cancel := context.WithTimeout(r.Context(), d)
+			ctx, cancel := clock.WithTimeout(r.Context(), clk, d)
 			defer cancel()
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
