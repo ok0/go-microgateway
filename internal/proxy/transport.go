@@ -79,7 +79,7 @@ func (t *AttemptTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 			Sent:          res.sent,
 			ConnectErr:    res.connectErr,
 			HeaderTimeout: res.headerTimeout,
-			Canceled:      req.Context().Err() != nil,
+			Canceled:      res.reqEnded || req.Context().Err() != nil,
 		}) {
 			return res.resp, res.err
 		}
@@ -114,6 +114,19 @@ type attemptResult struct {
 	sent          bool
 	connectErr    bool
 	headerTimeout bool
+	reqEnded      bool
+}
+
+// requestEnded reports how the request context has ended: its own error once it is done, or
+// context.DeadlineExceeded once clk has reached its deadline before the context's own timer ran.
+func requestEnded(ctx context.Context, clk clock.Clock) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if d, ok := ctx.Deadline(); ok && !clk.Now().Before(d) {
+		return context.DeadlineExceeded
+	}
+	return nil
 }
 
 type countingBody struct {
@@ -184,18 +197,24 @@ func (t *AttemptTransport) attempt(req *http.Request, h *upstream.Host, tok brea
 	if timer != nil {
 		timer.Stop()
 	}
-	fired := !state.CompareAndSwap(headerWaiting, headerReceived)
+	// The outcome is fixed by state, not by which error RoundTrip saw first: headers returned before the timer fired win; otherwise the request's own end (client cancel or route deadline) wins over the header timeout.
+	received := state.CompareAndSwap(headerWaiting, headerReceived)
 	mu.Unlock()
-	if fired && req.Context().Err() == nil {
+	var ended error
+	if !received {
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
 		}
 		resp, err = nil, ErrResponseHeaderTimeout
+		if ended = requestEnded(req.Context(), clk); ended != nil {
+			err = ended
+		}
 	}
 
 	res := attemptResult{
 		sent:          wrote.Load() || (cb != nil && cb.n.Load() > 0),
 		headerTimeout: err == ErrResponseHeaderTimeout,
+		reqEnded:      ended != nil,
 	}
 	var oe *net.OpError
 	res.connectErr = errors.As(err, &oe) && oe.Op == "dial"

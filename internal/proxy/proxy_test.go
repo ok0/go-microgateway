@@ -9,10 +9,12 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"net/url"
 	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,6 +24,7 @@ import (
 	"github.com/ok0/go-microgateway/internal/httperr"
 	"github.com/ok0/go-microgateway/internal/metrics"
 	"github.com/ok0/go-microgateway/internal/reqctx"
+	"github.com/ok0/go-microgateway/internal/retry"
 	"github.com/ok0/go-microgateway/internal/state"
 	"github.com/ok0/go-microgateway/internal/upstream"
 )
@@ -785,5 +788,109 @@ func TestDepsFields(t *testing.T) {
 	stage := reflect.TypeOf(BreakerStage)
 	if stage.NumIn() != 1 || stage.In(0) != reflect.TypeOf((*upstream.Upstream)(nil)) {
 		t.Errorf("BreakerStage signature = %v, want a single *upstream.Upstream input", stage)
+	}
+}
+
+type deadlineOnlyCtx struct {
+	context.Context
+	deadline time.Time
+}
+
+func (c deadlineOnlyCtx) Deadline() (time.Time, bool) { return c.deadline, true }
+
+func TestHeaderTimerAtRequestDeadline(t *testing.T) {
+	fake := clock.NewFake(time.Unix(0, 0))
+	var dials atomic.Int32
+	dial := silentDial(t)
+	counting := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dials.Add(1)
+		return dial(ctx, network, addr)
+	}
+	up := newUpstreamWith(t, config.Upstream{
+		Name: "u",
+		Hosts: []config.Host{
+			{URL: config.NewSecretURL("http://127.0.0.1:9001")},
+			{URL: config.NewSecretURL("http://127.0.0.1:9002")},
+		},
+		Timeouts: config.Timeouts{Connect: config.Duration(time.Hour), ResponseHeader: config.Duration(time.Hour)},
+	}, upstream.Deps{Dial: counting, Clock: fake})
+	reg := metrics.NewRegistry()
+	attempts, err := reg.Counter("t_attempts", "h", "upstream", "host", "outcome")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := &AttemptTransport{Upstream: up, Attempts: attempts, Clock: fake}
+	rr := &retry.Request{
+		Policy:     &retry.Policy{Attempts: 2, Statuses: map[int]bool{504: true}, Methods: map[string]bool{"GET": true}},
+		Budget:     retry.NewBudget(1, 1000, 10*time.Second, fake),
+		Replayable: true,
+	}
+	ctx := retry.WithRequest(deadlineOnlyCtx{context.Background(), fake.Now().Add(time.Hour)}, rr)
+	written := make(chan struct{}, 1)
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{WroteRequest: func(httptrace.WroteRequestInfo) {
+		select {
+		case written <- struct{}{}:
+		default:
+		}
+	}})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://upstream.invalid/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		resp *http.Response
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		resp, err := tr.RoundTrip(req)
+		ch <- result{resp, err}
+	}()
+
+	guard, cancelGuard := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancelGuard()
+	select {
+	case <-written:
+	case <-guard.Done():
+		t.Fatal("hang guard: request not written")
+	}
+	if w, d := fake.Waiters(), fake.Due(time.Hour); w != 1 || d != 1 {
+		t.Fatalf("request written: fake waiters=%d due within 1h=%d, want only the response-header timer (connect timer stopped)", w, d)
+	}
+	fake.Advance(time.Hour)
+
+	var got result
+	select {
+	case got = <-ch:
+	case <-time.After(2 * time.Minute):
+		t.Fatal("hang guard: RoundTrip did not return after the request deadline and the response-header timer")
+	}
+	if got.resp != nil && got.resp.Body != nil {
+		_ = got.resp.Body.Close()
+	}
+	if !errors.Is(got.err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want context.DeadlineExceeded", got.err)
+	}
+	if errors.Is(got.err, ErrResponseHeaderTimeout) {
+		t.Errorf("err = %v, want the request deadline rather than ErrResponseHeaderTimeout", got.err)
+	}
+	if status, _ := httperr.FromError(got.err); status != http.StatusGatewayTimeout {
+		t.Errorf("status = %d, want 504", status)
+	}
+	if n := dials.Load(); n != 1 {
+		t.Errorf("dials = %d, want 1", n)
+	}
+	var failures float64
+	for _, h := range up.Hosts() {
+		failures += attempts.With("u", h.URL.Host, "failure").Value()
+	}
+	if failures != 1 {
+		t.Errorf("failure attempts = %v, want 1", failures)
+	}
+	for _, h := range up.Hosts() {
+		if n := h.InFlight(); n != 0 {
+			t.Errorf("InFlight(%s) = %d, want 0", h.URL.Host, n)
+		}
 	}
 }
