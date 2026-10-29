@@ -71,7 +71,7 @@ func TestRunSignalsSentAtReadyAreHandled(t *testing.T) {
 	t.Run("sighup at listening then sigterm after reload", func(t *testing.T) {
 		reloaded := make(chan struct{})
 		errb := &signalWriter{hook: map[string]func(){
-			"listening": func() { _ = syscall.Kill(syscall.Getpid(), syscall.SIGHUP) },
+			"listening":        func() { _ = syscall.Kill(syscall.Getpid(), syscall.SIGHUP) },
 			"reload requested": func() { close(reloaded) },
 		}}
 		done := make(chan int, 1)
