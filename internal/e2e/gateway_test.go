@@ -1,6 +1,7 @@
-package microgateway
+package e2e
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,128 +10,19 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/reqctx"
 )
 
-const listenersYAML = "listeners:\n  - name: public\n    address: \"127.0.0.1:0\"\n"
-
-const trustedGlobal = "global:\n  trusted_proxies:\n    - \"203.0.113.0/24\"\n"
-
-type echo struct {
-	Backend string      `json:"backend"`
-	Path    string      `json:"path"`
-	RawPath string      `json:"raw_path"`
-	Host    string      `json:"host"`
-	Headers http.Header `json:"headers"`
-}
-
-type apiError struct {
-	Status    int    `json:"status"`
-	Code      string `json:"code"`
-	Message   string `json:"message"`
-	RequestID string `json:"request_id"`
-}
-
-var hexID = regexp.MustCompile(`^[0-9a-f]{32}$`)
-
-func echoHandler(name string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(echo{
-			Backend: name,
-			Path:    r.URL.Path,
-			RawPath: r.URL.RawPath,
-			Host:    r.Host,
-			Headers: r.Header,
-		})
-	})
-}
-
-func backend(t *testing.T, name string) *httptest.Server {
-	t.Helper()
-	s := httptest.NewServer(echoHandler(name))
-	t.Cleanup(s.Close)
-	return s
-}
-
-func gw(t *testing.T, doc string) *Gateway {
-	t.Helper()
-	g, err := NewFromYAML([]byte(doc))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = g.Close() })
-	return g
-}
-
-func oneRouteDoc(global, backendURL string) string {
-	return "version: 1\n" + global + listenersYAML + fmt.Sprintf(`upstreams:
-  - name: up
-    hosts:
-      - url: %q
-routes:
-  - name: all
-    upstream: up
-`, backendURL)
-}
-
-func decodeErr(t *testing.T, resp *http.Response) apiError {
-	t.Helper()
-	defer resp.Body.Close()
-	var body struct {
-		Error apiError `json:"error"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		t.Fatal(err)
-	}
-	return body.Error
-}
-
-func serve(t *testing.T, g *Gateway, req *http.Request) (*http.Response, echo) {
-	t.Helper()
-	rec := httptest.NewRecorder()
-	g.ServeHTTP(rec, req)
-	resp := rec.Result()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
-	}
-	var e echo
-	if err := json.NewDecoder(resp.Body).Decode(&e); err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	return resp, e
-}
-
-func eventually(t *testing.T, cond func() bool) {
-	t.Helper()
-	deadline := time.NewTimer(5 * time.Second)
-	defer deadline.Stop()
-	tick := time.NewTimer(5 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		if cond() {
-			return
-		}
-		select {
-		case <-deadline.C:
-			t.Fatal("condition not met within 5s")
-		case <-tick.C:
-			tick.Reset(5 * time.Millisecond)
-		}
-	}
-}
-
 func TestNewFromYAMLInvalid(t *testing.T) {
-	_, err := NewFromYAML([]byte("version: 2\nlisteners: []\n"))
+	_, err := microgateway.NewFromYAML([]byte("version: 2\nlisteners: []\n"))
 	var ve *config.ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("err = %v, want *config.ValidationError", err)
@@ -138,7 +30,7 @@ func TestNewFromYAMLInvalid(t *testing.T) {
 }
 
 func TestNewNilConfig(t *testing.T) {
-	if _, err := New(nil); err == nil {
+	if _, err := microgateway.New(nil); err == nil {
 		t.Fatal("New(nil) returned no error")
 	}
 }
@@ -204,7 +96,7 @@ func TestCloseNoLeak(t *testing.T) {
 	be := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	}))
-	g, err := NewFromYAML([]byte(oneRouteDoc("", be.URL)))
+	g, err := microgateway.NewFromYAML([]byte(oneRouteDoc("", be.URL)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,10 +307,10 @@ func TestPathParamAccessor(t *testing.T) {
 		[]reqctx.Param{{Name: "id", Value: "7"}},
 	)
 	req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
-	if got := PathParam(req, "id"); got != "7" {
+	if got := microgateway.PathParam(req, "id"); got != "7" {
 		t.Fatalf("PathParam = %q, want 7", got)
 	}
-	if got := RequestIDFromContext(ctx); got != "rid-1" {
+	if got := microgateway.RequestIDFromContext(ctx); got != "rid-1" {
 		t.Fatalf("RequestIDFromContext = %q, want rid-1", got)
 	}
 }
@@ -451,5 +343,118 @@ routes:
 	}
 	if counts["A"] != 5 || counts["B"] != 5 || counts["C"] != 0 {
 		t.Fatalf("counts = %v, want A=5 B=5 C=0", counts)
+	}
+}
+
+func TestWebSocketEcho(t *testing.T) {
+	be := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			http.Error(w, "upgrade required", http.StatusBadRequest)
+			return
+		}
+		conn, brw, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if _, err := brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"); err != nil {
+			return
+		}
+		if err := brw.Flush(); err != nil {
+			return
+		}
+		_, _ = io.Copy(conn, brw)
+	}))
+	t.Cleanup(be.Close)
+
+	g := gw(t, oneRouteDoc("", be.URL))
+	gwTS := httptest.NewServer(g)
+	t.Cleanup(gwTS.Close)
+
+	conn, err := net.Dial("tcp", strings.TrimPrefix(gwTS.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = io.WriteString(conn, "GET /ws HTTP/1.1\r\nHost: gw.test\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("status = %d, want 101", resp.StatusCode)
+	}
+
+	for _, msg := range []string{"hello\n", "again\n"} {
+		if _, err := io.WriteString(conn, msg); err != nil {
+			t.Fatal(err)
+		}
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		if line != msg {
+			t.Fatalf("echo = %q, want %q", line, msg)
+		}
+	}
+}
+
+func TestSSEIncremental(t *testing.T) {
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	closeRelease := func() { releaseOnce.Do(func() { close(release) }) }
+
+	be := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: one\n\n")
+		_ = http.NewResponseController(w).Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = io.WriteString(w, "data: two\n\n")
+	}))
+	t.Cleanup(be.Close)
+	t.Cleanup(closeRelease)
+
+	g := gw(t, oneRouteDoc("", be.URL))
+	gwTS := httptest.NewServer(g)
+	t.Cleanup(gwTS.Close)
+
+	resp, err := gwTS.Client().Get(gwTS.URL + "/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	lines := make(chan string, 8)
+	go func() {
+		defer close(lines)
+		reader := bufio.NewReader(resp.Body)
+		for {
+			line, err := reader.ReadString('\n')
+			if line != "" {
+				lines <- line
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	if first := recvLine(t, lines); first != "data: one\n" {
+		t.Fatalf("first line = %q, want %q", first, "data: one\n")
+	}
+	closeRelease()
+	for recvLine(t, lines) != "data: two\n" {
 	}
 }

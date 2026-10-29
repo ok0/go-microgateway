@@ -1,4 +1,4 @@
-package microgateway
+package e2e
 
 import (
 	"encoding/json"
@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/internal/clock"
 )
 
@@ -39,14 +40,6 @@ func balRequest(path, remote string) *http.Request {
 	req := httptest.NewRequest(http.MethodGet, path, nil)
 	req.RemoteAddr = remote
 	return req
-}
-
-func balDo(g *Gateway, req *http.Request) (int, string) {
-	rec := httptest.NewRecorder()
-	g.ServeHTTP(rec, req)
-	var e echo
-	_ = json.NewDecoder(rec.Body).Decode(&e)
-	return rec.Code, e.Backend
 }
 
 func balSpread(t *testing.T, n *memNetwork, lb string, requests int) [4]int64 {
@@ -280,7 +273,7 @@ func balKeyRequest(source string, i int) *http.Request {
 	return req
 }
 
-func balMapping(t *testing.T, g *Gateway, source string, keys int) []string {
+func balMapping(t *testing.T, g *microgateway.Gateway, source string, keys int) []string {
 	t.Helper()
 	out := make([]string, keys)
 	for i := range keys {
@@ -293,7 +286,7 @@ func balMapping(t *testing.T, g *Gateway, source string, keys int) []string {
 	return out
 }
 
-func balInFlightTotal(t *testing.T, g *Gateway) int64 {
+func balInFlightTotal(t *testing.T, g *microgateway.Gateway) int64 {
 	t.Helper()
 	var sum int64
 	for _, h := range upstreamStatus(t, g, "up").Hosts {

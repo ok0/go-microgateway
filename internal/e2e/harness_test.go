@@ -1,4 +1,4 @@
-package microgateway
+package e2e
 
 import (
 	"context"
@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/internal/clock"
 )
 
@@ -22,7 +23,7 @@ type testNetwork interface {
 	// serve runs h on a new listener until the test ends.
 	serve(t *testing.T, h http.Handler) *testServer
 	// gateway builds a gateway from doc whose upstream connections use this network.
-	gateway(t *testing.T, doc string, opts ...Option) *Gateway
+	gateway(t *testing.T, doc string, opts ...microgateway.Option) *microgateway.Gateway
 	// client returns a client on this network; tune (may be nil) adjusts its transport. Idle connections are closed at test end.
 	client(t *testing.T, tune func(*http.Transport)) *http.Client
 	// dial opens a raw connection to s; it is closed at test end.
@@ -170,7 +171,8 @@ func (c *memConn) Close() error {
 	return c.Conn.Close()
 }
 
-func (c *memConn) LocalAddr() net.Addr  { return c.local }
+func (c *memConn) LocalAddr() net.Addr { return c.local }
+
 func (c *memConn) RemoteAddr() net.Addr { return c.remote }
 
 func (l *memListener) Accept() (net.Conn, error) {
@@ -262,7 +264,7 @@ func (n *memNetwork) blackhole(t *testing.T) string {
 	return addr
 }
 
-func (n *memNetwork) gateway(t *testing.T, doc string, opts ...Option) *Gateway {
+func (n *memNetwork) gateway(t *testing.T, doc string, opts ...microgateway.Option) *microgateway.Gateway {
 	t.Helper()
 	return gwWith(t, doc, append(opts, withDialer(n.DialContext))...)
 }
@@ -317,7 +319,7 @@ func (tcpNetwork) blackhole(t *testing.T) string {
 	return "10.255.255.1:81"
 }
 
-func (tcpNetwork) gateway(t *testing.T, doc string, opts ...Option) *Gateway {
+func (tcpNetwork) gateway(t *testing.T, doc string, opts ...microgateway.Option) *microgateway.Gateway {
 	t.Helper()
 	return gwWith(t, doc, opts...)
 }

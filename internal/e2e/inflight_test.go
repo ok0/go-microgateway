@@ -1,4 +1,4 @@
-package microgateway
+package e2e
 
 import (
 	"bufio"
@@ -15,41 +15,6 @@ import (
 	"testing"
 	"time"
 )
-
-type getResult struct {
-	status int
-	gen    string
-	err    error
-}
-
-func startGet(client *http.Client, url string) <-chan getResult {
-	out := make(chan getResult, 1)
-	go func() {
-		resp, err := client.Get(url)
-		if err != nil {
-			out <- getResult{err: err}
-			return
-		}
-		_, _ = io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-		out <- getResult{status: resp.StatusCode, gen: resp.Header.Get("X-Gen")}
-	}()
-	return out
-}
-
-func awaitGet(t *testing.T, ch <-chan getResult) getResult {
-	t.Helper()
-	select {
-	case r := <-ch:
-		if r.err != nil {
-			t.Fatal(r.err)
-		}
-		return r
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for response")
-	}
-	return getResult{}
-}
 
 func TestFileEditUnderLoad(t *testing.T) {
 	runFileEditUnderLoad(t, newMemNetwork())
@@ -282,7 +247,7 @@ routes:
 
 	g := n.gateway(t, doc1)
 	ref := n.gateway(t, doc2)
-	refLen := ref.state.Len()
+	refLen := inspect(ref).StateEntries
 
 	ts := n.serve(t, g)
 
@@ -370,8 +335,8 @@ routes:
 	sseClient.CloseIdleConnections()
 	probe.CloseIdleConnections()
 
-	eventually(t, func() bool { return g.live.Load() == 1 })
-	if got := g.state.Len(); got != refLen {
+	eventually(t, func() bool { return inspect(g).LiveGenerations == 1 })
+	if got := inspect(g).StateEntries; got != refLen {
 		t.Fatalf("state entries = %d, want %d", got, refLen)
 	}
 }
@@ -423,7 +388,7 @@ routes:
 	}
 
 	eventually(t, func() bool { return runtime.NumGoroutine() <= base+base/10 })
-	eventually(t, func() bool { return g.live.Load() == 1 })
+	eventually(t, func() bool { return inspect(g).LiveGenerations == 1 })
 	eventually(t, func() bool { return ts.Open.Load() == 0 })
 	eventually(t, func() bool { return be.Open.Load() == 1 })
 	if _, ok := n.openConns(); ok {

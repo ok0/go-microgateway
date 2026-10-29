@@ -1,18 +1,16 @@
-package microgateway
+package e2e
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,86 +18,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
-type logBuf struct {
-	mu sync.Mutex
-	b  bytes.Buffer
-}
-
-func (l *logBuf) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.b.Write(p)
-}
-
-func (l *logBuf) String() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.b.String()
-}
-
-func newJSONLogger(l *logBuf) *slog.Logger {
-	return slog.New(slog.NewJSONHandler(l, &slog.HandlerOptions{Level: slog.LevelDebug}))
-}
-
-func (l *logBuf) records(t *testing.T, msg string) []map[string]any {
-	t.Helper()
-	var out []map[string]any
-	for _, line := range strings.Split(l.String(), "\n") {
-		if line == "" {
-			continue
-		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(line), &m); err != nil {
-			t.Fatalf("log line %q: %v", line, err)
-		}
-		if m["msg"] == msg {
-			out = append(out, m)
-		}
-	}
-	return out
-}
-
-func writeConfig(t *testing.T, dir, doc string) string {
-	t.Helper()
-	path := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
-func counters(g *Gateway) (success, failure, unchanged float64) {
-	return g.reloads.success.Value(), g.reloads.failure.Value(), g.reloads.unchanged.Value()
-}
-
-func metricsText(t *testing.T, g *Gateway) string {
-	t.Helper()
-	rec := httptest.NewRecorder()
-	g.AdminHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("metrics status = %d, want 200", rec.Code)
-	}
-	body := rec.Body.String()
-	checkMetricPrefix(t, body)
-	return body
-}
-
-func adminBody(t *testing.T, g *Gateway, path string) string {
-	t.Helper()
-	rec := httptest.NewRecorder()
-	g.AdminHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("%s status = %d, want 200", path, rec.Code)
-	}
-	return rec.Body.String()
-}
-
-func servedBy(g *Gateway, path string) string {
+func servedBy(g *microgateway.Gateway, path string) string {
 	rec := httptest.NewRecorder()
 	g.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 	if rec.Code != http.StatusOK {
@@ -110,25 +35,6 @@ func servedBy(g *Gateway, path string) string {
 		return ""
 	}
 	return e.Backend
-}
-
-func statusOf(client *http.Client, url string) int {
-	resp, err := client.Get(url)
-	if err != nil {
-		return -1
-	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
-	return resp.StatusCode
-}
-
-func awaitSignal(t *testing.T, ch <-chan struct{}, what string) {
-	t.Helper()
-	select {
-	case <-ch:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timed out waiting for %s", what)
-	}
 }
 
 func passDoc(backendURL string) string {
@@ -153,13 +59,13 @@ func TestReloadEntryPointsEquivalent(t *testing.T) {
 	beA := n.serve(t, echoHandler("A"))
 	beB := n.serve(t, echoHandler("B"))
 	var factoryCalls atomic.Int64
-	pass := func(p MiddlewareParams) (Middleware, error) {
+	pass := func(p microgateway.MiddlewareParams) (microgateway.Middleware, error) {
 		factoryCalls.Add(1)
 		return identityMiddleware, nil
 	}
 	docA := passDoc(beA.URL)
 	docB := passDoc(beB.URL)
-	g := n.gateway(t, docA, WithMiddleware("pass", pass))
+	g := n.gateway(t, docA, microgateway.WithMiddleware("pass", pass))
 	if got := factoryCalls.Load(); got != 1 {
 		t.Fatalf("factory calls after New = %d, want 1", got)
 	}
@@ -201,7 +107,7 @@ func TestReloadEntryPointsEquivalent(t *testing.T) {
 		t.Fatalf("factory calls changed on unchanged reloads: %d -> %d", calls, got)
 	}
 
-	before := g.cur.Load()
+	before := inspect(g).Generation
 	edited := "# reformatted\n\n" + strings.ReplaceAll(docB, "\n", "  \n")
 	writeConfig(t, dir, edited)
 	if err := g.ReloadFile(path); err != nil {
@@ -210,7 +116,7 @@ func TestReloadEntryPointsEquivalent(t *testing.T) {
 	if _, _, u := counters(g); u != 3 {
 		t.Fatalf("unchanged after comment edit = %v, want 3", u)
 	}
-	if g.cur.Load() != before {
+	if inspect(g).Generation != before {
 		t.Fatal("comment-only edit replaced the active generation")
 	}
 	if got := factoryCalls.Load(); got != calls {
@@ -227,7 +133,7 @@ func TestReloadEntryPointsEquivalent(t *testing.T) {
 	if _, _, u := counters(g); u != 4 {
 		t.Fatalf("unchanged after touch = %v, want 4", u)
 	}
-	if g.cur.Load() != before {
+	if inspect(g).Generation != before {
 		t.Fatal("touch replaced the active generation")
 	}
 	if got := factoryCalls.Load(); got != calls {
@@ -262,7 +168,7 @@ routes:
       set:
         X-Env: "${MICROGATEWAY_TEST_ENV}"
 `, be.URL)
-	g := n.gateway(t, doc, WithEnvLookup(lookup))
+	g := n.gateway(t, doc, microgateway.WithEnvLookup(lookup))
 	resp, _ := serve(t, g, httptest.NewRequest(http.MethodGet, "/x", nil))
 	if got := resp.Header.Get("X-Env"); got != "one" {
 		t.Fatalf("X-Env = %q, want one", got)
@@ -301,7 +207,7 @@ routes:
     middlewares: [m]
 `, backendURL)
 	}
-	failing := func(p MiddlewareParams) (Middleware, error) {
+	failing := func(p microgateway.MiddlewareParams) (microgateway.Middleware, error) {
 		var c struct {
 			Fail bool `yaml:"fail"`
 		}
@@ -368,9 +274,9 @@ routes:
 				be := n.serve(t, echoHandler("ok"))
 				doc := base(be.URL)
 				buf := &logBuf{}
-				g := n.gateway(t, doc, WithMiddleware("pass", failing), WithLogger(newJSONLogger(buf)))
+				g := n.gateway(t, doc, microgateway.WithMiddleware("pass", failing), microgateway.WithLogger(newJSONLogger(buf)))
 				before := g.Config()
-				stateLen := g.state.Len()
+				stateLen := inspect(g).StateEntries
 				s0, f0, u0 := counters(g)
 
 				var err error
@@ -420,10 +326,10 @@ routes:
 				if s, f, u := counters(g); s != s0 || f != f0+1 || u != u0 {
 					t.Fatalf("counters = %v %v %v, want %v %v %v", s, f, u, s0, f0+1, u0)
 				}
-				if got := g.state.Len(); got != stateLen {
+				if got := inspect(g).StateEntries; got != stateLen {
 					t.Fatalf("state entries = %d, want %d", got, stateLen)
 				}
-				if got := g.live.Load(); got != 1 {
+				if got := inspect(g).LiveGenerations; got != 1 {
 					t.Fatalf("live generations = %d, want 1", got)
 				}
 				recs := buf.records(t, "configuration reload failed; previous configuration remains active")
@@ -454,7 +360,7 @@ routes:
 
 	t.Run("missing file", func(t *testing.T) {
 		be := n.serve(t, echoHandler("ok"))
-		g := n.gateway(t, base(be.URL), WithMiddleware("pass", failing))
+		g := n.gateway(t, base(be.URL), microgateway.WithMiddleware("pass", failing))
 		err := g.ReloadFile(filepath.Join(t.TempDir(), "missing.yaml"))
 		if err == nil {
 			t.Fatal("ReloadFile of a missing file returned nil")
@@ -476,7 +382,7 @@ func TestReloadNilAndClosed(t *testing.T) {
 	n := newMemNetwork()
 	be := n.serve(t, echoHandler("x"))
 	doc := passDoc(be.URL)
-	g := n.gateway(t, doc, WithMiddleware("pass", func(MiddlewareParams) (Middleware, error) {
+	g := n.gateway(t, doc, microgateway.WithMiddleware("pass", func(microgateway.MiddlewareParams) (microgateway.Middleware, error) {
 		return identityMiddleware, nil
 	}))
 	cfg, err := config.Parse([]byte(doc))
@@ -498,16 +404,16 @@ func TestReloadNilAndClosed(t *testing.T) {
 	if err := g.Close(); err != nil {
 		t.Fatalf("second Close = %v, want nil", err)
 	}
-	if err := g.Reload(cfg); !errors.Is(err, ErrClosed) {
+	if err := g.Reload(cfg); !errors.Is(err, microgateway.ErrClosed) {
 		t.Fatalf("Reload after Close = %v, want ErrClosed", err)
 	}
-	if err := g.ReloadYAML([]byte(doc)); !errors.Is(err, ErrClosed) {
+	if err := g.ReloadYAML([]byte(doc)); !errors.Is(err, microgateway.ErrClosed) {
 		t.Fatalf("ReloadYAML after Close = %v, want ErrClosed", err)
 	}
-	if err := g.ReloadFile(path); !errors.Is(err, ErrClosed) {
+	if err := g.ReloadFile(path); !errors.Is(err, microgateway.ErrClosed) {
 		t.Fatalf("ReloadFile after Close = %v, want ErrClosed", err)
 	}
-	if err := g.WatchFile(context.Background(), path); !errors.Is(err, ErrClosed) {
+	if err := g.WatchFile(context.Background(), path); !errors.Is(err, microgateway.ErrClosed) {
 		t.Fatalf("WatchFile after Close = %v, want ErrClosed", err)
 	}
 
@@ -585,7 +491,7 @@ routes:
 	}
 	hostOld := strings.Replace(be.URL, "http://", "http://user:pw1@", 1)
 	hostNew := strings.Replace(be.URL, "http://", "http://user:pw2@", 1)
-	g := n.gateway(t, doc(hostOld), WithLogger(newJSONLogger(buf)))
+	g := n.gateway(t, doc(hostOld), microgateway.WithLogger(newJSONLogger(buf)))
 
 	if err := g.ReloadYAML([]byte(doc(hostNew))); err != nil {
 		t.Fatal(err)
@@ -605,7 +511,7 @@ func TestReloadConcurrent(t *testing.T) {
 	var mu sync.Mutex
 	var gens []string
 	var inBuild atomic.Int64
-	factory := func(p MiddlewareParams) (Middleware, error) {
+	factory := func(p microgateway.MiddlewareParams) (microgateway.Middleware, error) {
 		if inBuild.Add(1) != 1 {
 			t.Error("concurrent middleware factory call")
 		}
@@ -660,7 +566,7 @@ routes:
 	}
 	invalidFile := writeConfig(t, t.TempDir(), invalid)
 
-	g := n.gateway(t, docs[0], WithMiddleware("gen", factory))
+	g := n.gateway(t, docs[0], microgateway.WithMiddleware("gen", factory))
 
 	var wg sync.WaitGroup
 	for id := range 16 {
@@ -713,7 +619,7 @@ func TestFactoriesFixedAtNew(t *testing.T) {
 	be := n.serve(t, echoHandler("f"))
 	be2 := n.serve(t, echoHandler("f2"))
 	var calls atomic.Int64
-	tag := func(MiddlewareParams) (Middleware, error) {
+	tag := func(microgateway.MiddlewareParams) (microgateway.Middleware, error) {
 		calls.Add(1)
 		return identityMiddleware, nil
 	}
@@ -733,7 +639,7 @@ routes:
     middlewares: [m1, m2]
 `, url, typ, typ)
 	}
-	g := n.gateway(t, doc(be.URL, "tag"), WithMiddleware("tag", tag))
+	g := n.gateway(t, doc(be.URL, "tag"), microgateway.WithMiddleware("tag", tag))
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("factory calls after New = %d, want 2", got)
 	}
@@ -884,7 +790,7 @@ routes:
     upstream: up
 `, be.URL)
 	docNew := docOld + "  - name: extra\n    match:\n      path: /extra\n    upstream: up\n"
-	g := n.gateway(t, docOld, WithLogger(newJSONLogger(buf)))
+	g := n.gateway(t, docOld, microgateway.WithLogger(newJSONLogger(buf)))
 
 	if err := g.ReloadYAML([]byte(docNew)); err != nil {
 		t.Fatal(err)
@@ -951,5 +857,141 @@ func TestNewIsNotAReload(t *testing.T) {
 		strconv.FormatFloat(float64(t0.Unix()), 'g', -1, 64)
 	if !metricsHasLine(metricsText(t, g), line) {
 		t.Fatalf("timestamp line %q missing after New", line)
+	}
+}
+
+func watchDoc(backendURL, route string) string {
+	return "version: 1\n" + listenersYAML + fmt.Sprintf(`upstreams:
+  - name: up
+    hosts:
+      - url: %q
+routes:
+  - name: r
+    match:
+      path: %s
+    upstream: up
+`, backendURL, route)
+}
+
+func TestWatchFileMissingPath(t *testing.T) {
+	n := newMemNetwork()
+	be := n.serve(t, echoHandler("m"))
+	g := n.gateway(t, watchDoc(be.URL, "/x"))
+	done := make(chan error, 1)
+	go func() {
+		done <- g.WatchFile(context.Background(), filepath.Join(t.TempDir(), "missing.yaml"))
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("WatchFile of a missing path returned nil")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("WatchFile did not return for a missing path")
+	}
+}
+
+func TestWatchFilePicksUpEarlierChange(t *testing.T) {
+	n := newMemNetwork()
+	beA := n.serve(t, echoHandler("A"))
+	beB := n.serve(t, echoHandler("B"))
+	g := n.gateway(t, watchDoc(beA.URL, "/x"))
+	path := writeConfig(t, t.TempDir(), watchDoc(beB.URL, "/x"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- g.WatchFile(ctx, path) }()
+
+	eventually(t, func() bool { return servedBy(g, "/x") == "B" })
+	cancel()
+	if err := awaitWatch(t, done); err != nil {
+		t.Fatalf("WatchFile = %v, want nil", err)
+	}
+}
+
+func TestWatchFileCancel(t *testing.T) {
+	n := newMemNetwork()
+	be := n.serve(t, echoHandler("c"))
+	g := n.gateway(t, watchDoc(be.URL, "/x"))
+	path := writeConfig(t, t.TempDir(), watchDoc(be.URL, "/x"))
+	base := runtime.NumGoroutine()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- g.WatchFile(ctx, path) }()
+	eventually(t, func() bool {
+		_, _, u := counters(g)
+		return u == 1
+	})
+
+	cancel()
+	if err := awaitWatch(t, done); err != nil {
+		t.Fatalf("WatchFile after cancel = %v, want nil", err)
+	}
+	eventually(t, func() bool { return runtime.NumGoroutine() <= base })
+}
+
+func TestWatchFileReturnsErrClosed(t *testing.T) {
+	n := newMemNetwork()
+	beA := n.serve(t, echoHandler("A"))
+	beB := n.serve(t, echoHandler("B"))
+	g := n.gateway(t, watchDoc(beA.URL, "/x"))
+	dir := t.TempDir()
+	path := writeConfig(t, dir, watchDoc(beA.URL, "/x"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- g.WatchFile(ctx, path) }()
+	eventually(t, func() bool {
+		_, _, u := counters(g)
+		return u == 1
+	})
+
+	if err := g.Close(); err != nil {
+		t.Fatal(err)
+	}
+	writeConfig(t, dir, watchDoc(beB.URL, "/x"))
+	if err := awaitWatch(t, done); !errors.Is(err, microgateway.ErrClosed) {
+		t.Fatalf("WatchFile = %v, want ErrClosed", err)
+	}
+}
+
+func TestWatchFileAtomicRename(t *testing.T) {
+	n := newMemNetwork()
+	be := n.serve(t, echoHandler("ok"))
+	dir := t.TempDir()
+	path := writeConfig(t, dir, watchDoc(be.URL, "/v0"))
+	g := n.gateway(t, watchDoc(be.URL, "/v0"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- g.WatchFile(ctx, path) }()
+	eventually(t, func() bool {
+		_, _, u := counters(g)
+		return u == 1
+	})
+
+	tmp := filepath.Join(dir, "config.yaml.tmp")
+	for i := 1; i <= 5; i++ {
+		route := fmt.Sprintf("/v%d", i)
+		if err := os.WriteFile(tmp, []byte(watchDoc(be.URL, route)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(tmp, path); err != nil {
+			t.Fatal(err)
+		}
+		eventually(t, func() bool { return servedBy(g, route) == "ok" })
+		if s, _, _ := counters(g); s != float64(i) {
+			t.Fatalf("success after rename %d = %v, want %d", i, s, i)
+		}
+	}
+
+	cancel()
+	if err := awaitWatch(t, done); err != nil {
+		t.Fatalf("WatchFile = %v, want nil", err)
 	}
 }

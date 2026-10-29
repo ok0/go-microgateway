@@ -1,8 +1,7 @@
-package microgateway
+package e2e
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/upstream"
@@ -27,19 +27,6 @@ func bkGet(t *testing.T, client *http.Client, url string, want int) []byte {
 		t.Fatalf("GET %s status = %d, want %d; body %q", url, code, want, body)
 	}
 	return body
-}
-
-func bkCircuitOpen(t *testing.T, body []byte) {
-	t.Helper()
-	var e struct {
-		Error apiError `json:"error"`
-	}
-	if err := json.Unmarshal(body, &e); err != nil {
-		t.Fatal(err)
-	}
-	if e.Error.Status != http.StatusServiceUnavailable || e.Error.Code != "circuit_open" || !hexID.MatchString(e.Error.RequestID) {
-		t.Fatalf("body = %s, want 503 circuit_open with request_id", body)
-	}
 }
 
 func bkCheckBreaker(t *testing.T, scope, state string, got *upstream.BreakerStatus, want upstream.BreakerStatus) {
@@ -55,12 +42,12 @@ func bkCheckBreaker(t *testing.T, scope, state string, got *upstream.BreakerStat
 	}
 }
 
-func bkGauge(t *testing.T, g *Gateway, host string) float64 {
+func bkGauge(t *testing.T, g *microgateway.Gateway, host string) float64 {
 	t.Helper()
 	return rsMetric(t, g, "microgateway_circuit_breaker_state", "upstream", "up", "host", host)
 }
 
-func bkTransitions(t *testing.T, g *Gateway, host, from, to string) float64 {
+func bkTransitions(t *testing.T, g *microgateway.Gateway, host, from, to string) float64 {
 	t.Helper()
 	return rsMetric(t, g, "microgateway_circuit_breaker_transitions_total", "upstream", "up", "host", host, "from", from, "to", to)
 }
@@ -102,7 +89,7 @@ func runBreakerOpenClose(t *testing.T, n testNetwork) {
 		}
 		fail(seq, w, r)
 	})
-	g := n.gateway(t, rsDoc{hosts: []string{be.URL}, breaker: rsBreaker}.yaml(), withClock(fake), WithLogger(slog.New(logs)))
+	g := n.gateway(t, rsDoc{hosts: []string{be.URL}, breaker: rsBreaker}.yaml(), withClock(fake), microgateway.WithLogger(slog.New(logs)))
 	ts := n.serve(t, g)
 	client := n.client(t, nil)
 	host := be.srv.Addr
@@ -400,7 +387,7 @@ func TestBreakerCredentialsRedacted(t *testing.T) {
 	logs := &captureHandler{}
 	be := newRSBackend(t, n, rsStatusSeq(503))
 	hostURL := "http://user:secret@" + be.srv.Addr + "/?token=topsecret"
-	g := n.gateway(t, rsDoc{hosts: []string{hostURL}, breaker: rsBreaker}.yaml(), withClock(fake), WithLogger(slog.New(logs)))
+	g := n.gateway(t, rsDoc{hosts: []string{hostURL}, breaker: rsBreaker}.yaml(), withClock(fake), microgateway.WithLogger(slog.New(logs)))
 	ts := n.serve(t, g)
 	client := n.client(t, nil)
 	for range 3 {

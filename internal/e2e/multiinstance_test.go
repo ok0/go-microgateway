@@ -1,4 +1,4 @@
-package microgateway
+package e2e
 
 import (
 	"encoding/json"
@@ -12,14 +12,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/internal/clock"
 )
 
 const (
-	miTimeouts = "    timeouts:\n      connect: 1h\n      response_header: 1h\n"
-	miRR       = "    load_balancer:\n      algorithm: round_robin\n"
-	miPassive  = "    passive_health:\n      consecutive_failures: 2\n      base_ejection_time: 30s\n      max_ejection_time: 120s\n"
-	miActive   = "    active_health:\n      path: /health\n      interval: 10s\n      timeout: 2s\n      jitter: 0\n      healthy_threshold: 2\n      unhealthy_threshold: 3\n"
+	miActive = "    active_health:\n      path: /health\n      interval: 10s\n      timeout: 2s\n      jitter: 0\n      healthy_threshold: 2\n      unhealthy_threshold: 3\n"
 )
 
 func miDoc(upstreamBody string, hosts []string) string {
@@ -33,7 +31,7 @@ func miDoc(upstreamBody string, hosts []string) string {
 	return doc + "routes:\n  - name: all\n    upstream: up\n"
 }
 
-func miActiveChecks(t *testing.T, gs ...*Gateway) func() float64 {
+func miActiveChecks(t *testing.T, gs ...*microgateway.Gateway) func() float64 {
 	return func() float64 {
 		var sum float64
 		for _, g := range gs {
@@ -52,7 +50,7 @@ func miActiveChecks(t *testing.T, gs ...*Gateway) func() float64 {
 	}
 }
 
-func miHostURLs(t *testing.T, g *Gateway) []string {
+func miHostURLs(t *testing.T, g *microgateway.Gateway) []string {
 	t.Helper()
 	var out []string
 	for _, h := range upstreamStatus(t, g, "up").Hosts {
@@ -106,13 +104,13 @@ func TestInstancesIsolateEjection(t *testing.T) {
 	if !xA.Ejected {
 		t.Fatal("host x not ejected on A")
 	}
-	for _, g := range []*Gateway{gB, gC} {
+	for _, g := range []*microgateway.Gateway{gB, gC} {
 		if h := hostByURL(upstreamStatus(t, g, "up"), x.URL); h.Ejected || h.EjectionCount != 0 {
 			t.Fatalf("host x ejected=%v ejection_count=%d, want not ejected", h.Ejected, h.EjectionCount)
 		}
 	}
 
-	for _, g := range []*Gateway{gB, gC} {
+	for _, g := range []*microgateway.Gateway{gB, gC} {
 		before := xHits.Load()
 		for i := range 30 {
 			if code, _ := balDo(g, httptest.NewRequest(http.MethodGet, "/", nil)); code != http.StatusOK {
@@ -239,7 +237,7 @@ func TestEachInstanceProbes(t *testing.T) {
 	doc := miDoc(miTimeouts+miRR+miActive, []string{h1.URL, h2.URL})
 
 	fake := clock.NewFake(time.Unix(0, 0))
-	gs := []*Gateway{
+	gs := []*microgateway.Gateway{
 		n.gateway(t, doc, withClock(fake)),
 		n.gateway(t, doc, withClock(fake)),
 		n.gateway(t, doc, withClock(fake)),

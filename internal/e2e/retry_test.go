@@ -1,4 +1,4 @@
-package microgateway
+package e2e
 
 import (
 	"bufio"
@@ -15,18 +15,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/internal/clock"
 )
 
 type reEnv struct {
-	g      *Gateway
+	g      *microgateway.Gateway
 	s      *testServer
 	client *http.Client
 }
 
-func reServe(t *testing.T, n testNetwork, fake *clock.Fake, doc rsDoc, opts ...Option) reEnv {
+func reServe(t *testing.T, n testNetwork, fake *clock.Fake, doc rsDoc, opts ...microgateway.Option) reEnv {
 	t.Helper()
-	opts = append([]Option{withClock(fake)}, opts...)
+	opts = append([]microgateway.Option{withClock(fake)}, opts...)
 	g := n.gateway(t, doc.yaml(), opts...)
 	return reEnv{g: g, s: n.serve(t, g), client: n.client(t, nil)}
 }
@@ -109,7 +110,7 @@ func reAwait(t *testing.T, ch <-chan reResult) reResult {
 	return reResult{}
 }
 
-func reAssertIdle(t *testing.T, g *Gateway) {
+func reAssertIdle(t *testing.T, g *microgateway.Gateway) {
 	t.Helper()
 	eventually(t, func() bool {
 		for _, h := range rsStatus(t, g).Hosts {

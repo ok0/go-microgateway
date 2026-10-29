@@ -1,7 +1,8 @@
-package microgateway
+package e2e
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,30 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/internal/leakcheck"
 )
-
-func gwWith(t *testing.T, doc string, opts ...Option) *Gateway {
-	t.Helper()
-	g, err := NewFromYAML([]byte(doc), opts...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = g.Close() })
-	return g
-}
-
-func routeDoc(backendURL, routeExtra string) string {
-	return "version: 1\n" + listenersYAML + fmt.Sprintf(`upstreams:
-  - name: up
-    hosts:
-      - url: %q
-routes:
-  - name: all
-    upstream: up
-`, backendURL) + routeExtra
-}
 
 type tagRecorder struct {
 	mu   sync.Mutex
@@ -60,7 +40,7 @@ func (r *tagRecorder) get() []string {
 func TestUserMiddlewareOrder(t *testing.T) {
 	be := backend(t, "b")
 	rec := &tagRecorder{}
-	tag := func(p MiddlewareParams) (Middleware, error) {
+	tag := func(p microgateway.MiddlewareParams) (microgateway.Middleware, error) {
 		var c struct {
 			Label string `yaml:"label"`
 		}
@@ -88,7 +68,7 @@ func TestUserMiddlewareOrder(t *testing.T) {
     params:
       label: "2"
 `
-	g := gwWith(t, doc, WithMiddleware("tag", tag))
+	g := gwWith(t, doc, microgateway.WithMiddleware("tag", tag))
 	serve(t, g, httptest.NewRequest(http.MethodGet, "/x", nil))
 	if got, want := rec.get(), []string{"1 nodeadline", "2 nodeadline"}; !slices.Equal(got, want) {
 		t.Fatalf("order = %v, want %v", got, want)
@@ -97,7 +77,7 @@ func TestUserMiddlewareOrder(t *testing.T) {
 
 func TestUserMiddlewareDecodeError(t *testing.T) {
 	be := backend(t, "b")
-	tag := func(p MiddlewareParams) (Middleware, error) {
+	tag := func(p microgateway.MiddlewareParams) (microgateway.Middleware, error) {
 		var c struct {
 			Label string `yaml:"label"`
 		}
@@ -113,7 +93,7 @@ func TestUserMiddlewareDecodeError(t *testing.T) {
       label: x
       bogus: 1
 `
-	_, err := NewFromYAML([]byte(doc), WithMiddleware("tag", tag))
+	_, err := microgateway.NewFromYAML([]byte(doc), microgateway.WithMiddleware("tag", tag))
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -126,16 +106,16 @@ func TestUserMiddlewareDecodeError(t *testing.T) {
 
 func TestNewMiddlewareErrors(t *testing.T) {
 	be := backend(t, "b")
-	ok := func(p MiddlewareParams) (Middleware, error) {
+	ok := func(p microgateway.MiddlewareParams) (microgateway.Middleware, error) {
 		return func(next http.Handler) http.Handler { return next }, nil
 	}
-	failing := func(p MiddlewareParams) (Middleware, error) {
+	failing := func(p microgateway.MiddlewareParams) (microgateway.Middleware, error) {
 		return nil, errors.New("factory refused the params")
 	}
 	cases := []struct {
 		name string
 		doc  string
-		opts []Option
+		opts []microgateway.Option
 		want []string
 	}{
 		{
@@ -146,25 +126,25 @@ func TestNewMiddlewareErrors(t *testing.T) {
 		{
 			name: "factory error",
 			doc:  routeDoc(be.URL, "    middlewares: [m]\n") + "middlewares:\n  - name: m\n    type: x\n",
-			opts: []Option{WithMiddleware("x", failing)},
+			opts: []microgateway.Option{microgateway.WithMiddleware("x", failing)},
 			want: []string{"middlewares[0]", "factory refused the params"},
 		},
 		{
 			name: "duplicate registration",
 			doc:  routeDoc(be.URL, ""),
-			opts: []Option{WithMiddleware("x", ok), WithMiddleware("x", ok)},
+			opts: []microgateway.Option{microgateway.WithMiddleware("x", ok), microgateway.WithMiddleware("x", ok)},
 			want: []string{`WithMiddleware("x")`, "already registered"},
 		},
 		{
 			name: "built-in collision",
 			doc:  routeDoc(be.URL, ""),
-			opts: []Option{WithMiddleware("cors", ok)},
+			opts: []microgateway.Option{microgateway.WithMiddleware("cors", ok)},
 			want: []string{"built in"},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := NewFromYAML([]byte(tc.doc), tc.opts...)
+			_, err := microgateway.NewFromYAML([]byte(tc.doc), tc.opts...)
 			if err == nil {
 				t.Fatal("expected an error")
 			}
@@ -180,7 +160,7 @@ func TestNewMiddlewareErrors(t *testing.T) {
 func TestRecoverUserMiddlewarePanic(t *testing.T) {
 	be := backend(t, "b")
 	var fired atomic.Bool
-	boom := func(p MiddlewareParams) (Middleware, error) {
+	boom := func(p microgateway.MiddlewareParams) (microgateway.Middleware, error) {
 		return func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if fired.CompareAndSwap(false, true) {
@@ -191,7 +171,7 @@ func TestRecoverUserMiddlewarePanic(t *testing.T) {
 		}, nil
 	}
 	doc := routeDoc(be.URL, "    middlewares: [m]\n") + "middlewares:\n  - name: m\n    type: boom\n"
-	g := gwWith(t, doc, WithMiddleware("boom", boom))
+	g := gwWith(t, doc, microgateway.WithMiddleware("boom", boom))
 
 	rec := httptest.NewRecorder()
 	g.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
@@ -214,7 +194,7 @@ func TestRecoverUserMiddlewarePanic(t *testing.T) {
 func TestAbortHandlerNotSwallowed(t *testing.T) {
 	be := backend(t, "b")
 	var fired atomic.Bool
-	abort := func(p MiddlewareParams) (Middleware, error) {
+	abort := func(p microgateway.MiddlewareParams) (microgateway.Middleware, error) {
 		return func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if fired.CompareAndSwap(false, true) {
@@ -225,7 +205,7 @@ func TestAbortHandlerNotSwallowed(t *testing.T) {
 		}, nil
 	}
 	doc := routeDoc(be.URL, "    middlewares: [m]\n") + "middlewares:\n  - name: m\n    type: abort\n"
-	g := gwWith(t, doc, WithMiddleware("abort", abort))
+	g := gwWith(t, doc, microgateway.WithMiddleware("abort", abort))
 	ts := httptest.NewServer(g)
 	t.Cleanup(ts.Close)
 
@@ -305,17 +285,17 @@ func TestRouteTimeoutSSE(t *testing.T) {
 func TestIdentityFromContextFalse(t *testing.T) {
 	be := backend(t, "b")
 	var observed []bool
-	probe := func(p MiddlewareParams) (Middleware, error) {
+	probe := func(p microgateway.MiddlewareParams) (microgateway.Middleware, error) {
 		return func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_, ok := IdentityFromContext(r.Context())
+				_, ok := microgateway.IdentityFromContext(r.Context())
 				observed = append(observed, ok)
 				next.ServeHTTP(w, r)
 			})
 		}, nil
 	}
 	doc := routeDoc(be.URL, "    middlewares: [p]\n") + "middlewares:\n  - name: p\n    type: probe\n"
-	g := gwWith(t, doc, WithMiddleware("probe", probe))
+	g := gwWith(t, doc, microgateway.WithMiddleware("probe", probe))
 	serve(t, g, httptest.NewRequest(http.MethodGet, "/x", nil))
 	if !slices.Equal(observed, []bool{false}) {
 		t.Fatalf("identity observed = %v, want [false]", observed)
@@ -331,97 +311,10 @@ func assertNoSecretForms(t *testing.T, text, secret string) {
 	}
 }
 
-func TestUserMiddlewareParamsSecret(t *testing.T) {
-	const secret = "mt-LEAK-3c9"
-	env := WithEnvLookup(func(k string) (string, bool) {
-		if k == "MW_TOKEN" {
-			return secret, true
-		}
-		return "", false
-	})
-	be := backend(t, "b")
-	passthrough := func(next http.Handler) http.Handler { return next }
-
-	t.Run("factory decodes secret", func(t *testing.T) {
-		var revealed bool
-		factory := func(p MiddlewareParams) (Middleware, error) {
-			var c struct {
-				Token config.Secret `yaml:"token"`
-				N     int           `yaml:"n"`
-			}
-			if err := p.Decode(&c); err != nil {
-				return nil, err
-			}
-			revealed = c.Token.Reveal() == secret && c.N == 2
-			return passthrough, nil
-		}
-		doc := routeDoc(be.URL, "    middlewares: [m]\n") + "middlewares:\n  - name: m\n    type: tok\n    params:\n      token: \"${MW_TOKEN}\"\n      n: 2\n"
-		g := gwWith(t, doc, WithMiddleware("tok", factory), env)
-		if !revealed {
-			t.Fatal("factory did not receive the revealed token and integer")
-		}
-		out, err := json.Marshal(g.Config().Redacted())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(string(out), "token") {
-			t.Fatalf("redacted config %s does not contain the param key", out)
-		}
-		assertNoSecretForms(t, string(out), secret)
-	})
-
-	t.Run("type mismatch error is value-free", func(t *testing.T) {
-		factory := func(p MiddlewareParams) (Middleware, error) {
-			var c struct {
-				N int `yaml:"n"`
-			}
-			if err := p.Decode(&c); err != nil {
-				return nil, err
-			}
-			return passthrough, nil
-		}
-		doc := routeDoc(be.URL, "    middlewares: [m]\n") + "middlewares:\n  - name: m\n    type: tok\n    params:\n      n: \"${MW_TOKEN}\"\n"
-		_, err := NewFromYAML([]byte(doc), WithMiddleware("tok", factory), env)
-		if err == nil {
-			t.Fatal("expected an error")
-		}
-		if !strings.Contains(err.Error(), "middlewares[0]") {
-			t.Fatalf("error %q does not contain %q", err, "middlewares[0]")
-		}
-		assertNoSecretForms(t, err.Error(), secret)
-	})
-
-	t.Run("factory error is scrubbed", func(t *testing.T) {
-		factory := func(p MiddlewareParams) (Middleware, error) {
-			var c struct {
-				Token config.Secret `yaml:"token"`
-			}
-			if err := p.Decode(&c); err != nil {
-				return nil, err
-			}
-			tok := c.Token.Reveal()
-			return nil, fmt.Errorf("bad token %s / %x", tok, tok)
-		}
-		doc := routeDoc(be.URL, "    middlewares: [m]\n") + "middlewares:\n  - name: m\n    type: tok\n    params:\n      token: \"${MW_TOKEN}\"\n"
-		_, err := NewFromYAML([]byte(doc), WithMiddleware("tok", factory), env)
-		if err == nil {
-			t.Fatal("expected an error")
-		}
-		if !strings.Contains(err.Error(), "REDACTED") {
-			t.Fatalf("error %q does not contain REDACTED", err)
-		}
-		assertNoSecretForms(t, err.Error(), secret)
-	})
-
-	t.Run("formatted params hide secret", func(t *testing.T) {
-		leakcheck.Check(t, "MiddlewareParams", MiddlewareParams{Name: "m", Type: "t", params: config.NewSecretParams(map[string]any{"token": secret})}, secret)
-	})
-}
-
 func TestRouteHeaderSecretsNeverSurface(t *testing.T) {
 	const secret = "rh-LEAK-2a4"
 	be := backend(t, "b")
-	env := WithEnvLookup(func(k string) (string, bool) {
+	env := microgateway.WithEnvLookup(func(k string) (string, bool) {
 		if k == "UP_TOKEN" {
 			return secret, true
 		}
@@ -435,7 +328,7 @@ func TestRouteHeaderSecretsNeverSurface(t *testing.T) {
 		t.Fatal("backend did not receive the substituted Authorization header")
 	}
 
-	out, err := json.Marshal(adminSource{g}.RedactedConfig())
+	out, err := json.Marshal(g.Config().Redacted())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -443,4 +336,160 @@ func TestRouteHeaderSecretsNeverSurface(t *testing.T) {
 		t.Fatalf("redacted config %s does not contain the header name", out)
 	}
 	assertNoSecretForms(t, string(out), secret)
+}
+
+func counterBackend(t *testing.T) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	var hits atomic.Int64
+	be := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, "{}\n")
+	}))
+	t.Cleanup(be.Close)
+	return be, &hits
+}
+
+func builtinDoc(backendURL, mw, params string) string {
+	return routeDoc(backendURL, "    middlewares: [b]\n") + "middlewares:\n  - name: b\n    type: " + mw + "\n" + params
+}
+
+func TestCORSThroughGateway(t *testing.T) {
+	be, hits := counterBackend(t)
+	g := gwWith(t, builtinDoc(be.URL, "cors", "    params:\n      allowed_origins: [\"https://app.example.com\"]\n"))
+	ts := httptest.NewServer(g)
+	t.Cleanup(ts.Close)
+
+	preflight := func(origin string) int {
+		req, err := http.NewRequest(http.MethodOptions, ts.URL+"/x", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Access-Control-Request-Method", "GET")
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	if code := preflight("https://app.example.com"); code != http.StatusNoContent {
+		t.Fatalf("allowed preflight status = %d, want 204", code)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("backend hits after allowed preflight = %d, want 0", n)
+	}
+	if code := preflight("https://evil.example.com"); code != http.StatusForbidden {
+		t.Fatalf("denied preflight status = %d, want 403", code)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("backend hits after denied preflight = %d, want 0", n)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/x", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Origin", "https://app.example.com")
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("actual status = %d, want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
+		t.Fatalf("Access-Control-Allow-Origin = %q", got)
+	}
+	if !strings.Contains(resp.Header.Get("Vary"), "Origin") {
+		t.Fatalf("Vary = %q, want Origin", resp.Header.Get("Vary"))
+	}
+}
+
+func TestCredentialsWildcardRejected(t *testing.T) {
+	be, _ := counterBackend(t)
+	doc := builtinDoc(be.URL, "cors", "    params:\n      allowed_origins: [\"*\"]\n      allow_credentials: true\n")
+	_, err := microgateway.NewFromYAML([]byte(doc))
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "middlewares[0].params.allow_credentials") {
+		t.Fatalf("error %q does not name middlewares[0].params.allow_credentials", err)
+	}
+}
+
+func TestSizeLimitThroughGateway(t *testing.T) {
+	be, hits := counterBackend(t)
+	g := gwWith(t, builtinDoc(be.URL, "request_size_limit", "    params:\n      max_bytes: 16\n"))
+
+	rec := httptest.NewRecorder()
+	g.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(strings.Repeat("a", 17))))
+	resp := rec.Result()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("content-length status = %d, want 413", resp.StatusCode)
+	}
+	decodeErr(t, resp)
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("backend hits = %d, want 0", n)
+	}
+
+	ts := httptest.NewServer(g)
+	t.Cleanup(ts.Close)
+	pr, pw := io.Pipe()
+	go func() {
+		_, _ = pw.Write(bytes.Repeat([]byte("b"), 64<<10))
+		_ = pw.Close()
+	}()
+	chunked, err := http.NewRequest(http.MethodPost, ts.URL+"/x", pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunked.ContentLength = -1
+	resp, err = ts.Client().Do(chunked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("chunked status = %d, want 413", resp.StatusCode)
+	}
+	if e := decodeErr(t, resp); e.Code != "payload_too_large" {
+		t.Fatalf("code = %q, want payload_too_large", e.Code)
+	}
+
+	before := hits.Load()
+	small := httptest.NewRecorder()
+	g.ServeHTTP(small, httptest.NewRequest(http.MethodPost, "/x", strings.NewReader("12345678")))
+	if small.Code != http.StatusOK {
+		t.Fatalf("small body status = %d, want 200", small.Code)
+	}
+	if n := hits.Load() - before; n != 1 {
+		t.Fatalf("backend hits for small body = %d, want 1", n)
+	}
+}
+
+func TestHeadersThroughGateway(t *testing.T) {
+	be := backend(t, "b")
+	doc := routeDoc(be.URL, "    middlewares: [hdrs]\n    request_headers:\n      set:\n        X-Mw: route\n") + `middlewares:
+  - name: hdrs
+    type: headers
+    params:
+      request:
+        set:
+          X-Mw: "1"
+      response:
+        set:
+          X-Resp: mw
+`
+	g := gwWith(t, doc)
+	resp, e := serve(t, g, httptest.NewRequest(http.MethodGet, "/x", nil))
+	if got := e.Headers.Get("X-Mw"); got != "route" {
+		t.Fatalf("backend X-Mw = %q, want route", got)
+	}
+	if got := resp.Header.Get("X-Resp"); got != "mw" {
+		t.Fatalf("response X-Resp = %q, want mw", got)
+	}
 }
