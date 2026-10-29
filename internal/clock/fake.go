@@ -1,6 +1,7 @@
 package clock
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -163,6 +164,26 @@ func (f *Fake) BlockUntilDue(n int, within time.Duration) {
 	for f.dueLocked(within) < n {
 		f.cond.Wait()
 	}
+}
+
+// WaitDue blocks until at least n pending waiters are due within the given duration of fake time or ctx ends.
+// It returns nil in the first case and ctx.Err() in the second.
+func (f *Fake) WaitDue(ctx context.Context, n int, within time.Duration) error {
+	stop := context.AfterFunc(ctx, func() {
+		f.mu.Lock()
+		f.cond.Broadcast()
+		f.mu.Unlock()
+	})
+	defer stop()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for f.dueLocked(within) < n {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		f.cond.Wait()
+	}
+	return nil
 }
 
 // Waiters returns the number of pending After channels, active tickers and pending AfterFunc timers.
