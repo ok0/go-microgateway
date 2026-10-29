@@ -5,10 +5,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand/v2"
 	"net/http"
 	"runtime"
+	"runtime/pprof"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,17 +21,116 @@ import (
 	"github.com/ok0/go-microgateway/internal/clock"
 )
 
+// reGuardLimit bounds waits whose event is already certain: every fake-clock step has been taken and no gateway
+// wall-clock timer is involved. Reaching it means a hang.
+const reGuardLimit = 2 * time.Minute
+
+// reGuard returns the hang-guard duration for a wait in t: reGuardLimit, lowered to end 5 s before t's deadline.
+func reGuard(t *testing.T) time.Duration {
+	d := reGuardLimit
+	if deadline, ok := t.Deadline(); ok {
+		if left := time.Until(deadline) - 5*time.Second; left < d {
+			d = left
+		}
+	}
+	return max(d, time.Second)
+}
+
+// reHang fails t because what was not observed within guard, reporting state and every goroutine.
+func reHang(t *testing.T, what string, guard time.Duration, state string) {
+	t.Helper()
+	var b bytes.Buffer
+	_ = pprof.Lookup("goroutine").WriteTo(&b, 1)
+	t.Fatalf("hang guard: %s not observed within %v\nstate: %s\ngoroutines:\n%s", what, guard, state, b.String())
+}
+
+// reRecv receives from ch and fails t through reHang when the hang guard expires first. state is evaluated only then.
+func reRecv[T any](t *testing.T, what string, ch <-chan T, state func() string) (T, bool) {
+	t.Helper()
+	guard := reGuard(t)
+	timer := time.NewTimer(guard)
+	defer timer.Stop()
+	select {
+	case v, ok := <-ch:
+		return v, ok
+	case <-timer.C:
+	}
+	reHang(t, what, guard, state())
+	var zero T
+	return zero, false
+}
+
+// reTracker counts the requests that h is serving and closes idle each time the count returns to zero.
+type reTracker struct {
+	h      http.Handler
+	mu     sync.Mutex
+	active int
+	idle   chan struct{}
+}
+
+func (tr *reTracker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	tr.mu.Lock()
+	if tr.active == 0 {
+		tr.idle = make(chan struct{})
+	}
+	tr.active++
+	tr.mu.Unlock()
+	defer func() {
+		tr.mu.Lock()
+		defer tr.mu.Unlock()
+		tr.active--
+		if tr.active == 0 {
+			close(tr.idle)
+			tr.idle = nil
+		}
+	}()
+	tr.h.ServeHTTP(w, r)
+}
+
+// idleCh returns a channel that is closed once no request is being served.
+func (tr *reTracker) idleCh() <-chan struct{} {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	if tr.active == 0 {
+		closed := make(chan struct{})
+		close(closed)
+		return closed
+	}
+	return tr.idle
+}
+
+func (tr *reTracker) inProgress() int {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	return tr.active
+}
+
 type reEnv struct {
 	g      *microgateway.Gateway
 	s      *testServer
 	client *http.Client
+	fake   *clock.Fake
+	gw     *reTracker
 }
 
 func reServe(t *testing.T, n testNetwork, fake *clock.Fake, doc rsDoc, opts ...microgateway.Option) reEnv {
 	t.Helper()
 	opts = append([]microgateway.Option{withClock(fake)}, opts...)
 	g := n.gateway(t, doc.yaml(), opts...)
-	return reEnv{g: g, s: n.serve(t, g), client: n.client(t, nil)}
+	tr := &reTracker{h: g}
+	return reEnv{g: g, s: n.serve(t, tr), client: n.client(t, nil), fake: fake, gw: tr}
+}
+
+// state describes the fake clock, the gateway's requests in progress and each host's in-flight count.
+func (e reEnv) state(t *testing.T) string {
+	t.Helper()
+	var b strings.Builder
+	fmt.Fprintf(&b, "fake now=%s waiters=%d due(250ms)=%d gateway handlers in progress=%d",
+		e.fake.Now().Format(time.RFC3339Nano), e.fake.Waiters(), e.fake.Due(250*time.Millisecond), e.gw.inProgress())
+	for _, h := range rsStatus(t, e.g).Hosts {
+		fmt.Fprintf(&b, "\n%s in_flight=%d", h.URL, h.InFlight)
+	}
+	return b.String()
 }
 
 func reSingle(hosts []string, extra string) rsDoc {
@@ -37,35 +138,32 @@ func reSingle(hosts []string, extra string) rsDoc {
 }
 
 type reDriver struct {
-	fake   *clock.Fake
-	max    time.Duration
-	done   chan struct{}
+	t      *testing.T
+	cancel context.CancelFunc
 	exited chan struct{}
 }
 
-// reDrive advances the fake clock past each backoff wait of up to max until stop is called.
+// reDrive advances fake by max each time a waiter is due within max, until stop is called. It has no cadence of its
+// own: it advances only while a backoff is due.
 func reDrive(t *testing.T, fake *clock.Fake, max time.Duration) *reDriver {
 	t.Helper()
-	d := &reDriver{fake: fake, max: max, done: make(chan struct{}), exited: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	d := &reDriver{t: t, cancel: cancel, exited: make(chan struct{})}
 	go func() {
 		defer close(d.exited)
-		for {
-			select {
-			case <-d.done:
-				return
-			default:
-			}
-			rsAdvanceBackoff(t, fake, max)
+		for ctx.Err() == nil && fake.WaitDue(ctx, 1, max) == nil {
+			fake.Advance(max)
 		}
 	}()
 	return d
 }
 
 func (d *reDriver) stop() {
-	close(d.done)
-	wake := d.fake.NewTicker(d.max)
-	<-d.exited
-	wake.Stop()
+	d.t.Helper()
+	d.cancel()
+	reRecv(d.t, "fake-clock driver to exit", d.exited, func() string {
+		return "fake-clock driver is inside Advance or WaitDue"
+	})
 }
 
 type reResult struct {
@@ -99,27 +197,126 @@ func reDoAsync(client *http.Client, req *http.Request) <-chan reResult {
 	return ch
 }
 
-func reAwait(t *testing.T, ch <-chan reResult) reResult {
+func reAwait(t *testing.T, env reEnv, ch <-chan reResult) reResult {
 	t.Helper()
-	select {
-	case r := <-ch:
-		return r
-	case <-time.After(5 * time.Second):
-		t.Fatal("request did not finish within 5s")
-	}
-	return reResult{}
+	r, _ := reRecv(t, "request result", ch, func() string { return env.state(t) })
+	return r
 }
 
-func reAssertIdle(t *testing.T, g *microgateway.Gateway) {
+// reGet sends a request through env's client and returns its status, header and body.
+func reGet(t *testing.T, env reEnv, method, path string, body io.Reader, hdr http.Header) (int, http.Header, []byte) {
 	t.Helper()
-	eventually(t, func() bool {
-		for _, h := range rsStatus(t, g).Hosts {
-			if h.InFlight != 0 {
-				return false
-			}
+	req, err := http.NewRequest(method, env.s.URL+path, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range hdr {
+		req.Header[k] = v
+	}
+	r := reAwait(t, env, reDoAsync(env.client, req))
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	return r.code, r.hdr, r.body
+}
+
+// reWaitDue waits until n fake-clock waiters are due within the given duration, and fails t through reHang if that
+// does not happen.
+func reWaitDue(t *testing.T, env reEnv, n int, within time.Duration, what string) {
+	t.Helper()
+	guard := reGuard(t)
+	ctx, cancel := context.WithTimeout(context.Background(), guard)
+	defer cancel()
+	if err := env.fake.WaitDue(ctx, n, within); err != nil {
+		reHang(t, what, guard, env.state(t))
+	}
+}
+
+// reAwaitIdle waits until the gateway has returned from every request handler it started.
+func reAwaitIdle(t *testing.T, env reEnv) {
+	t.Helper()
+	reRecv(t, "gateway handlers to return", env.gw.idleCh(), func() string { return env.state(t) })
+}
+
+// reAssertIdle waits for the gateway to return from every handler and then checks that no host has in-flight requests.
+func reAssertIdle(t *testing.T, env reEnv) {
+	t.Helper()
+	reAwaitIdle(t, env)
+	for _, h := range rsStatus(t, env.g).Hosts {
+		if h.InFlight != 0 {
+			t.Fatalf("host %s in_flight = %d after all gateway handlers returned, want 0", h.URL, h.InFlight)
 		}
-		return true
-	})
+	}
+}
+
+// reAwaitHits waits until be has been hit at least n times.
+func reAwaitHits(t *testing.T, env reEnv, be *rsBackend, n int64) {
+	t.Helper()
+	for {
+		cnt, sig := be.hitSignal()
+		if cnt >= n {
+			return
+		}
+		reRecv(t, fmt.Sprintf("backend hit %d", n), sig, func() string { return env.state(t) })
+	}
+}
+
+// reAwaitGoroutines waits until the goroutine count is at most baseline. Goroutine exits raise no event and the count
+// only converges, so the guard catches leaks, not slowness.
+func reAwaitGoroutines(t *testing.T, env reEnv, baseline int) {
+	t.Helper()
+	guard := reGuard(t)
+	expired := time.NewTimer(guard)
+	defer expired.Stop()
+	poll := time.NewTicker(5 * time.Millisecond)
+	defer poll.Stop()
+	for runtime.NumGoroutine() > baseline {
+		select {
+		case <-expired.C:
+			reHang(t, fmt.Sprintf("goroutines to return to %d", baseline), guard, env.state(t))
+		case <-poll.C:
+		}
+	}
+}
+
+type reStarted struct {
+	resp *http.Response
+	err  error
+}
+
+// reStart runs client.Do(req) in a goroutine and delivers its result.
+func reStart(client *http.Client, req *http.Request) <-chan reStarted {
+	ch := make(chan reStarted, 1)
+	go func() {
+		resp, err := client.Do(req)
+		ch <- reStarted{resp: resp, err: err}
+	}()
+	return ch
+}
+
+type reRead struct {
+	data []byte
+	err  error
+}
+
+// reReadAll runs io.ReadAll(r) in a goroutine and delivers its result.
+func reReadAll(r io.Reader) <-chan reRead {
+	ch := make(chan reRead, 1)
+	go func() {
+		data, err := io.ReadAll(r)
+		ch <- reRead{data: data, err: err}
+	}()
+	return ch
+}
+
+// reRecvLine receives the next line from lines, failing t when the stream ends or the hang guard expires.
+func reRecvLine(t *testing.T, env reEnv, lines <-chan string, what string) string {
+	t.Helper()
+	line, ok := reRecv(t, what, lines, func() string { return env.state(t) })
+	if !ok {
+		t.Fatal("stream ended before the expected line")
+	}
+	return line
 }
 
 func reRandomBytes(size int) []byte {
@@ -159,7 +356,7 @@ func runRetryBasics(t *testing.T, n testNetwork) {
 			env := reServe(t, n, fake, reSingle([]string{be.URL}, "retry: {}"))
 			before := rsMetric(t, env.g, "microgateway_retries_total", "route", "all")
 			d := reDrive(t, fake, 250*time.Millisecond)
-			code, _, body := rsGet(t, env.client, env.s.URL+"/", method, nil, nil)
+			code, _, body := reGet(t, env, method, "/", nil, nil)
 			d.stop()
 			want := "r2"
 			if method == http.MethodHead {
@@ -174,7 +371,7 @@ func runRetryBasics(t *testing.T, n testNetwork) {
 			if got := rsMetric(t, env.g, "microgateway_retries_total", "route", "all") - before; got != 1 {
 				t.Fatalf("retries_total increase = %v, want 1", got)
 			}
-			reAssertIdle(t, env.g)
+			reAssertIdle(t, env)
 		})
 	}
 
@@ -185,7 +382,7 @@ func runRetryBasics(t *testing.T, n testNetwork) {
 		env := reServe(t, n, fake, reSingle([]string{refused.URL, healthy.URL}, "retry: {}"))
 		before := rsMetric(t, env.g, "microgateway_retries_total", "route", "all")
 		d := reDrive(t, fake, 250*time.Millisecond)
-		code, _, _ := rsGet(t, env.client, env.s.URL+"/", http.MethodGet, nil, nil)
+		code, _, _ := reGet(t, env, http.MethodGet, "/", nil, nil)
 		d.stop()
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
@@ -193,7 +390,7 @@ func runRetryBasics(t *testing.T, n testNetwork) {
 		if got := rsMetric(t, env.g, "microgateway_retries_total", "route", "all") - before; got != 1 {
 			t.Fatalf("retries_total increase = %v, want 1", got)
 		}
-		reAssertIdle(t, env.g)
+		reAssertIdle(t, env)
 	})
 
 	t.Run("response header timeout", func(t *testing.T) {
@@ -212,9 +409,10 @@ func runRetryBasics(t *testing.T, n testNetwork) {
 		env := reServe(t, n, fake, doc)
 		d := reDrive(t, fake, 250*time.Millisecond)
 		res := reDoAsync(env.client, reNewGet(t, context.Background(), env.s.URL+"/"))
-		fake.BlockUntilDue(1, 5*time.Second)
+		reWaitDue(t, env, 1, 5*time.Second, "response-header timer armed")
+		reAwaitHits(t, env, be, 1)
 		fake.Advance(5 * time.Second)
-		r := reAwait(t, res)
+		r := reAwait(t, env, res)
 		d.stop()
 		if r.err != nil || r.code != http.StatusOK || string(r.body) != "ok" {
 			t.Fatalf("response = %d %q (err %v), want 200 \"ok\"", r.code, r.body, r.err)
@@ -222,14 +420,14 @@ func runRetryBasics(t *testing.T, n testNetwork) {
 		if got := be.hitCount(); got != 2 {
 			t.Fatalf("hits = %d, want 2", got)
 		}
-		reAssertIdle(t, env.g)
+		reAssertIdle(t, env)
 	})
 
 	t.Run("attempts exhausted", func(t *testing.T) {
 		be := newRSBackend(t, n, rsStatusSeq(503))
 		env := reServe(t, n, fake, reSingle([]string{be.URL}, "retry:\n      attempts: 3\n"))
 		d := reDrive(t, fake, 250*time.Millisecond)
-		code, hdr, body := rsGet(t, env.client, env.s.URL+"/", http.MethodGet, nil, nil)
+		code, hdr, body := reGet(t, env, http.MethodGet, "/", nil, nil)
 		d.stop()
 		if code != http.StatusServiceUnavailable || string(body) != "r3" || hdr.Get("X-Attempt") != "3" {
 			t.Fatalf("response = %d %q X-Attempt=%q, want 503 \"r3\" X-Attempt=3", code, body, hdr.Get("X-Attempt"))
@@ -237,7 +435,7 @@ func runRetryBasics(t *testing.T, n testNetwork) {
 		if got := be.hitCount(); got != 3 {
 			t.Fatalf("hits = %d, want 3", got)
 		}
-		reAssertIdle(t, env.g)
+		reAssertIdle(t, env)
 	})
 }
 
@@ -252,7 +450,7 @@ func TestRetryConnectFailureSameHost(t *testing.T) {
 	n.failDials(t, be.srv, 1)
 	env := reServe(t, n, fake, reSingle([]string{be.URL}, "retry: {}"))
 	d := reDrive(t, fake, 250*time.Millisecond)
-	code, _, body := rsGet(t, env.client, env.s.URL+"/", http.MethodGet, nil, nil)
+	code, _, body := reGet(t, env, http.MethodGet, "/", nil, nil)
 	d.stop()
 	if code != http.StatusOK || string(body) != "ok" {
 		t.Fatalf("response = %d %q, want 200 \"ok\"", code, body)
@@ -270,17 +468,17 @@ func runRetryIdempotency(t *testing.T, n testNetwork) {
 		t.Run(method+" 503 not retried", func(t *testing.T) {
 			be := newRSBackend(t, n, rsStatusSeq(503, 200))
 			env := reServe(t, n, fake, reSingle([]string{be.URL}, "retry: {}"))
-			code, _, _ := rsGet(t, env.client, env.s.URL+"/", method, strings.NewReader("payload"), nil)
+			code, _, _ := reGet(t, env, method, "/", strings.NewReader("payload"), nil)
 			if code != http.StatusServiceUnavailable || be.hitCount() != 1 {
 				t.Fatalf("status = %d, hits = %d, want 503 and 1 hit", code, be.hitCount())
 			}
-			reAssertIdle(t, env.g)
+			reAssertIdle(t, env)
 		})
 
 		t.Run(method+" reset not retried", func(t *testing.T) {
 			be := newRSBackend(t, n, rsReset)
 			env := reServe(t, n, fake, reSingle([]string{be.URL}, "retry: {}"))
-			code, _, _ := rsGet(t, env.client, env.s.URL+"/", method, strings.NewReader("payload"), nil)
+			code, _, _ := reGet(t, env, method, "/", strings.NewReader("payload"), nil)
 			if code != http.StatusBadGateway || be.hitCount() != 1 {
 				t.Fatalf("status = %d, hits = %d, want 502 and 1 hit", code, be.hitCount())
 			}
@@ -292,7 +490,7 @@ func runRetryIdempotency(t *testing.T, n testNetwork) {
 			healthy := newRSBackend(t, n, nil)
 			env := reServe(t, n, fake, reSingle([]string{refused.URL, healthy.URL}, "retry: {}"))
 			d := reDrive(t, fake, 250*time.Millisecond)
-			code, _, _ := rsGet(t, env.client, env.s.URL+"/", method, strings.NewReader("payload"), nil)
+			code, _, _ := reGet(t, env, method, "/", strings.NewReader("payload"), nil)
 			d.stop()
 			if code != http.StatusOK {
 				t.Fatalf("status = %d, want 200", code)
@@ -300,25 +498,25 @@ func runRetryIdempotency(t *testing.T, n testNetwork) {
 			if healthy.hitCount() != 1 || string(healthy.body(0)) != "payload" {
 				t.Fatalf("healthy hits = %d body = %q, want 1 hit with \"payload\"", healthy.hitCount(), healthy.body(0))
 			}
-			reAssertIdle(t, env.g)
+			reAssertIdle(t, env)
 		})
 
 		t.Run(method+" idempotency key retried", func(t *testing.T) {
 			be := newRSBackend(t, n, rsStatusSeq(503, 200))
 			env := reServe(t, n, fake, reSingle([]string{be.URL}, "retry:\n      idempotency_key:\n        enabled: true\n"))
 			d := reDrive(t, fake, 250*time.Millisecond)
-			code, _, body := rsGet(t, env.client, env.s.URL+"/", method, strings.NewReader("payload"), http.Header{"Idempotency-Key": {"k1"}})
+			code, _, body := reGet(t, env, method, "/", strings.NewReader("payload"), http.Header{"Idempotency-Key": {"k1"}})
 			d.stop()
 			if code != http.StatusOK || string(body) != "r2" || be.hitCount() != 2 {
 				t.Fatalf("status = %d %q, hits = %d, want 200 \"r2\" and 2 hits", code, body, be.hitCount())
 			}
-			reAssertIdle(t, env.g)
+			reAssertIdle(t, env)
 		})
 
 		t.Run(method+" idempotency key absent not retried", func(t *testing.T) {
 			be := newRSBackend(t, n, rsStatusSeq(503, 200))
 			env := reServe(t, n, fake, reSingle([]string{be.URL}, "retry:\n      idempotency_key:\n        enabled: true\n"))
-			code, _, _ := rsGet(t, env.client, env.s.URL+"/", method, strings.NewReader("payload"), nil)
+			code, _, _ := reGet(t, env, method, "/", strings.NewReader("payload"), nil)
 			if code != http.StatusServiceUnavailable || be.hitCount() != 1 {
 				t.Fatalf("status = %d, hits = %d, want 503 and 1 hit", code, be.hitCount())
 			}
@@ -327,7 +525,7 @@ func runRetryIdempotency(t *testing.T, n testNetwork) {
 		t.Run(method+" idempotency key disabled not retried", func(t *testing.T) {
 			be := newRSBackend(t, n, rsStatusSeq(503, 200))
 			env := reServe(t, n, fake, reSingle([]string{be.URL}, "retry:\n      idempotency_key:\n        enabled: false\n"))
-			code, _, _ := rsGet(t, env.client, env.s.URL+"/", method, strings.NewReader("payload"), http.Header{"Idempotency-Key": {"k1"}})
+			code, _, _ := reGet(t, env, method, "/", strings.NewReader("payload"), http.Header{"Idempotency-Key": {"k1"}})
 			if code != http.StatusServiceUnavailable || be.hitCount() != 1 {
 				t.Fatalf("status = %d, hits = %d, want 503 and 1 hit", code, be.hitCount())
 			}
@@ -338,7 +536,7 @@ func runRetryIdempotency(t *testing.T, n testNetwork) {
 		be := newRSBackend(t, n, rsStatusSeq(503, 200))
 		env := reServe(t, n, fake, reSingle([]string{be.URL}, "retry:\n      methods: [GET, POST]\n"))
 		d := reDrive(t, fake, 250*time.Millisecond)
-		code, _, _ := rsGet(t, env.client, env.s.URL+"/", http.MethodPost, strings.NewReader("payload"), nil)
+		code, _, _ := reGet(t, env, http.MethodPost, "/", strings.NewReader("payload"), nil)
 		d.stop()
 		if code != http.StatusOK || be.hitCount() != 2 {
 			t.Fatalf("status = %d, hits = %d, want 200 and 2 hits", code, be.hitCount())
@@ -348,7 +546,7 @@ func runRetryIdempotency(t *testing.T, n testNetwork) {
 	t.Run("GET 404 not retried", func(t *testing.T) {
 		be := newRSBackend(t, n, rsStatusSeq(404, 200))
 		env := reServe(t, n, fake, reSingle([]string{be.URL}, "retry: {}"))
-		code, _, _ := rsGet(t, env.client, env.s.URL+"/", http.MethodGet, nil, nil)
+		code, _, _ := reGet(t, env, http.MethodGet, "/", nil, nil)
 		if code != http.StatusNotFound || be.hitCount() != 1 {
 			t.Fatalf("status = %d, hits = %d, want 404 and 1 hit", code, be.hitCount())
 		}
@@ -357,7 +555,7 @@ func runRetryIdempotency(t *testing.T, n testNetwork) {
 	t.Run("GET 429 not retried", func(t *testing.T) {
 		be := newRSBackend(t, n, rsStatusSeq(429, 200))
 		env := reServe(t, n, fake, reSingle([]string{be.URL}, "retry: {}"))
-		code, _, _ := rsGet(t, env.client, env.s.URL+"/", http.MethodGet, nil, nil)
+		code, _, _ := reGet(t, env, http.MethodGet, "/", nil, nil)
 		if code != http.StatusTooManyRequests || be.hitCount() != 1 {
 			t.Fatalf("status = %d, hits = %d, want 429 and 1 hit", code, be.hitCount())
 		}
@@ -386,17 +584,14 @@ func runRetryIdempotency(t *testing.T, n testNetwork) {
 			t.Fatal(err)
 		}
 		res := reDoAsync(env.client, req)
-		select {
-		case <-arrived:
-		case <-time.After(5 * time.Second):
-			t.Fatal("backend did not receive the request")
-		}
+		reRecv(t, "request at the backend", arrived, func() string { return env.state(t) })
 		cancel()
-		r := reAwait(t, res)
+		r := reAwait(t, env, res)
 		if !errors.Is(r.err, context.Canceled) {
 			t.Fatalf("client error = %v, want context.Canceled", r.err)
 		}
 		close(release)
+		reAwaitIdle(t, env)
 		fake.Advance(250 * time.Millisecond)
 		if got := be.hitCount(); got != 1 {
 			t.Fatalf("hits = %d, want 1", got)
@@ -425,7 +620,7 @@ func TestRetryBackoffSchedule(t *testing.T) {
 	for i, w := range waits {
 		hits := int64(i + 1)
 		if w > 0 {
-			fake.BlockUntilDue(1, 250*time.Millisecond)
+			reWaitDue(t, env, 1, 250*time.Millisecond, fmt.Sprintf("backoff %d armed", i+2))
 			fake.Advance(w - 1)
 			if got := be.hitCount(); got != hits {
 				t.Fatalf("hits before backoff %d end = %d, want %d", i+2, got, hits)
@@ -435,10 +630,10 @@ func TestRetryBackoffSchedule(t *testing.T) {
 			}
 			fake.Advance(1)
 		}
-		eventually(t, func() bool { return be.hitCount() == hits+1 })
+		reAwaitHits(t, env, be, hits+1)
 	}
 
-	r := reAwait(t, res)
+	r := reAwait(t, env, res)
 	if r.err != nil || r.code != http.StatusServiceUnavailable || string(r.body) != "r4" {
 		t.Fatalf("response = %d %q (err %v), want 503 \"r4\"", r.code, r.body, r.err)
 	}
@@ -459,19 +654,22 @@ func TestRetryBackoffCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	res := reDoAsync(env.client, reNewGet(t, ctx, env.s.URL+"/"))
-	fake.BlockUntilDue(1, 250*time.Millisecond)
+	reWaitDue(t, env, 1, 250*time.Millisecond, "backoff armed")
 	baseline := runtime.NumGoroutine()
 	cancel()
 
-	r := reAwait(t, res)
+	r := reAwait(t, env, res)
 	if !errors.Is(r.err, context.Canceled) {
 		t.Fatalf("client error = %v, want context.Canceled", r.err)
 	}
 	if got := be.hitCount(); got != 1 {
 		t.Fatalf("hits = %d, want 1", got)
 	}
-	eventually(t, func() bool { return fake.Due(250*time.Millisecond) == 0 })
-	eventually(t, func() bool { return runtime.NumGoroutine() <= baseline })
+	reAwaitIdle(t, env)
+	if due := fake.Due(250 * time.Millisecond); due != 0 {
+		t.Fatalf("due waiters after the gateway returned = %d, want 0", due)
+	}
+	reAwaitGoroutines(t, env, baseline)
 }
 
 func TestRetryDeadlineShorterThanBackoff(t *testing.T) {
@@ -485,13 +683,14 @@ func TestRetryDeadlineShorterThanBackoff(t *testing.T) {
 	doc := reSingle([]string{be.URL}, "timeout: 1m\n    retry:\n      base_delay: 10m\n      max_delay: 10m\n")
 	env := reServe(t, n, fake, doc, withRand(clock.NewRand(seed)))
 
-	code, _, body := rsGet(t, env.client, env.s.URL+"/", http.MethodGet, nil, nil)
+	code, _, body := reGet(t, env, http.MethodGet, "/", nil, nil)
 	if code != http.StatusServiceUnavailable || string(body) != "r1" {
 		t.Fatalf("response = %d %q, want 503 \"r1\"", code, body)
 	}
 	if got := be.hitCount(); got != 1 {
 		t.Fatalf("hits = %d, want 1", got)
 	}
+	reAwaitIdle(t, env)
 	if due := fake.Due(10 * time.Minute); due != 0 {
 		t.Fatalf("armed waiters = %d, want 0", due)
 	}
@@ -532,7 +731,7 @@ func runRetryBudget(t *testing.T, n testNetwork) {
 		cResults[i] = reDoAsync(env.client, reNewGet(t, context.Background(), env.s.URL+"/c"))
 	}
 	for _, ch := range cResults {
-		if r := reAwait(t, ch); r.err != nil || r.code != http.StatusServiceUnavailable {
+		if r := reAwait(t, env, ch); r.err != nil || r.code != http.StatusServiceUnavailable {
 			t.Fatalf("stress response = %d (err %v), want 503", r.code, r.err)
 		}
 	}
@@ -551,16 +750,12 @@ func runRetryBudget(t *testing.T, n testNetwork) {
 	for i := range aResults {
 		aResults[i] = reDoAsync(env.client, reNewGet(t, context.Background(), env.s.URL+"/a"))
 	}
-	for range burst {
-		select {
-		case <-arrived:
-		case <-time.After(5 * time.Second):
-			t.Fatal("burst request did not arrive within 5s")
-		}
+	for i := range burst {
+		reRecv(t, fmt.Sprintf("burst request %d at the backend", i+1), arrived, func() string { return env.state(t) })
 	}
 	closeRelease()
 	for _, ch := range aResults {
-		if r := reAwait(t, ch); r.err != nil || r.code != http.StatusServiceUnavailable {
+		if r := reAwait(t, env, ch); r.err != nil || r.code != http.StatusServiceUnavailable {
 			t.Fatalf("burst response = %d (err %v), want 503", r.code, r.err)
 		}
 	}
@@ -575,7 +770,7 @@ func runRetryBudget(t *testing.T, n testNetwork) {
 	}
 
 	hitsBefore := hits["/a"].Load()
-	code, _, _ := rsGet(t, env.client, env.s.URL+"/a", http.MethodGet, nil, nil)
+	code, _, _ := reGet(t, env, http.MethodGet, "/a", nil, nil)
 	if code != http.StatusServiceUnavailable {
 		t.Fatalf("post-burst status = %d, want 503", code)
 	}
@@ -589,7 +784,7 @@ func runRetryBudget(t *testing.T, n testNetwork) {
 		t.Fatalf("exhausted(a) after post-burst GET = %v, want 81", got)
 	}
 
-	code, _, _ = rsGet(t, env.client, env.s.URL+"/b", http.MethodGet, nil, nil)
+	code, _, _ = reGet(t, env, http.MethodGet, "/b", nil, nil)
 	if code != http.StatusServiceUnavailable {
 		t.Fatalf("route b status = %d, want 503", code)
 	}
@@ -605,7 +800,7 @@ func runRetryBudget(t *testing.T, n testNetwork) {
 
 	fake.Advance(11 * time.Second)
 	hitsBefore = hits["/a"].Load()
-	code, _, _ = rsGet(t, env.client, env.s.URL+"/a", http.MethodGet, nil, nil)
+	code, _, _ = reGet(t, env, http.MethodGet, "/a", nil, nil)
 	if code != http.StatusServiceUnavailable {
 		t.Fatalf("status after window = %d, want 503", code)
 	}
@@ -630,7 +825,7 @@ func runRetryBodyReplay(t *testing.T, n testNetwork) {
 		env := reServe(t, n, fake, reSingle([]string{be.URL}, "retry: {}"))
 		sent := reRandomBytes(1024)
 		d := reDrive(t, fake, 250*time.Millisecond)
-		code, _, _ := rsGet(t, env.client, env.s.URL+"/", http.MethodPut, bytes.NewReader(sent), nil)
+		code, _, _ := reGet(t, env, http.MethodPut, "/", bytes.NewReader(sent), nil)
 		d.stop()
 		if code != http.StatusOK || be.hitCount() != 2 {
 			t.Fatalf("status = %d, hits = %d, want 200 and 2 hits", code, be.hitCount())
@@ -638,14 +833,14 @@ func runRetryBodyReplay(t *testing.T, n testNetwork) {
 		if !bytes.Equal(be.body(0), sent) || !bytes.Equal(be.body(1), sent) {
 			t.Fatal("replayed body differs from the sent bytes")
 		}
-		reAssertIdle(t, env.g)
+		reAssertIdle(t, env)
 	})
 
 	t.Run("oversized body with content length not retried", func(t *testing.T) {
 		be := newRSBackend(t, n, rsStatusSeq(503, 200))
 		env := reServe(t, n, fake, reSingle([]string{be.URL}, "retry: {}"))
 		sent := reRandomBytes(100 * 1024)
-		code, _, _ := rsGet(t, env.client, env.s.URL+"/", http.MethodPut, bytes.NewReader(sent), nil)
+		code, _, _ := reGet(t, env, http.MethodPut, "/", bytes.NewReader(sent), nil)
 		if code != http.StatusServiceUnavailable || be.hitCount() != 1 {
 			t.Fatalf("status = %d, hits = %d, want 503 and 1 hit", code, be.hitCount())
 		}
@@ -663,7 +858,7 @@ func runRetryBodyReplay(t *testing.T, n testNetwork) {
 			_, _ = pw.Write(sent)
 			_ = pw.Close()
 		}()
-		code, _, _ := rsGet(t, env.client, env.s.URL+"/", http.MethodPut, pr, nil)
+		code, _, _ := reGet(t, env, http.MethodPut, "/", pr, nil)
 		if code != http.StatusServiceUnavailable || be.hitCount() != 1 {
 			t.Fatalf("status = %d, hits = %d, want 503 and 1 hit", code, be.hitCount())
 		}
@@ -675,7 +870,7 @@ func runRetryBodyReplay(t *testing.T, n testNetwork) {
 	t.Run("max_body_bytes zero disables buffering", func(t *testing.T) {
 		be := newRSBackend(t, n, rsStatusSeq(503, 200))
 		env := reServe(t, n, fake, reSingle([]string{be.URL}, "retry:\n      max_body_bytes: 0\n"))
-		code, _, _ := rsGet(t, env.client, env.s.URL+"/", http.MethodPut, bytes.NewReader([]byte("0123456789")), nil)
+		code, _, _ := reGet(t, env, http.MethodPut, "/", bytes.NewReader([]byte("0123456789")), nil)
 		if code != http.StatusServiceUnavailable || be.hitCount() != 1 {
 			t.Fatalf("status = %d, hits = %d, want 503 and 1 hit", code, be.hitCount())
 		}
@@ -685,7 +880,7 @@ func runRetryBodyReplay(t *testing.T, n testNetwork) {
 		be := newRSBackend(t, n, rsStatusSeq(503, 200))
 		env := reServe(t, n, fake, reSingle([]string{be.URL}, "retry: {}"))
 		d := reDrive(t, fake, 250*time.Millisecond)
-		code, _, _ := rsGet(t, env.client, env.s.URL+"/", http.MethodDelete, nil, nil)
+		code, _, _ := reGet(t, env, http.MethodDelete, "/", nil, nil)
 		d.stop()
 		if code != http.StatusOK || be.hitCount() != 2 {
 			t.Fatalf("status = %d, hits = %d, want 200 and 2 hits", code, be.hitCount())
@@ -712,27 +907,27 @@ func runRetryStreaming(t *testing.T, n testNetwork) {
 		}
 		env := reServe(t, n, fake, doc)
 		conn := n.dial(t, env.s)
-		if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		if err := conn.SetDeadline(time.Now().Add(reGuard(t))); err != nil {
 			t.Fatal(err)
 		}
 		_, err := io.WriteString(conn, "GET /ws HTTP/1.1\r\nHost: gw.test\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n")
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("write upgrade request: %v\nstate: %s", err, env.state(t))
 		}
 		br := bufio.NewReader(conn)
 		resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodGet})
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("read upgrade response: %v\nstate: %s", err, env.state(t))
 		}
 		if resp.StatusCode != http.StatusSwitchingProtocols {
 			t.Fatalf("status = %d, want 101", resp.StatusCode)
 		}
 		if _, err := io.WriteString(conn, "hello\n"); err != nil {
-			t.Fatal(err)
+			t.Fatalf("write message: %v\nstate: %s", err, env.state(t))
 		}
 		line, err := br.ReadString('\n')
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("read echo: %v\nstate: %s", err, env.state(t))
 		}
 		if line != "hello\n" {
 			t.Fatalf("echo = %q, want \"hello\\n\"", line)
@@ -757,20 +952,21 @@ func runRetryStreaming(t *testing.T, n testNetwork) {
 			routes:  []rsRoute{{name: "all", path: "/", extra: "retry: {}"}},
 		}
 		env := reServe(t, n, fake, doc)
-		resp, err := env.client.Get(env.s.URL + "/events")
-		if err != nil {
-			t.Fatal(err)
+		req := reNewGet(t, context.Background(), env.s.URL+"/events")
+		start, _ := reRecv(t, "SSE response headers", reStart(env.client, req), func() string { return env.state(t) })
+		if start.err != nil {
+			t.Fatal(start.err)
 		}
-		defer resp.Body.Close()
-		lines := reLines(resp.Body)
-		if got := recvLine(t, lines); got != "data: one\n" {
+		defer start.resp.Body.Close()
+		lines := reLines(start.resp.Body)
+		if got := reRecvLine(t, env, lines, "SSE first line"); got != "data: one\n" {
 			t.Fatalf("first line = %q, want \"data: one\"", got)
 		}
 		be.Release()
-		if got := recvLine(t, lines); got != "\n" {
+		if got := reRecvLine(t, env, lines, "SSE blank line"); got != "\n" {
 			t.Fatalf("blank line = %q, want newline", got)
 		}
-		if got := recvLine(t, lines); got != "data: two\n" {
+		if got := reRecvLine(t, env, lines, "SSE second event"); got != "data: two\n" {
 			t.Fatalf("second event = %q, want \"data: two\"", got)
 		}
 		h := rsHost(t, env.g, be.URL)
@@ -797,14 +993,16 @@ func runRetryStreaming(t *testing.T, n testNetwork) {
 			routes:  []rsRoute{{name: "all", path: "/", extra: "retry: {}"}},
 		}
 		env := reServe(t, n, fake, doc)
-		resp, err := env.client.Get(env.s.URL + "/")
-		if err != nil {
-			t.Fatal(err)
+		req := reNewGet(t, context.Background(), env.s.URL+"/")
+		start, _ := reRecv(t, "response headers", reStart(env.client, req), func() string { return env.state(t) })
+		if start.err != nil {
+			t.Fatal(start.err)
 		}
-		data, readErr := io.ReadAll(resp.Body)
+		resp := start.resp
+		rd, _ := reRecv(t, "aborted body read", reReadAll(resp.Body), func() string { return env.state(t) })
 		resp.Body.Close()
-		if string(data) != "partial" || readErr == nil {
-			t.Fatalf("body = %q (err %v), want \"partial\" followed by an error", data, readErr)
+		if string(rd.data) != "partial" || rd.err == nil {
+			t.Fatalf("body = %q (err %v), want \"partial\" followed by an error", rd.data, rd.err)
 		}
 		if got := be.hitCount(); got != 1 {
 			t.Fatalf("hits = %d, want 1", got)

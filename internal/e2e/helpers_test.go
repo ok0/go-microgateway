@@ -943,16 +943,19 @@ type rsBackend struct {
 	mu     sync.Mutex
 	bodies [][]byte
 	script func(n int64, w http.ResponseWriter, r *http.Request)
+	hitSig chan struct{}
 }
 
 func newRSBackend(t *testing.T, n testNetwork, script func(n int64, w http.ResponseWriter, r *http.Request)) *rsBackend {
 	t.Helper()
-	b := &rsBackend{script: script}
+	b := &rsBackend{script: script, hitSig: make(chan struct{})}
 	b.srv = n.serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		data, _ := io.ReadAll(r.Body)
 		b.mu.Lock()
 		b.bodies = append(b.bodies, data)
 		seq := b.hits.Add(1)
+		close(b.hitSig)
+		b.hitSig = make(chan struct{})
 		b.mu.Unlock()
 		if b.script == nil {
 			_, _ = io.WriteString(w, "ok")
@@ -966,6 +969,12 @@ func newRSBackend(t *testing.T, n testNetwork, script func(n int64, w http.Respo
 
 func (b *rsBackend) hitCount() int64 {
 	return b.hits.Load()
+}
+
+func (b *rsBackend) hitSignal() (int64, <-chan struct{}) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.hits.Load(), b.hitSig
 }
 
 func (b *rsBackend) body(i int) []byte {
