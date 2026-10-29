@@ -2,10 +2,12 @@
 package microgateway
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -72,6 +74,26 @@ func init() {
 	}
 	hooks.WithClock = func(c clock.Clock) any {
 		return withClock(c)
+	}
+	hooks.WithRand = func(r clock.Rand) any {
+		return withRand(r)
+	}
+	hooks.WithDialer = func(d func(ctx context.Context, network, addr string) (net.Conn, error)) any {
+		return withDialer(d)
+	}
+	hooks.WithResolver = func(r hooks.Resolver) any {
+		return withResolver(r)
+	}
+	hooks.Inspect = func(gw any) hooks.Stats {
+		g := gw.(*Gateway)
+		return hooks.Stats{
+			StateEntries:    g.state.Len(),
+			LiveGenerations: g.live.Load(),
+			Generation:      g.cur.Load(),
+			ReloadSuccess:   g.reloads.success.Value(),
+			ReloadFailure:   g.reloads.failure.Value(),
+			ReloadUnchanged: g.reloads.unchanged.Value(),
+		}
 	}
 }
 
