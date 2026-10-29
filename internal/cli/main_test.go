@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"bytes"
@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,22 +17,29 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/config"
 )
 
 func runCmd(t *testing.T, args ...string) (int, string, string) {
 	t.Helper()
+	return runWith(t, nil, args...)
+}
+
+func runWith(t *testing.T, opts []microgateway.Option, args ...string) (int, string, string) {
+	t.Helper()
 	var out, errb bytes.Buffer
-	code := run(context.Background(), args, &out, &errb)
+	code := Main(context.Background(), Env{Args: args, Stdout: &out, Stderr: &errb}, opts...)
 	return code, out.String(), errb.String()
 }
 
 type runHandle struct {
 	t      *testing.T
-	addrs  serveAddrs
+	addrs  Addrs
 	sig    chan os.Signal
 	done   chan int
 	cancel context.CancelFunc
@@ -69,15 +77,12 @@ func startRunArgs(t *testing.T, args []string, errb interface {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	ready := make(chan serveAddrs, 1)
+	ready := make(chan Addrs, 1)
 	done := make(chan int, 1)
 	sig := make(chan os.Signal, 2)
 	var out bytes.Buffer
 	go func() {
-		done <- runServe(ctx, args, &out, errb, serveHooks{
-			onReady: func(a serveAddrs) { ready <- a },
-			signals: sig,
-		})
+		done <- Main(ctx, Env{Args: append([]string{"run"}, args...), Stdout: &out, Stderr: errb, Signals: sig, Ready: func(a Addrs) { ready <- a }})
 	}()
 	h := &runHandle{t: t, sig: sig, done: done, cancel: cancel, errb: errb}
 	select {
@@ -270,7 +275,7 @@ func TestHelpNamesBinary(t *testing.T) {
 
 func TestNoCommand(t *testing.T) {
 	var out, errb bytes.Buffer
-	code := run(context.Background(), nil, &out, &errb)
+	code := Main(context.Background(), Env{Stdout: &out, Stderr: &errb})
 	if code != 2 {
 		t.Fatalf("exit code = %d, want 2", code)
 	}
@@ -618,6 +623,7 @@ func TestValidateMiddlewareErrors(t *testing.T) {
 	}
 }
 
+// A type the core does not know validates when the options passed to Main register it, and validate builds nothing.
 func TestValidateUnregisteredType(t *testing.T) {
 	path := writeTemp(t, minimalConfig+`middlewares:
   - name: x
@@ -625,9 +631,17 @@ func TestValidateUnregisteredType(t *testing.T) {
     params:
       anything: 1
 `)
-	code, _, errs := runCmd(t, "validate", "-config", path)
+	var called atomic.Int32
+	factory := func(microgateway.MiddlewareParams) (microgateway.Middleware, error) {
+		called.Add(1)
+		return nil, errors.New("not built")
+	}
+	code, _, errs := runWith(t, []microgateway.Option{microgateway.WithMiddleware("my_custom", factory)}, "validate", "-config", path)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr:\n%s", code, errs)
+	}
+	if n := called.Load(); n != 0 {
+		t.Errorf("middleware factory called %d times during validate, want 0", n)
 	}
 }
 

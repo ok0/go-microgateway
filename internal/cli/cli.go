@@ -1,4 +1,5 @@
-package main
+// Package cli implements the microgateway command: run, validate and version.
+package cli
 
 import (
 	"context"
@@ -36,30 +37,47 @@ commands:
   version                   print version information
 `
 
-type serveAddrs struct {
+// Addrs holds the addresses a serving run is bound to.
+type Addrs struct {
 	Listeners map[string]net.Addr
 	Admin     net.Addr
 }
 
-type serveHooks struct {
-	onReady func(serveAddrs)
-	signals <-chan os.Signal
+// Env is the process environment of one invocation.
+type Env struct {
+	Args      []string                    // command-line arguments without the program name
+	Stdin     io.Reader                   // standard input; no command reads it today
+	Stdout    io.Writer                   // nil discards
+	Stderr    io.Writer                   // nil discards
+	LookupEnv func(string) (string, bool) // resolves ${VAR}; nil means os.LookupEnv
+	Signals   <-chan os.Signal            // nil: run subscribes to SIGINT, SIGTERM and SIGHUP while serving
+	Ready     func(Addrs)                 // optional; called once run has bound its listeners
 }
 
-func main() {
-	os.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
-}
-
-func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+// Main runs one invocation and returns its exit code. It never exits the process. opts are passed to every
+// gateway the invocation builds or validates, after the command's own options.
+func Main(ctx context.Context, env Env, opts ...microgateway.Option) int {
+	stdout, stderr := env.Stdout, env.Stderr
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	lookup := env.LookupEnv
+	if lookup == nil {
+		lookup = os.LookupEnv
+	}
+	args := env.Args
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
 	switch args[0] {
 	case "validate":
-		return runValidate(args[1:], stdout, stderr)
+		return runValidate(args[1:], stdout, stderr, lookup, opts)
 	case "run":
-		return runServe(ctx, args[1:], stdout, stderr, serveHooks{})
+		return runServe(ctx, args[1:], stdout, stderr, lookup, env.Signals, env.Ready, opts)
 	case "version":
 		fmt.Fprintf(stdout, "microgateway %s (commit %s, built %s)\n", version, commit, date)
 		return 0
@@ -73,7 +91,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 }
 
-func runValidate(args []string, stdout, stderr io.Writer) int {
+func runValidate(args []string, stdout, stderr io.Writer, lookup func(string) (string, bool), opts []microgateway.Option) int {
 	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	path := fs.String("config", "", "path to the configuration file")
@@ -91,13 +109,28 @@ func runValidate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "microgateway validate: -config is required")
 		return 2
 	}
-	cfg, err := config.LoadFile(*path)
+	cfg, err := loadConfig(*path, lookup, opts)
 	if err != nil {
 		return printLoadError(stderr, "validate", *path, err)
 	}
 	fmt.Fprintf(stdout, "%s: configuration is valid (%d listeners, %d upstreams, %d routes)\n",
 		*path, len(cfg.Listeners), len(cfg.Upstreams), len(cfg.Routes))
 	return 0
+}
+
+// loadConfig loads the file at path and validates it against opts, reporting schema and registration problems together.
+func loadConfig(path string, lookup func(string) (string, bool), opts []microgateway.Option) (*config.Config, error) {
+	return config.LoadFile(path, config.WithEnvLookup(lookup), config.WithCheck(func(c *config.Config) []config.FieldError {
+		err := microgateway.Validate(c, opts...)
+		if err == nil {
+			return nil
+		}
+		var ve *config.ValidationError
+		if errors.As(err, &ve) {
+			return ve.Errors
+		}
+		return []config.FieldError{{Msg: err.Error()}}
+	}))
 }
 
 func printLoadError(stderr io.Writer, cmd, path string, err error) int {
@@ -113,7 +146,7 @@ func printLoadError(stderr io.Writer, cmd, path string, err error) int {
 	return 1
 }
 
-func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, hooks serveHooks) int {
+func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, lookup func(string) (string, bool), signals <-chan os.Signal, ready func(Addrs), opts []microgateway.Option) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	path := fs.String("config", "", "path to the configuration file")
@@ -144,7 +177,7 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, hook
 		return 2
 	}
 
-	cfg, err := config.LoadFile(*path)
+	cfg, err := loadConfig(*path, lookup, opts)
 	if err != nil {
 		return printLoadError(stderr, "run", *path, err)
 	}
@@ -158,7 +191,9 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, hook
 	logger := newLogger(stderr, logCfg)
 
 	certs := server.NewCertificates(logger, clock.Real())
-	g, err := microgateway.New(cfg, microgateway.WithLogger(logger), internalhooks.WithParticipant(certs).(microgateway.Option))
+	gwOpts := []microgateway.Option{microgateway.WithLogger(logger), microgateway.WithEnvLookup(lookup), internalhooks.WithParticipant(certs).(microgateway.Option)}
+	gwOpts = append(gwOpts, opts...)
+	g, err := microgateway.New(cfg, gwOpts...)
 	if err != nil {
 		return printLoadError(stderr, "run", *path, err)
 	}
@@ -172,6 +207,15 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, hook
 		g.Close()
 		return 1
 	}
+	sig := signals
+	if sig == nil {
+		// Subscribe before the listeners are announced so a signal sent as soon as the gateway reports ready is queued rather than terminating the process.
+		ch := make(chan os.Signal, 2)
+		signal.Notify(ch, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+		defer signal.Stop(ch)
+		sig = ch
+	}
+
 	if err := srv.Start(); err != nil {
 		fmt.Fprintf(stderr, "microgateway run: %v\n", err)
 		g.Close()
@@ -185,8 +229,8 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, hook
 	if a := srv.AdminAddr(); a != nil {
 		logger.Info("listening", "listener", "admin", "address", a.String())
 	}
-	if hooks.onReady != nil {
-		hooks.onReady(serveAddrs{Listeners: addrs, Admin: srv.AdminAddr()})
+	if ready != nil {
+		ready(Addrs{Listeners: addrs, Admin: srv.AdminAddr()})
 	}
 
 	w := reload.New(reload.Options{
@@ -201,14 +245,6 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, hook
 	watchCtx, stopWatch := context.WithCancel(context.Background())
 	watchDone := make(chan error, 1)
 	go func() { watchDone <- w.Run(watchCtx) }()
-
-	sig := hooks.signals
-	if sig == nil {
-		ch := make(chan os.Signal, 2)
-		signal.Notify(ch, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-		defer signal.Stop(ch)
-		sig = ch
-	}
 
 	var ctxDone <-chan struct{} = ctx.Done()
 	code := 0
