@@ -15,8 +15,12 @@ import (
 	"time"
 
 	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/testcert"
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
+
+var serverStart = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 func testConfig(t *testing.T, mutate func(*config.Config)) *config.Config {
 	t.Helper()
@@ -47,41 +51,38 @@ func freePort(t *testing.T) string {
 	return addr
 }
 
-func eventually(t *testing.T, cond func() bool) {
-	t.Helper()
-	deadline := time.After(5 * time.Second)
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		if cond() {
-			return
-		}
-		select {
-		case <-deadline:
-			t.Fatal("condition not met within 5s")
-		case <-ticker.C:
-		}
-	}
-}
-
-func closed(ch chan struct{}) func() bool {
-	return func() bool {
-		select {
-		case <-ch:
-			return true
-		default:
-			return false
-		}
-	}
-}
-
 func waitSignal(t *testing.T, ch <-chan struct{}, what string) {
 	t.Helper()
-	select {
-	case <-ch:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timed out waiting for %s", what)
-	}
+	testwait.Done(t, what, ch, nil)
+}
+
+// awaitDue waits until n timers of fake are due within the given duration.
+func awaitDue(t *testing.T, fake *clock.Fake, n int, within time.Duration, what string) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	due := make(chan struct{})
+	go func() {
+		defer close(due)
+		_ = fake.WaitDue(ctx, n, within)
+	}()
+	testwait.Done(t, what, due, func() string {
+		return fmt.Sprintf("fake waiters=%d due within %v=%d", fake.Waiters(), within, fake.Due(within))
+	})
+}
+
+func cleanupShutdown(t *testing.T, srv *Server) {
+	t.Cleanup(func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		srv.Shutdown(ctx)
+	})
+}
+
+func shutdownAsync(srv *Server, ctx context.Context) <-chan error {
+	ch := make(chan error, 1)
+	go func() { ch <- srv.Shutdown(ctx) }()
+	return ch
 }
 
 func newClient(t *testing.T, tr *http.Transport) *http.Client {
@@ -103,20 +104,16 @@ func fetch(client *http.Client, url string) (*http.Response, string, error) {
 	return resp, string(b), nil
 }
 
-func startServer(t *testing.T, cfg *config.Config, h, admin http.Handler, ready func(bool)) *Server {
+func startServer(t *testing.T, cfg *config.Config, h, admin http.Handler, ready func(bool), opts ...Option) *Server {
 	t.Helper()
-	srv, err := New(cfg, h, admin, ready, nil)
+	srv, err := New(cfg, h, admin, ready, nil, append([]Option{WithClock(clock.NewFake(serverStart))}, opts...)...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := srv.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		srv.Shutdown(ctx)
-	})
+	cleanupShutdown(t, srv)
 	return srv
 }
 
@@ -125,7 +122,7 @@ func TestServeAndShutdown(t *testing.T) {
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "ok")
 	})
-	srv, err := New(cfg, h, nil, nil, nil)
+	srv, err := New(cfg, h, nil, nil, nil, WithClock(clock.NewFake(serverStart)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,9 +140,8 @@ func TestServeAndShutdown(t *testing.T) {
 	if body != "ok" {
 		t.Fatalf("body = %q, want %q", body, "ok")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
+	err, _ = testwait.Recv(t, "Shutdown to return", shutdownAsync(srv, context.Background()), nil)
+	if err != nil {
 		t.Fatalf("Shutdown: %v", err)
 	}
 	if _, _, err := fetch(newClient(t, &http.Transport{}), "http://"+addr.String()); err == nil {
@@ -162,7 +158,7 @@ func TestListenerSettings(t *testing.T) {
 		l.IdleTimeout = config.Duration(6 * time.Second)
 		l.MaxHeaderBytes = 4096
 	})
-	srv, err := New(cfg, http.NotFoundHandler(), nil, nil, nil)
+	srv, err := New(cfg, http.NotFoundHandler(), nil, nil, nil, WithClock(clock.NewFake(serverStart)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +307,7 @@ func TestBadCertPath(t *testing.T) {
 			KeyFile:  filepath.Join(t.TempDir(), "missing.key"),
 		}
 	})
-	_, err := New(cfg, http.NotFoundHandler(), nil, nil, nil)
+	_, err := New(cfg, http.NotFoundHandler(), nil, nil, nil, WithClock(clock.NewFake(serverStart)))
 	if err == nil {
 		t.Fatal("New returned nil error, want certificate load error")
 	}
@@ -333,7 +329,7 @@ func TestStartBindError(t *testing.T) {
 			{Name: "b", Address: taken.Addr().String()},
 		}
 	})
-	srv, err := New(cfg, http.NotFoundHandler(), nil, nil, nil)
+	srv, err := New(cfg, http.NotFoundHandler(), nil, nil, nil, WithClock(clock.NewFake(serverStart)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +401,8 @@ func TestShutdownGraceful(t *testing.T) {
 		io.WriteString(w, "fast")
 	})
 	readyCh := make(chan bool, 4)
-	srv := startServer(t, cfg, h, nil, func(v bool) { readyCh <- v })
+	fake := clock.NewFake(serverStart)
+	srv := startServer(t, cfg, h, nil, func(v bool) { readyCh <- v }, WithClock(fake))
 	addr := srv.Addrs()["public"].String()
 
 	type result struct {
@@ -425,20 +422,12 @@ func TestShutdownGraceful(t *testing.T) {
 	}()
 	waitSignal(t, entered, "slow handler")
 
-	shutdownErr := make(chan error, 1)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		shutdownErr <- srv.Shutdown(ctx)
-	}()
-	select {
-	case v := <-readyCh:
-		if v {
-			t.Fatal("ready(true) reported during shutdown")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("ready(false) not reported")
+	shutdownErr := shutdownAsync(srv, context.Background())
+	v, _ := testwait.Recv(t, "ready(false)", readyCh, nil)
+	if v {
+		t.Fatal("ready(true) reported during shutdown")
 	}
+	awaitDue(t, fake, 1, 300*time.Millisecond, "shutdown delay timer")
 
 	fastClient := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
 	resp, body, err := fetch(fastClient, "http://"+addr+"/fast")
@@ -449,26 +438,21 @@ func TestShutdownGraceful(t *testing.T) {
 		t.Fatalf("request during shutdown delay: status = %d, body = %q", resp.StatusCode, body)
 	}
 
+	fake.Advance(300 * time.Millisecond)
+	awaitDue(t, fake, 1, 5*time.Second, "drain timer")
+
 	close(release)
-	select {
-	case res := <-slowRes:
-		if res.err != nil {
-			t.Fatalf("in-flight request: %v", res.err)
-		}
-		if res.status != http.StatusOK || res.body != "ok" {
-			t.Fatalf("in-flight request: status = %d, body = %q; want 200 \"ok\"", res.status, res.body)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("in-flight request did not complete")
+	res, _ := testwait.Recv(t, "in-flight request to complete", slowRes, nil)
+	if res.err != nil {
+		t.Fatalf("in-flight request: %v", res.err)
+	}
+	if res.status != http.StatusOK || res.body != "ok" {
+		t.Fatalf("in-flight request: status = %d, body = %q; want 200 \"ok\"", res.status, res.body)
 	}
 
-	select {
-	case err := <-shutdownErr:
-		if err != nil {
-			t.Fatalf("Shutdown: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Shutdown did not return")
+	err, _ = testwait.Recv(t, "Shutdown to return", shutdownErr, nil)
+	if err != nil {
+		t.Fatalf("Shutdown: %v", err)
 	}
 
 	if _, _, err := fetch(&http.Client{Transport: &http.Transport{DisableKeepAlives: true}}, "http://"+addr+"/fast"); err == nil {
@@ -502,7 +486,8 @@ func TestShutdownForced(t *testing.T) {
 			conn.Close()
 		}
 	})
-	srv := startServer(t, cfg, h, nil, nil)
+	fake := clock.NewFake(serverStart)
+	srv := startServer(t, cfg, h, nil, nil, WithClock(fake))
 	addr := srv.Addrs()["public"].String()
 
 	go func() {
@@ -520,27 +505,24 @@ func TestShutdownForced(t *testing.T) {
 	waitSignal(t, hangEntered, "hang handler")
 	waitSignal(t, hijackEntered, "hijack handler")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	err = srv.Shutdown(ctx)
+	errc := shutdownAsync(srv, context.Background())
+	awaitDue(t, fake, 1, 200*time.Millisecond, "drain timer")
+	fake.Advance(200 * time.Millisecond)
+	err, _ = testwait.Recv(t, "Shutdown to return", errc, nil)
 	if !errors.Is(err, ErrForcedClose) {
 		t.Fatalf("Shutdown error = %v, want ErrForcedClose", err)
 	}
-	eventually(t, closed(hangReturned))
-	eventually(t, closed(hijackReturned))
+	waitSignal(t, hangReturned, "hang handler return")
+	waitSignal(t, hijackReturned, "hijack handler return")
 
 	readErr := make(chan error, 1)
 	go func() {
 		_, err := raw.Read(make([]byte, 1))
 		readErr <- err
 	}()
-	select {
-	case err := <-readErr:
-		if err == nil {
-			t.Fatal("hijacked connection still readable after forced close")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("read on hijacked connection did not return")
+	err, _ = testwait.Recv(t, "read on hijacked connection", readErr, nil)
+	if err == nil {
+		t.Fatal("hijacked connection still readable after forced close")
 	}
 }
 
@@ -567,13 +549,9 @@ func TestShutdownCanceledContext(t *testing.T) {
 	go func() {
 		done <- srv.Shutdown(ctx)
 	}()
-	select {
-	case err := <-done:
-		if !errors.Is(err, ErrForcedClose) {
-			t.Fatalf("Shutdown error = %v, want ErrForcedClose", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Shutdown with canceled context did not return within 2s")
+	err, _ := testwait.Recv(t, "Shutdown with canceled context to return", done, nil)
+	if !errors.Is(err, ErrForcedClose) {
+		t.Fatalf("Shutdown error = %v, want ErrForcedClose", err)
 	}
 }
 
@@ -590,7 +568,7 @@ func TestShutdownForcedClosesBeforeCancel(t *testing.T) {
 		entered <- struct{}{}
 		<-r.Context().Done()
 	})
-	srv, err := New(cfg, h, nil, nil, nil)
+	srv, err := New(cfg, h, nil, nil, nil, WithClock(clock.NewFake(serverStart)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -607,20 +585,12 @@ func TestShutdownForcedClosesBeforeCancel(t *testing.T) {
 	cancelBase := srv.cancel
 	srv.cancel = func() {
 		cancelBase()
-		select {
-		case <-finished:
-		case <-time.After(5 * time.Second):
-			t.Error("request neither answered nor closed after the base context was canceled")
-		}
+		testwait.Done(t, "request answered or closed after base context cancel", finished, nil)
 	}
 	if err := srv.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		srv.Shutdown(ctx)
-	})
+	cleanupShutdown(t, srv)
 	addr := srv.Addrs()["public"].String()
 
 	type result struct {
@@ -643,12 +613,8 @@ func TestShutdownForcedClosesBeforeCancel(t *testing.T) {
 	if err := srv.Shutdown(ctx); !errors.Is(err, ErrForcedClose) {
 		t.Fatalf("Shutdown error = %v, want ErrForcedClose", err)
 	}
-	select {
-	case r := <-got:
-		if r.err == nil {
-			t.Fatalf("client received status %d from a request cut off by a forced shutdown, want a connection error", r.status)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("client request did not end after the forced shutdown")
+	r, _ := testwait.Recv(t, "client request to end", got, nil)
+	if r.err == nil {
+		t.Fatalf("client received status %d from a request cut off by a forced shutdown, want a connection error", r.status)
 	}
 }

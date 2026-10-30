@@ -17,6 +17,7 @@ import (
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/testcert"
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
 var farFuture = time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -58,19 +59,7 @@ routes:
 
 func startTLS(t *testing.T, cfg *config.Config, c *Certificates) *Server {
 	t.Helper()
-	srv, err := New(cfg, http.NotFoundHandler(), nil, nil, nil, WithCertificates(c))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := srv.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		srv.Shutdown(ctx)
-	})
-	return srv
+	return startServer(t, cfg, http.NotFoundHandler(), nil, nil, WithCertificates(c))
 }
 
 func dialSerial(t *testing.T, addr string) (*tls.Conn, int64) {
@@ -100,6 +89,7 @@ func TestCertificateSwap(t *testing.T) {
 	writePair(t, certFile, keyFile, 1, farFuture)
 	cfg := loadTLSConfig(t, certFile, keyFile)
 
+	// Real clock: Certificates only reads it for the expiry warning; these certificates expire in 2100.
 	c := NewCertificates(nil, nil)
 	_, apply, err := c.Prepare(cfg)
 	if err != nil {
@@ -126,17 +116,34 @@ func TestCertificateSwap(t *testing.T) {
 		t.Fatalf("new connection serial = %d, want 2", serial)
 	}
 
-	old.SetDeadline(time.Now().Add(5 * time.Second))
-	if _, err := fmt.Fprint(old, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"); err != nil {
-		t.Fatal(err)
+	type reply struct {
+		status int
+		err    error
+		write  bool
 	}
-	resp, err := http.ReadResponse(bufio.NewReader(old), nil)
-	if err != nil {
-		t.Fatalf("old connection: %v", err)
+	oldReply := make(chan reply, 1)
+	go func() {
+		if _, err := fmt.Fprint(old, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"); err != nil {
+			oldReply <- reply{err: err, write: true}
+			return
+		}
+		resp, err := http.ReadResponse(bufio.NewReader(old), nil)
+		if err != nil {
+			oldReply <- reply{err: err}
+			return
+		}
+		resp.Body.Close()
+		oldReply <- reply{status: resp.StatusCode}
+	}()
+	r, _ := testwait.Recv(t, "response on the pre-swap connection", oldReply, nil)
+	if r.write {
+		t.Fatal(r.err)
 	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("old connection status = %d, want 404", resp.StatusCode)
+	if r.err != nil {
+		t.Fatalf("old connection: %v", r.err)
+	}
+	if r.status != http.StatusNotFound {
+		t.Fatalf("old connection status = %d, want 404", r.status)
 	}
 }
 
@@ -147,6 +154,7 @@ func TestUnchangedNotReparsed(t *testing.T) {
 	writePair(t, certFile, keyFile, 1, farFuture)
 	cfg := loadTLSConfig(t, certFile, keyFile)
 
+	// Real clock: Certificates only reads it for the expiry warning; these certificates expire in 2100.
 	c := NewCertificates(nil, nil)
 	d1, apply, err := c.Prepare(cfg)
 	if err != nil {
@@ -173,6 +181,7 @@ func TestBadReplacementKeepsOld(t *testing.T) {
 	writePair(t, certFile, keyFile, 1, farFuture)
 	cfg := loadTLSConfig(t, certFile, keyFile)
 
+	// Real clock: Certificates only reads it for the expiry warning; these certificates expire in 2100.
 	c := NewCertificates(nil, nil)
 	_, apply, err := c.Prepare(cfg)
 	if err != nil {
@@ -223,6 +232,7 @@ func TestCertPathChange(t *testing.T) {
 	writePair(t, certB, keyB, 3, farFuture)
 	cfg := loadTLSConfig(t, certA, keyA)
 
+	// Real clock: Certificates only reads it for the expiry warning; these certificates expire in 2100.
 	c := NewCertificates(nil, nil)
 	_, apply, err := c.Prepare(cfg)
 	if err != nil {
@@ -272,7 +282,8 @@ func TestShutdownTimingsUpdated(t *testing.T) {
 		entered <- struct{}{}
 		<-release
 	})
-	srv := startServer(t, cfg, h, nil, nil)
+	fake := clock.NewFake(serverStart)
+	srv := startServer(t, cfg, h, nil, nil, WithClock(fake))
 	t.Cleanup(func() { close(release) })
 	srv.SetShutdownTimings(0, 50*time.Millisecond)
 
@@ -281,15 +292,14 @@ func TestShutdownTimingsUpdated(t *testing.T) {
 	go fetch(client, "http://"+addr+"/")
 	waitSignal(t, entered, "held request")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	start := time.Now()
-	err := srv.Shutdown(ctx)
-	elapsed := time.Since(start)
+	errc := shutdownAsync(srv, context.Background())
+	awaitDue(t, fake, 1, 50*time.Millisecond, "50ms drain timer")
+	if n := fake.Due(50*time.Millisecond - time.Nanosecond); n != 0 {
+		t.Fatalf("drain timer due before 50ms: %d", n)
+	}
+	fake.Advance(50 * time.Millisecond)
+	err, _ := testwait.Recv(t, "Shutdown to return", errc, nil)
 	if !errors.Is(err, ErrForcedClose) {
 		t.Fatalf("Shutdown error = %v, want ErrForcedClose", err)
-	}
-	if elapsed >= 5*time.Second {
-		t.Fatalf("Shutdown took %v, want about 50ms", elapsed)
 	}
 }
