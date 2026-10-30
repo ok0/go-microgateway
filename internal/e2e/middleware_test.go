@@ -19,6 +19,7 @@ import (
 	"github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/leakcheck"
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
 type tagRecorder struct {
@@ -94,7 +95,7 @@ func TestUserMiddlewareDecodeError(t *testing.T) {
       label: x
       bogus: 1
 `
-	_, err := microgateway.NewFromYAML([]byte(doc), microgateway.WithMiddleware("tag", tag))
+	_, err := newGatewayFromYAML([]byte(doc), microgateway.WithMiddleware("tag", tag))
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -145,7 +146,7 @@ func TestNewMiddlewareErrors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := microgateway.NewFromYAML([]byte(tc.doc), tc.opts...)
+			_, err := newGatewayFromYAML([]byte(tc.doc), tc.opts...)
 			if err == nil {
 				t.Fatal("expected an error")
 			}
@@ -225,14 +226,28 @@ func TestAbortHandlerNotSwallowed(t *testing.T) {
 }
 
 func TestRouteTimeout504(t *testing.T) {
+	arrived := make(chan struct{}, 1)
 	be := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case arrived <- struct{}{}:
+		default:
+		}
 		<-r.Context().Done()
 	}))
 	t.Cleanup(be.Close)
-	g := gwWith(t, routeDoc(be.URL, "    timeout: 100ms\n"))
+	fake := clock.NewFake(time.Now())
+	g := gwWith(t, routeDoc(be.URL, "    timeout: 100ms\n"), withClock(fake))
 
 	rec := httptest.NewRecorder()
-	g.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		g.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+	}()
+	testwait.Recv(t, "request to reach the hung backend", arrived, nil)
+	awaitDue(t, fake, 1, 100*time.Millisecond, "route deadline armed", nil)
+	fake.Advance(100 * time.Millisecond)
+	testwait.Done(t, "request to end at the route deadline", served, nil)
 	resp := rec.Result()
 	if resp.StatusCode != http.StatusGatewayTimeout {
 		t.Fatalf("status = %d, want 504", resp.StatusCode)
@@ -424,7 +439,7 @@ func TestCORSThroughGateway(t *testing.T) {
 func TestCredentialsWildcardRejected(t *testing.T) {
 	be, _ := counterBackend(t)
 	doc := builtinDoc(be.URL, "cors", "    params:\n      allowed_origins: [\"*\"]\n      allow_credentials: true\n")
-	_, err := microgateway.NewFromYAML([]byte(doc))
+	_, err := newGatewayFromYAML([]byte(doc))
 	if err == nil {
 		t.Fatal("expected an error")
 	}

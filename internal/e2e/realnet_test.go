@@ -12,6 +12,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/ok0/go-microgateway"
+	"github.com/ok0/go-microgateway/internal/clock"
 )
 
 func TestFileEditUnderLoadTCP(t *testing.T) {
@@ -97,13 +98,14 @@ func TestRealnetAuthJWKS(t *testing.T) {
 	authYAML := "auth:\n  jwt:\n    - name: idp\n      issuer: " + auIssuer + "\n      audiences:\n        - " + auAudience +
 		"\n      jwks:\n        url: " + strconv.Quote(idp.URL+"/jwks") + "\n        algorithms:\n          - RS256\n"
 	routes := "  - name: jwt\n    upstream: be\n    auth:\n      mode: jwt\n      providers:\n        - idp\n"
-	g := gwWith(t, auDoc(be.URL, authYAML, routes))
+	start := time.Now()
+	g := gwWith(t, auDoc(be.URL, authYAML, routes), withClock(clock.NewFake(start)))
 
 	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
 		"iss": auIssuer,
 		"aud": auAudience,
 		"sub": "user-1",
-		"exp": time.Now().Add(time.Hour).Unix(),
+		"exp": start.Add(time.Hour).Unix(),
 	})
 	tok.Header["kid"] = "k1"
 	signed, err := tok.SignedString(k.rsa1)
@@ -123,7 +125,11 @@ func TestRealnetAuthJWKS(t *testing.T) {
 func TestConnectTimeoutRealClockTCP(t *testing.T) {
 	logs := &logBuf{}
 	doc := oneUpstreamDoc("http://"+tcpNetwork{}.blackhole(t), "    timeouts:\n      connect: 50ms\n      response_header: 1h\n")
-	g := tcpNetwork{}.gateway(t, doc, microgateway.WithLogger(newJSONLogger(logs)))
+	g := tcpNetwork{}.gateway(t, doc,
+		microgateway.WithLogger(newJSONLogger(logs)),
+		// Real clock: the black-holed address's connect limit has to fire against the real network.
+		withClock(clock.Real()),
+	)
 	ts := tcpNetwork{}.serve(t, g)
 	r := awaitUpstreamReply(t, startUpstreamReply(tcpNetwork{}.client(t, nil), getRequest(t, ts.URL+"/")))
 	if r.status != http.StatusBadGateway || r.code != "bad_gateway" {

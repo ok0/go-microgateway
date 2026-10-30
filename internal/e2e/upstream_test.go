@@ -556,9 +556,9 @@ routes:
     upstream: dns
 `
 
-	_, err := microgateway.NewFromYAML([]byte(both))
+	_, err := newGatewayFromYAML([]byte(both))
 	dnsFieldError(t, err, "upstreams[0]", "hosts and dns are mutually exclusive")
-	_, err = microgateway.NewFromYAML([]byte(neither))
+	_, err = newGatewayFromYAML([]byte(neither))
 	dnsFieldError(t, err, "upstreams[0]", "either hosts or dns is required")
 
 	g := gwWith(t, dnsDoc(), withResolver(&fakeResolver{}), withClock(clock.NewFake(time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC))))

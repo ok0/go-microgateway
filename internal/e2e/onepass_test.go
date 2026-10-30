@@ -12,9 +12,11 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
 )
 
 const opSecret = "0nepass-UNIQUE-4"
@@ -116,7 +118,7 @@ func TestOnePassLoadReportsEverything(t *testing.T) {
 	be := n.serve(t, echoHandler("A"))
 	doc := opBadDoc(be.URL)
 
-	_, err := microgateway.NewFromYAML([]byte(doc))
+	_, err := newGatewayFromYAML([]byte(doc))
 	opWant(t, err, opBadWant(t, doc))
 
 	g := n.gateway(t, watchDoc(be.URL, "/x"))
@@ -199,7 +201,7 @@ func TestOnePassMixedDocuments(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := microgateway.NewFromYAML([]byte(tc.doc), tc.opts...)
+			_, err := newGatewayFromYAML([]byte(tc.doc), tc.opts...)
 			opWant(t, err, tc.want)
 
 			base := gwWith(t, watchDoc("http://127.0.0.1:9001", "/x"), tc.opts...)
@@ -225,7 +227,7 @@ func TestOnePassRegisteredTypes(t *testing.T) {
 	doc := head + "stores:\n  - name: s\n    type: test\nmiddlewares:\n  - name: t\n    type: tagger\n" + route
 	backend := "http://127.0.0.1:9001"
 
-	g, err := microgateway.NewFromYAML([]byte(doc), opts...)
+	g, err := newGatewayFromYAML([]byte(doc), opts...)
 	if err != nil {
 		t.Fatalf("NewFromYAML with registered types = %v, want nil", err)
 	}
@@ -246,7 +248,7 @@ func TestOnePassRegisteredTypes(t *testing.T) {
 		{Path: "stores[0].type", Line: opLine(t, doc, "type: test"), Msg: `store type "test" is not registered`},
 		{Path: "middlewares[0].type", Line: opLine(t, doc, "type: tagger"), Msg: `unknown middleware type "tagger"`},
 	}
-	_, err = microgateway.NewFromYAML([]byte(doc))
+	_, err = newGatewayFromYAML([]byte(doc))
 	opWant(t, err, want)
 
 	bare := gwWith(t, watchDoc(backend, "/x"), withClock(fake))
@@ -259,20 +261,26 @@ func TestOnePassWatchFile(t *testing.T) {
 	beA := n.serve(t, echoHandler("A"))
 	beB := n.serve(t, echoHandler("B"))
 	var buf logBuf
-	g := n.gateway(t, watchDoc(beA.URL, "/x"), microgateway.WithLogger(newJSONLogger(&buf)))
+	fake := clock.NewFake(time.Now())
+	g := n.gateway(t, watchDoc(beA.URL, "/x"), microgateway.WithLogger(newJSONLogger(&buf)), withClock(fake))
+	debounce := g.Config().Global.Reload.Debounce.Std()
 	path := writeConfig(t, t.TempDir(), watchDoc(beA.URL, "/x"))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- g.WatchFile(ctx, path) }()
+	eventually(t, "initial WatchFile attempt to count as unchanged", func() bool {
+		_, _, u := counters(g)
+		return u >= 1
+	}, countersState(g))
 
 	bad := opBadDoc(beA.URL)
 	if err := os.WriteFile(path, []byte(bad), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	const msg = "configuration reload failed; previous configuration remains active"
-	eventually(t, "failed reload counted and logged", func() bool {
+	eventuallyAdvancing(t, "failed reload counted and logged", fake, debounce, func() bool {
 		_, f, _ := counters(g)
 		return f >= 1 && len(buf.records(t, msg)) > 0
 	}, countersState(g))
@@ -303,7 +311,7 @@ func TestOnePassWatchFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte(watchDoc(beB.URL, "/x")), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "/x served by B", func() bool { return servedBy(g, "/x") == "B" }, func() string { return servedBy(g, "/x") })
+	eventuallyAdvancing(t, "/x served by B", fake, debounce, func() bool { return servedBy(g, "/x") == "B" }, func() string { return servedBy(g, "/x") })
 	cancel()
 	if err := awaitWatch(t, done); err != nil {
 		t.Fatalf("WatchFile = %v, want nil", err)
@@ -369,7 +377,7 @@ func opSecretCheck(t *testing.T, name string, err error) {
 
 func TestOnePassSecretsNeverSurface(t *testing.T) {
 	doc := opSecretDoc()
-	_, err := microgateway.NewFromYAML([]byte(doc))
+	_, err := newGatewayFromYAML([]byte(doc))
 	opSecretCheck(t, "NewFromYAML", err)
 
 	base := gwWith(t, watchDoc("http://127.0.0.1:9001", "/x"))

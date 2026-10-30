@@ -50,7 +50,7 @@ func TestGoBuiltTypelessMiddlewareOnce(t *testing.T) {
 	if got := gbPairs(t, microgateway.Validate(cfg)); !slices.Equal(got, want) {
 		t.Fatalf("Validate: got %v, want %v", got, want)
 	}
-	_, err := microgateway.New(cfg)
+	_, err := newGateway(cfg)
 	if got := gbPairs(t, err); !slices.Equal(got, want) {
 		t.Fatalf("New: got %v, want %v", got, want)
 	}
@@ -62,7 +62,7 @@ func TestGoBuiltTypelessMiddlewareOnce(t *testing.T) {
 
 func gbCompare(t *testing.T, n *memNetwork, backend, doc string, cfg *config.Config) {
 	t.Helper()
-	_, yerr := microgateway.NewFromYAML([]byte(doc))
+	_, yerr := newGatewayFromYAML([]byte(doc))
 	y := gbPairs(t, yerr)
 	check := func(step string, err error) {
 		t.Helper()
@@ -71,7 +71,7 @@ func gbCompare(t *testing.T, n *memNetwork, backend, doc string, cfg *config.Con
 		}
 	}
 	check("Validate", microgateway.Validate(cfg))
-	_, err := microgateway.New(cfg)
+	_, err := newGateway(cfg)
 	check("New", err)
 	g := n.gateway(t, watchDoc(backend, "/x"))
 	check("Reload", g.Reload(cfg))
@@ -103,7 +103,7 @@ func TestGoBuiltMatchesYAML(t *testing.T) {
 			`routes[0].rate_limit.store: store "missing" is not defined in stores`,
 			`stores[0].type: store type "nosuch" is not registered`,
 		}
-		_, yerr := microgateway.NewFromYAML([]byte(doc))
+		_, yerr := newGatewayFromYAML([]byte(doc))
 		if got := gbPairs(t, yerr); !slices.Equal(got, want) {
 			t.Fatalf("YAML errors = %v, want %v", got, want)
 		}

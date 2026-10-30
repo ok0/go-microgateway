@@ -197,7 +197,7 @@ func apkFromFile(t *testing.T, e *auEnv, path string, opts ...microgateway.Optio
 	if err != nil {
 		t.Fatal(err)
 	}
-	g, err := microgateway.New(cfg, append(opts, microgateway.WithLogger(e.logger()), withDialer(e.n.DialContext))...)
+	g, err := newGateway(cfg, append(opts, microgateway.WithLogger(e.logger()), withDialer(e.n.DialContext))...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +322,8 @@ func TestWatchFileReloadsKeyFile(t *testing.T) {
 	keysPath := filepath.Join(dir, "keys.yaml")
 	apkWrite(t, keysPath, apkKeysFile(hashA))
 	cfgPath := writeConfig(t, dir, auDoc(be.URL, apkKeyFileAuth(), apkRoute))
-	g := apkFromFile(t, e, cfgPath)
+	g := apkFromFile(t, e, cfgPath, withClock(e.clk))
+	debounce := g.Config().Global.Reload.Debounce.Std()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -338,7 +339,7 @@ func TestWatchFileReloadsKeyFile(t *testing.T) {
 	if err := os.Rename(tmp, keysPath); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "API key B accepted after the key-file rename", func() bool { return e.get(g, "/x", apkHdr(keyB)).Code == http.StatusOK }, nil)
+	eventuallyAdvancing(t, "API key B accepted after the key-file rename", e.clk, debounce, func() bool { return e.get(g, "/x", apkHdr(keyB)).Code == http.StatusOK }, countersState(g))
 	auAssert401(t, e.get(g, "/x", apkHdr(keyA)), "ApiKey")
 
 	cancel()
@@ -352,7 +353,7 @@ func TestAuthSeededErrorsNew(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = microgateway.NewFromYAML(data)
+	_, err = newGatewayFromYAML(data)
 	var ve *config.ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("NewFromYAML error = %v, want *config.ValidationError", err)
@@ -1657,14 +1658,14 @@ func TestAuthNoSecretsInLogs(t *testing.T) {
 }
 
 func TestWithKeySetFetcherNil(t *testing.T) {
-	g, err := microgateway.NewFromYAML([]byte("version: 1\n"), microgateway.WithKeySetFetcher(nil))
+	g, err := newGatewayFromYAML([]byte("version: 1\n"), microgateway.WithKeySetFetcher(nil))
 	if err == nil || err.Error() != "microgateway: WithKeySetFetcher: nil fetcher" {
 		t.Fatalf("NewFromYAML error = %v, want nil fetcher error", err)
 	}
 	if g != nil {
 		t.Fatal("NewFromYAML returned a gateway with an error")
 	}
-	g, err = microgateway.New(&config.Config{}, microgateway.WithKeySetFetcher(nil))
+	g, err = newGateway(&config.Config{}, microgateway.WithKeySetFetcher(nil))
 	if err == nil || err.Error() != "microgateway: WithKeySetFetcher: nil fetcher" {
 		t.Fatalf("New error = %v, want nil fetcher error", err)
 	}
@@ -1674,14 +1675,14 @@ func TestWithKeySetFetcherNil(t *testing.T) {
 }
 
 func TestWithHTTPClientNil(t *testing.T) {
-	g, err := microgateway.NewFromYAML([]byte("version: 1\n"), microgateway.WithHTTPClient(nil))
+	g, err := newGatewayFromYAML([]byte("version: 1\n"), microgateway.WithHTTPClient(nil))
 	if err == nil || err.Error() != "microgateway: WithHTTPClient: nil client" {
 		t.Fatalf("NewFromYAML error = %v, want nil client error", err)
 	}
 	if g != nil {
 		t.Fatal("NewFromYAML returned a gateway with an error")
 	}
-	g, err = microgateway.New(&config.Config{}, microgateway.WithHTTPClient(nil))
+	g, err = newGateway(&config.Config{}, microgateway.WithHTTPClient(nil))
 	if err == nil || err.Error() != "microgateway: WithHTTPClient: nil client" {
 		t.Fatalf("New error = %v, want nil client error", err)
 	}

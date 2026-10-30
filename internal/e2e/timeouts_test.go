@@ -251,7 +251,9 @@ func TestOneTimerPerLimit(t *testing.T) {
 
 	t.Run("header timeout without retry is 504", func(t *testing.T) {
 		hang := newRSBackend(t, n, otHang)
-		e := otServe(t, n, otDoc([]string{hang.URL}, fmt.Sprintf("connect: 1h\nresponse_header: %s\n", otLimit), ""))
+		// Real clock: the hung peer's response-header limit has to fire on the production clock.
+		e := otServe(t, n, otDoc([]string{hang.URL}, fmt.Sprintf("connect: 1h\nresponse_header: %s\n", otLimit), ""),
+			withClock(clock.Real()))
 
 		results := e.run(t, otRequests)
 		for i, r := range results {
@@ -271,7 +273,9 @@ func TestOneTimerPerLimit(t *testing.T) {
 
 	t.Run("connect timeout without retry is 502", func(t *testing.T) {
 		hole := n.blackhole(t)
-		e := otServe(t, n, otDoc([]string{"http://" + hole}, fmt.Sprintf("connect: %s\nresponse_header: 1h\n", otLimit), ""))
+		// Real clock: the black-holed peer's connect limit has to fire on the production clock.
+		e := otServe(t, n, otDoc([]string{"http://" + hole}, fmt.Sprintf("connect: %s\nresponse_header: 1h\n", otLimit), ""),
+			withClock(clock.Real()))
 
 		results := e.run(t, otRequests)
 		for i, r := range results {
@@ -466,7 +470,8 @@ func TestActiveProbeBoundedWithoutTransportHeaderLimit(t *testing.T) {
 			"unhealthy_threshold: 1, expected_statuses: [\"200-399\"]}",
 	}
 	sig := &otSignal{msg: "upstream host failed active health check", ch: make(chan struct{})}
-	g := n.gateway(t, doc.yaml(), microgateway.WithLogger(slog.New(sig)))
+	// Real clock: the hung probe's timeout has to fire on the production clock.
+	g := n.gateway(t, doc.yaml(), microgateway.WithLogger(slog.New(sig)), withClock(clock.Real()))
 
 	reRecv(t, "hung probe to reach the host", s.probeArrived, func() string {
 		return fmt.Sprintf("probes=%d", s.probeCount())

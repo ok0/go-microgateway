@@ -116,7 +116,7 @@ func sapiNew(t *testing.T, doc string, opts ...microgateway.Option) (*microgatew
 	if err != nil {
 		t.Fatal(err)
 	}
-	g, err := microgateway.New(cfg, opts...)
+	g, err := newGateway(cfg, opts...)
 	if err == nil {
 		t.Cleanup(func() { _ = g.Close() })
 	}
@@ -239,7 +239,7 @@ func TestStoreResolutionErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	missingCfg.Routes[0].RateLimit.Store = "nowhere"
-	_, err = microgateway.New(missingCfg, opts...)
+	_, err = newGateway(missingCfg, opts...)
 	if err == nil {
 		t.Fatal("New() = nil error, want resolution errors")
 	}
@@ -304,10 +304,10 @@ func TestStoreRegistrationErrors(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := microgateway.New(cfg, tc.opts...); err == nil || !strings.Contains(err.Error(), tc.want) {
+			if _, err := newGateway(cfg, tc.opts...); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("New() error = %v, want it to contain %q", err, tc.want)
 			}
-			if _, err := microgateway.NewFromYAML([]byte(doc), tc.opts...); err == nil || !strings.Contains(err.Error(), tc.want) {
+			if _, err := newGatewayFromYAML([]byte(doc), tc.opts...); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("NewFromYAML() error = %v, want it to contain %q", err, tc.want)
 			}
 			if err := microgateway.Validate(cfg, tc.opts...); err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -505,7 +505,7 @@ func TestStoresSeededViaNewFromYAML(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = microgateway.NewFromYAML(data)
+	_, err = newGatewayFromYAML(data)
 	if err == nil {
 		t.Fatal("NewFromYAML() = nil error, want the seeded errors")
 	}
@@ -806,7 +806,7 @@ func TestStoresSeededViaValidate(t *testing.T) {
 		t.Fatal("Validate changed cfg")
 	}
 
-	_, err = microgateway.New(cfg, opts...)
+	_, err = newGateway(cfg, opts...)
 	sapiWantAt(t, cfg, err, want)
 	if got := testCalls.Load() + redisCalls.Load(); got != 0 {
 		t.Fatalf("store factory calls after New = %d, want 0", got)
@@ -1739,14 +1739,14 @@ func TestStoreSecretsNeverSurface(t *testing.T) {
 		t.Error("source params no longer reveal their token after /config")
 	}
 
-	_, errBad := microgateway.NewFromYAML([]byte(srdBadDoc(be.URL)), opts...)
+	_, errBad := newGatewayFromYAML([]byte(srdBadDoc(be.URL)), opts...)
 	badText := srdFailed(t, errBad, "New with invalid store fields")
-	_, errBare := microgateway.NewFromYAML([]byte(srdBadDoc(be.URL)))
+	_, errBare := newGatewayFromYAML([]byte(srdBadDoc(be.URL)))
 	bareText := srdFailed(t, errBare, "New without registered types")
-	_, errMismatch := microgateway.NewFromYAML([]byte(srdMismatchDoc(be.URL)), opts...)
+	_, errMismatch := newGatewayFromYAML([]byte(srdMismatchDoc(be.URL)), opts...)
 	mismatchText := srdFailed(t, errMismatch, "New with a type mismatch")
 
-	_, errFactory := microgateway.NewFromYAML([]byte(srdDoc(be.URL)),
+	_, errFactory := newGatewayFromYAML([]byte(srdDoc(be.URL)),
 		withClock(fake),
 		microgateway.WithStoreType("redis", store.CapRateLimit, func(p microgateway.StoreParams) (store.Backend, error) {
 			return nil, fmt.Errorf("dial %s with password %s refused", p.Redis.Addresses[0], p.Redis.Password.Reveal())
@@ -1768,7 +1768,7 @@ func TestStoreSecretsNeverSurface(t *testing.T) {
 	validateText := srdFailed(t, errValidate, "Validate with registered types")
 
 	unsetLookup := func(string) (string, bool) { return "", false }
-	_, errUnset := microgateway.NewFromYAML([]byte(srdEnvDoc(be.URL, "${LG_UNSET_PW}", "local")), microgateway.WithEnvLookup(unsetLookup))
+	_, errUnset := newGatewayFromYAML([]byte(srdEnvDoc(be.URL, "${LG_UNSET_PW}", "local")), microgateway.WithEnvLookup(unsetLookup))
 	unsetText := srdFailed(t, errUnset, "New with an unset env reference")
 	if !strings.Contains(unsetText, "LG_UNSET_PW") {
 		t.Errorf("unset env error does not name LG_UNSET_PW")
@@ -1779,7 +1779,7 @@ func TestStoreSecretsNeverSurface(t *testing.T) {
 		}
 		return "", false
 	}
-	_, errSet := microgateway.NewFromYAML([]byte(srdEnvDoc(be.URL, "${LG_SET_PW}", "maybe")), withClock(fake), microgateway.WithEnvLookup(setLookup),
+	_, errSet := newGatewayFromYAML([]byte(srdEnvDoc(be.URL, "${LG_SET_PW}", "maybe")), withClock(fake), microgateway.WithEnvLookup(setLookup),
 		microgateway.WithStoreType("redis", store.CapRateLimit, func(p microgateway.StoreParams) (store.Backend, error) {
 			return shared.Handle(), nil
 		}))

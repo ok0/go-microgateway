@@ -936,7 +936,8 @@ func TestWatchFileReturnsErrClosed(t *testing.T) {
 	n := newMemNetwork()
 	beA := n.serve(t, echoHandler("A"))
 	beB := n.serve(t, echoHandler("B"))
-	g := n.gateway(t, watchDoc(beA.URL, "/x"))
+	fake := clock.NewFake(time.Now())
+	g := n.gateway(t, watchDoc(beA.URL, "/x"), withClock(fake))
 	dir := t.TempDir()
 	path := writeConfig(t, dir, watchDoc(beA.URL, "/x"))
 
@@ -949,11 +950,21 @@ func TestWatchFileReturnsErrClosed(t *testing.T) {
 		return u == 1
 	}, countersState(g))
 
+	debounce := g.Config().Global.Reload.Debounce.Std()
 	if err := g.Close(); err != nil {
 		t.Fatal(err)
 	}
 	writeConfig(t, dir, watchDoc(beB.URL, "/x"))
-	if err := awaitWatch(t, done); !errors.Is(err, microgateway.ErrClosed) {
+	var err error
+	eventuallyAdvancing(t, "WatchFile to return after Close", fake, debounce, func() bool {
+		select {
+		case err = <-done:
+			return true
+		default:
+			return false
+		}
+	}, countersState(g))
+	if !errors.Is(err, microgateway.ErrClosed) {
 		t.Fatalf("WatchFile = %v, want ErrClosed", err)
 	}
 }
@@ -963,7 +974,9 @@ func TestWatchFileAtomicRename(t *testing.T) {
 	be := n.serve(t, echoHandler("ok"))
 	dir := t.TempDir()
 	path := writeConfig(t, dir, watchDoc(be.URL, "/v0"))
-	g := n.gateway(t, watchDoc(be.URL, "/v0"))
+	fake := clock.NewFake(time.Now())
+	g := n.gateway(t, watchDoc(be.URL, "/v0"), withClock(fake))
+	debounce := g.Config().Global.Reload.Debounce.Std()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -983,7 +996,7 @@ func TestWatchFileAtomicRename(t *testing.T) {
 		if err := os.Rename(tmp, path); err != nil {
 			t.Fatal(err)
 		}
-		eventually(t, fmt.Sprintf("%s served after rename %d", route, i), func() bool { return servedBy(g, route) == "ok" }, func() string { return servedBy(g, route) })
+		eventuallyAdvancing(t, fmt.Sprintf("%s served after rename %d", route, i), fake, debounce, func() bool { return servedBy(g, route) == "ok" }, func() string { return servedBy(g, route) })
 		if s, _, _ := counters(g); s != float64(i) {
 			t.Fatalf("success after rename %d = %v, want %d", i, s, i)
 		}
