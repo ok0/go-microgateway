@@ -24,7 +24,7 @@ func Validate(cfg *config.Config, opts ...Option) error {
 	if err != nil {
 		return err
 	}
-	return checkConfig(cfg.Clone(), storeSet(o.stores), reg)
+	return checkConfig(cfg.Clone(), storeSet(o.stores, o.clk), reg)
 }
 
 func checkConfig(c *config.Config, set *runtime.StoreSet, reg *middleware.Registry) error {

@@ -14,13 +14,20 @@ import (
 	"github.com/redis/go-redis/v9/maintnotifications"
 
 	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
 )
 
 // NewFromConfig returns a Store built from cfg. It performs no network I/O;
 // connections are dialed on first use. A nil logger discards diagnostics.
+// Its dial, read and write limits run on the real clock.
 // NewFromConfig returns an error for an invalid configuration; the error text
 // never contains a credential or a file path.
 func NewFromConfig(cfg *config.RedisStore, logger *slog.Logger) (*Store, error) {
+	return newFromConfig(cfg, logger, clock.Real())
+}
+
+// newFromConfig is NewFromConfig with the dial, read and write limits of the client running on clk.
+func newFromConfig(cfg *config.RedisStore, logger *slog.Logger, clk clock.Clock) (*Store, error) {
 	if cfg == nil {
 		return nil, errors.New("redis: nil configuration")
 	}
@@ -38,7 +45,7 @@ func NewFromConfig(cfg *config.RedisStore, logger *slog.Logger) (*Store, error) 
 	if err != nil {
 		return nil, err
 	}
-	opts, err := clientOptions(cfg, tlsCfg)
+	opts, err := clientOptions(cfg, tlsCfg, clk)
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +60,8 @@ func NewFromConfig(cfg *config.RedisStore, logger *slog.Logger) (*Store, error) 
 
 // clientOptions returns the go-redis options for the configured mode as one of
 // *goredis.Options, *goredis.FailoverOptions or *goredis.ClusterOptions.
-func clientOptions(cfg *config.RedisStore, tlsCfg *tls.Config) (any, error) {
+// The options turn off go-redis's own time limits; the dialer returned by newDialer runs the configured limits on clk.
+func clientOptions(cfg *config.RedisStore, tlsCfg *tls.Config, clk clock.Clock) (any, error) {
 	mode := cfg.Mode
 	if mode == "" {
 		mode = "standalone"
@@ -62,9 +70,7 @@ func clientOptions(cfg *config.RedisStore, tlsCfg *tls.Config) (any, error) {
 		return nil, errors.New("redis: at least one address is required")
 	}
 	addrs := slices.Clone(cfg.Addresses)
-	dial := dur(cfg.DialTimeout, time.Second)
-	read := dur(cfg.ReadTimeout, 500*time.Millisecond)
-	write := dur(cfg.WriteTimeout, 500*time.Millisecond)
+	dialer := newDialer(clk, limitsOf(cfg), tlsCfg)
 	disabled := &maintnotifications.Config{Mode: maintnotifications.ModeDisabled}
 	switch mode {
 	case "standalone":
@@ -79,9 +85,12 @@ func clientOptions(cfg *config.RedisStore, tlsCfg *tls.Config) (any, error) {
 			Protocol:                 2,
 			MaxRetries:               -1,
 			DialerRetries:            1,
-			DialTimeout:              dial,
-			ReadTimeout:              read,
-			WriteTimeout:             write,
+			Dialer:                   dialer,
+			DialTimeout:              ownDialer,
+			ReadTimeout:              noSocketDeadline,
+			WriteTimeout:             noSocketDeadline,
+			PoolTimeout:              poolWaitForever,
+			ConnMaxIdleTime:          keepIdleConns,
 			ContextTimeoutEnabled:    true,
 			PoolSize:                 cfg.PoolSize,
 			MinIdleConns:             cfg.MinIdleConns,
@@ -104,9 +113,12 @@ func clientOptions(cfg *config.RedisStore, tlsCfg *tls.Config) (any, error) {
 			Protocol:              2,
 			MaxRetries:            -1,
 			DialerRetries:         1,
-			DialTimeout:           dial,
-			ReadTimeout:           read,
-			WriteTimeout:          write,
+			Dialer:                dialer,
+			DialTimeout:           ownDialer,
+			ReadTimeout:           noSocketDeadline,
+			WriteTimeout:          noSocketDeadline,
+			PoolTimeout:           poolWaitForever,
+			ConnMaxIdleTime:       keepIdleConns,
 			ContextTimeoutEnabled: true,
 			PoolSize:              cfg.PoolSize,
 			MinIdleConns:          cfg.MinIdleConns,
@@ -125,9 +137,12 @@ func clientOptions(cfg *config.RedisStore, tlsCfg *tls.Config) (any, error) {
 			MaxRetries:               -1,
 			MaxRedirects:             -1,
 			DialerRetries:            1,
-			DialTimeout:              dial,
-			ReadTimeout:              read,
-			WriteTimeout:             write,
+			Dialer:                   dialer,
+			DialTimeout:              ownDialer,
+			ReadTimeout:              noSocketDeadline,
+			WriteTimeout:             noSocketDeadline,
+			PoolTimeout:              poolWaitForever,
+			ConnMaxIdleTime:          keepIdleConns,
 			ContextTimeoutEnabled:    true,
 			PoolSize:                 cfg.PoolSize,
 			MinIdleConns:             cfg.MinIdleConns,

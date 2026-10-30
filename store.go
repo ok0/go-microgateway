@@ -8,6 +8,7 @@ import (
 	"log/slog"
 
 	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/runtime"
 	"github.com/ok0/go-microgateway/store"
 )
@@ -29,6 +30,7 @@ type StoreParams struct {
 	Logger *slog.Logger
 
 	params config.SecretParams
+	clk    clock.Clock // clock of the owning gateway, read through hooks.StoreClock
 }
 
 // Decode strictly decodes the entry's params into v. Unknown keys and type mismatches are errors that name the field
@@ -105,14 +107,14 @@ func checkStoreRegistrations(regs []storeRegistration) error {
 	return errors.Join(errs...)
 }
 
-func storeSet(regs []storeRegistration) *runtime.StoreSet {
+func storeSet(regs []storeRegistration, clk clock.Clock) *runtime.StoreSet {
 	types := make(map[string]runtime.StoreType, len(regs))
 	for _, r := range regs {
 		f := r.f
 		types[r.typeName] = runtime.StoreType{
 			Caps: r.caps,
 			Build: func(e *config.Store, l *slog.Logger) (store.Backend, error) {
-				return f(StoreParams{Name: e.Name, Type: e.Type, Redis: e.Redis.Clone(), Logger: l, params: e.Params})
+				return f(StoreParams{Name: e.Name, Type: e.Type, Redis: e.Redis.Clone(), Logger: l, params: e.Params, clk: clk})
 			},
 		}
 	}

@@ -65,8 +65,12 @@
 //
 // The client does not retry commands. A retried script after an ambiguous
 // failure could consume a request twice. Each call is bounded by the dial,
-// read and write timeouts configured for the store, and by the context passed
-// to Take.
+// read and write timeouts configured for the store and by the context passed
+// to Take. The dial timeout covers the TLS handshake; the read and write
+// timeouts bound each read and write on the connection. They run on the clock
+// of the gateway that built the store, or on the real clock for a Store from
+// NewFromConfig. When the context ends first, Take returns at once and the
+// abandoned call ends at those timeouts.
 //
 // Errors from Take wrap store.ErrUnavailable and carry only a fixed category
 // such as "timeout" or "server error WRONGTYPE"; they never contain a server

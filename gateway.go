@@ -95,6 +95,12 @@ func init() {
 			ReloadUnchanged: g.reloads.unchanged.Value(),
 		}
 	}
+	hooks.StoreClock = func(p any) clock.Clock {
+		if c := p.(StoreParams).clk; c != nil {
+			return c
+		}
+		return clock.Real()
+	}
 }
 
 func WithLogger(l *slog.Logger) Option {
@@ -168,7 +174,7 @@ func New(cfg *config.Config, opts ...Option) (*Gateway, error) {
 	if err != nil {
 		return nil, err
 	}
-	set := storeSet(o.stores)
+	set := storeSet(o.stores, o.clk)
 	cfg = cfg.Clone()
 	if err := cfg.Validate(); err != nil {
 		return nil, withResolution(err, cfg, set, reg)
@@ -226,7 +232,7 @@ func NewFromYAML(data []byte, opts ...Option) (*Gateway, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := config.Parse(data, loadOptions(o.lookup, storeSet(o.stores), reg)...)
+	cfg, err := config.Parse(data, loadOptions(o.lookup, storeSet(o.stores, o.clk), reg)...)
 	if err != nil {
 		return nil, err
 	}

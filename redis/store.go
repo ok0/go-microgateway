@@ -87,7 +87,9 @@ func (s *Store) keyFor(key string, a store.Algorithm) string {
 // decision. Take follows the order defined by the store package: it returns a
 // context error unwrapped when ctx is already done, validates l, fails with an
 // error wrapping store.ErrUnavailable when the store is closed or the script
-// call fails, and otherwise decides and persists atomically.
+// call fails, and otherwise decides and persists atomically. Take returns as
+// soon as ctx ends; the script call it abandons goes on until a connection
+// limit of the store ends it.
 func (s *Store) Take(ctx context.Context, key string, l store.Limit) (store.Decision, error) {
 	if err := ctx.Err(); err != nil {
 		return store.Decision{}, err
@@ -117,7 +119,7 @@ func (s *Store) Take(ctx context.Context, key string, l store.Limit) (store.Deci
 	if s.clockArgs != nil {
 		args = append(args, s.clockArgs()...)
 	}
-	res, err := script.Run(ctx, s.c, []string{s.keyFor(key, l.Algorithm)}, args...).Result()
+	res, err := s.run(ctx, script, s.keyFor(key, l.Algorithm), args)
 	if err != nil {
 		return store.Decision{}, s.fail(ctx, err)
 	}
@@ -126,6 +128,30 @@ func (s *Store) Take(ctx context.Context, key string, l store.Limit) (store.Deci
 		return store.Decision{}, fmt.Errorf("redis: take: unexpected script reply: %w", store.ErrUnavailable)
 	}
 	return d, nil
+}
+
+// run runs script on key with args and returns its reply. go-redis does not watch a context during socket I/O, so
+// when ctx can end, run waits for the reply or for the end of ctx, whichever comes first. A call it abandons holds
+// its connection until the read or write limit of the store ends it.
+func (s *Store) run(ctx context.Context, script *goredis.Script, key string, args []any) (any, error) {
+	if ctx.Done() == nil {
+		return script.Run(ctx, s.c, []string{key}, args...).Result()
+	}
+	type reply struct {
+		res any
+		err error
+	}
+	ch := make(chan reply, 1)
+	go func() {
+		res, err := script.Run(ctx, s.c, []string{key}, args...).Result()
+		ch <- reply{res, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.res, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // decode converts the reply of a rate-limit script into a Decision. It reports

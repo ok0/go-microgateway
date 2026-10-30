@@ -55,3 +55,9 @@ type Stats struct {
 // Inspect returns the Stats of gw, which must be a *microgateway.Gateway; it panics for any other value. Package
 // microgateway sets it when it is initialized; it is nil until then.
 var Inspect func(gw any) Stats
+
+// StoreClock returns the clock of the gateway that builds the store described by p, which must be the
+// microgateway.StoreParams passed to a store factory; it panics for any other value. It is the real clock unless
+// the gateway was given another one. Store factories use it so that the time limits of a store run on the clock of
+// its gateway. Package microgateway sets it when it is initialized; it is nil until then.
+var StoreClock func(p any) clock.Clock
