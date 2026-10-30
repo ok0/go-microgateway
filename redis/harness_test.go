@@ -54,12 +54,13 @@ func (c *miniClock) Set(at time.Time) {
 
 func newTestStore(t *testing.T, addr string, db int, prefix string) *Store {
 	t.Helper()
-	s, err := NewFromConfig(&config.RedisStore{
+	// The client's limits run on a fake clock of its own that nothing advances, so no limit ends a call to a healthy server.
+	s, err := newFromConfig(&config.RedisStore{
 		Mode:      "standalone",
 		Addresses: []string{addr},
 		DB:        db,
 		KeyPrefix: &prefix,
-	}, nil)
+	}, nil, clock.NewFake(miniStart))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,13 +70,12 @@ func newTestStore(t *testing.T, addr string, db int, prefix string) *Store {
 
 func newTestClient(t *testing.T, addr string, db int) *goredis.Client {
 	t.Helper()
-	c := goredis.NewClient(&goredis.Options{
-		Addr:            addr,
-		DB:              db,
-		Protocol:        2,
-		DisableIdentity: true,
-		MaxRetries:      -1,
-	})
+	// The options of a store's client, on a fake clock of its own that nothing advances.
+	opts, err := clientOptions(&config.RedisStore{Mode: "standalone", Addresses: []string{addr}, DB: db}, nil, clock.NewFake(miniStart))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := goredis.NewClient(opts.(*goredis.Options))
 	t.Cleanup(func() { _ = c.Close() })
 	return c
 }
@@ -200,9 +200,13 @@ var setupCommands = map[string]bool{"HELLO": true, "AUTH": true, "SELECT": true,
 // proxyDropReply mode each data-plane request is sent to the target, its reply
 // is discarded and the client connection is closed.
 type respProxy struct {
-	ln       net.Listener
-	target   string
+	addr   string
+	target string
+
 	mu       sync.Mutex
+	ln       net.Listener // nil while the proxy is down
+	served   chan struct{}
+	conns    map[net.Conn]struct{}
 	mode     proxyMode
 	commands []string
 	requests [][]string
@@ -215,14 +219,62 @@ func newRespProxy(t *testing.T, target string) *respProxy {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ln.Close() })
-	p := &respProxy{ln: ln, target: target}
-	go p.serve()
+	p := &respProxy{addr: ln.Addr().String(), target: target, conns: make(map[net.Conn]struct{})}
+	p.start(ln)
+	t.Cleanup(p.shutdown)
 	return p
 }
 
+// start serves ln. The caller holds no lock.
+func (p *respProxy) start(ln net.Listener) {
+	served := make(chan struct{})
+	p.mu.Lock()
+	p.ln, p.served = ln, served
+	p.mu.Unlock()
+	go p.serve(ln, served)
+}
+
+// Down stops the proxy: it closes the listener, so a later dial is refused, and every client connection. It returns
+// once the accept loop has ended, so no connection accepted before Down is left open and none is accepted after it.
+func (p *respProxy) Down() {
+	p.mu.Lock()
+	ln, served := p.ln, p.served
+	p.ln = nil
+	conns := p.conns
+	p.conns = make(map[net.Conn]struct{})
+	p.mu.Unlock()
+	if ln == nil {
+		return
+	}
+	_ = ln.Close()
+	<-served
+	p.mu.Lock()
+	for c := range p.conns {
+		conns[c] = struct{}{}
+	}
+	p.conns = make(map[net.Conn]struct{})
+	p.mu.Unlock()
+	for c := range conns {
+		_ = c.Close()
+	}
+}
+
+// Up makes the proxy accept connections again on the address it had before Down.
+func (p *respProxy) Up() error {
+	ln, err := net.Listen("tcp", p.addr)
+	if err != nil {
+		return err
+	}
+	p.start(ln)
+	return nil
+}
+
+func (p *respProxy) shutdown() {
+	p.Down()
+}
+
 func (p *respProxy) Addr() string {
-	return p.ln.Addr().String()
+	return p.addr
 }
 
 func (p *respProxy) SetMode(m proxyMode) {
@@ -274,18 +326,27 @@ func (p *respProxy) record(name string, args []string) {
 	p.requests = append(p.requests, args)
 }
 
-func (p *respProxy) serve() {
+func (p *respProxy) serve(ln net.Listener, served chan struct{}) {
+	defer close(served)
 	for {
-		c, err := p.ln.Accept()
+		c, err := ln.Accept()
 		if err != nil {
 			return
 		}
+		p.mu.Lock()
+		p.conns[c] = struct{}{}
+		p.mu.Unlock()
 		go p.handle(c)
 	}
 }
 
 func (p *respProxy) handle(client net.Conn) {
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+		p.mu.Lock()
+		delete(p.conns, client)
+		p.mu.Unlock()
+	}()
 	up, err := net.Dial("tcp", p.target)
 	if err != nil {
 		return

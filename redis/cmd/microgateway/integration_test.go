@@ -17,7 +17,7 @@ func TestIntegrationTwoInstances(t *testing.T) {
 	if addr == "" {
 		t.Fatal("MICROGATEWAY_REDIS_ADDR is not set: the integration build tag runs this test against a Redis 6.2+ server at that host:port, e.g. docker run -d --rm -p 6379:6379 redis:7.4-alpine")
 	}
-	c := goredis.NewClient(&goredis.Options{Addr: addr})
+	c := newRawClient(&goredis.Options{Addr: addr})
 	t.Cleanup(func() { c.Close() })
 	if !serverAtLeast(t, c, 6, 2) {
 		t.Fatal("Redis 6.2 or later is required")

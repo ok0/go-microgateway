@@ -11,10 +11,12 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	microgateway "github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/hooks"
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
 func upstream(t *testing.T) string {
@@ -104,6 +106,46 @@ func doGet(g http.Handler, path, remote string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	g.ServeHTTP(rec, req)
 	return rec
+}
+
+// getGuarded serves GET path from remote on g in its own goroutine and waits for it under a hang guard.
+func getGuarded(t *testing.T, g http.Handler, path, remote string) *httptest.ResponseRecorder {
+	t.Helper()
+	var rec *httptest.ResponseRecorder
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		rec = doGet(g, path, remote)
+	}()
+	testwait.Done(t, "GET "+path+" to complete", done, nil)
+	return rec
+}
+
+// getAdvancing is getGuarded for a gateway on fake: while the request is pending it advances fake by step whenever a
+// timer of fake is due within step. It returns the recorder and the fake time that passed while the request ran.
+func getAdvancing(t *testing.T, g http.Handler, fake *clock.Fake, step time.Duration, path, remote string) (*httptest.ResponseRecorder, time.Duration) {
+	t.Helper()
+	start := fake.Now()
+	var rec *httptest.ResponseRecorder
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		rec = doGet(g, path, remote)
+	}()
+	testwait.Until(t, "GET "+path+" to complete", func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+		}
+		if fake.Due(step) > 0 {
+			fake.Advance(step)
+		}
+		return false
+	}, func() string {
+		return fmt.Sprintf("fake clock advanced %v; timers due within %v: %d", fake.Since(start), step, fake.Due(step))
+	})
+	return rec, fake.Since(start)
 }
 
 func responseErrorCode(t *testing.T, rec *httptest.ResponseRecorder) string {

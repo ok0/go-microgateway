@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,7 +9,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"time"
+
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
 func buildBinary(t *testing.T, ldflags string) string {
@@ -35,11 +34,19 @@ func buildBinary(t *testing.T, ldflags string) string {
 
 func runBinary(t *testing.T, bin string, args ...string) (string, string, int) {
 	t.Helper()
-	var out, errb bytes.Buffer
+	var out, errb syncBuffer
 	cmd := exec.Command(bin, args...)
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
-	err := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	err, _ := testwait.Recv(t, "microgateway "+strings.Join(args, " ")+" to exit", done, func() string {
+		return "stdout:\n" + out.String() + "\nstderr:\n" + errb.String()
+	})
 	var ee *exec.ExitError
 	switch {
 	case err == nil:
@@ -71,8 +78,8 @@ routes:
 `
 
 func TestBinary(t *testing.T) {
+	bin := buildBinary(t, "")
 	t.Run("version", func(t *testing.T) {
-		bin := buildBinary(t, "")
 		out, _, code := runBinary(t, bin, "version")
 		if code != 0 {
 			t.Fatalf("exit %d, want 0", code)
@@ -94,7 +101,6 @@ func TestBinary(t *testing.T) {
 	})
 
 	t.Run("no command", func(t *testing.T) {
-		bin := buildBinary(t, "")
 		_, errs, code := runBinary(t, bin)
 		if code != 2 {
 			t.Fatalf("exit %d, want 2", code)
@@ -105,7 +111,6 @@ func TestBinary(t *testing.T) {
 	})
 
 	t.Run("validate", func(t *testing.T) {
-		bin := buildBinary(t, "")
 		pw := uniqueSecret(t, "pw-")
 		valid := instanceDoc(docOpts{
 			Backend:   backend(t),
@@ -136,15 +141,15 @@ func TestBinary(t *testing.T) {
 		if runtime.GOOS == "windows" {
 			t.Skip("signals are not delivered to child processes on windows")
 		}
-		bin := buildBinary(t, "")
 		path := writeDoc(t, instanceDoc(docOpts{
 			Backend:   backend(t),
 			RedisAddr: "127.0.0.1:1",
 			Prefix:    uniquePrefix(t),
 		}))
+		outb := &syncBuffer{}
 		errb := &syncBuffer{}
 		cmd := exec.Command(bin, "run", "-config", path, "-log-format", "text")
-		cmd.Stdout = io.Discard
+		cmd.Stdout = outb
 		cmd.Stderr = errb
 		if err := cmd.Start(); err != nil {
 			t.Fatal(err)
@@ -153,21 +158,20 @@ func TestBinary(t *testing.T) {
 		done := make(chan error, 1)
 		go func() { done <- cmd.Wait() }()
 
-		eventually(t, func() bool { return strings.Contains(errb.String(), "msg=listening") })
+		child := func() string {
+			return "stdout:\n" + outb.String() + "\nstderr:\n" + errb.String()
+		}
+		eventually(t, "child to log listening", func() bool { return strings.Contains(errb.String(), "msg=listening") }, child)
 		if err := cmd.Process.Signal(syscall.SIGHUP); err != nil {
 			t.Fatal(err)
 		}
-		eventually(t, func() bool { return strings.Contains(errb.String(), "reload requested") })
+		eventually(t, "child to log reload requested", func() bool { return strings.Contains(errb.String(), "reload requested") }, child)
 		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 			t.Fatal(err)
 		}
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Fatalf("run exited with %v, want 0: %s", err, errb.String())
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatalf("run did not exit within 10s: %s", errb.String())
+		err, _ := testwait.Recv(t, "child to exit after SIGTERM", done, child)
+		if err != nil {
+			t.Fatalf("run exited with %v, want 0: %s", err, errb.String())
 		}
 		if !strings.Contains(errb.String(), "msg=stopped") {
 			t.Fatalf("stderr does not report stopped: %s", errb.String())

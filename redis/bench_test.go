@@ -11,6 +11,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 
 	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/store"
 )
 
@@ -18,11 +19,11 @@ func BenchmarkTake(b *testing.B) {
 	m := miniredis.RunT(b)
 	m.SetTime(miniStart)
 	prefix := "mgtest"
-	s, err := NewFromConfig(&config.RedisStore{
+	s, err := newFromConfig(&config.RedisStore{
 		Mode:      "standalone",
 		Addresses: []string{m.Addr()},
 		KeyPrefix: &prefix,
-	}, nil)
+	}, nil, clock.NewFake(miniStart))
 	if err != nil {
 		b.Fatal(err)
 	}

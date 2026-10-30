@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/testwait"
 	"github.com/ok0/go-microgateway/store"
 	"github.com/ok0/go-microgateway/store/storetest"
 )
@@ -24,7 +26,7 @@ type storeFactory func(t *testing.T, prefix string) *Store
 
 func newConfigStore(t *testing.T, cfg *config.RedisStore) *Store {
 	t.Helper()
-	s, err := NewFromConfig(cfg, nil)
+	s, err := newFromConfig(cfg, nil, clock.NewFake(miniStart))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +94,7 @@ func scanPrefix(t *testing.T, c goredis.UniversalClient, prefix string) []string
 	}
 }
 
-func realExpiryMs(t *testing.T, c goredis.UniversalClient, key string) int64 {
+func expiryMsIfLive(t *testing.T, c goredis.UniversalClient, key string) (int64, time.Duration, bool) {
 	t.Helper()
 	ctx := context.Background()
 	for attempt := 0; attempt < 100; attempt++ {
@@ -105,13 +107,22 @@ func realExpiryMs(t *testing.T, c goredis.UniversalClient, key string) int64 {
 		}
 		if t0.Val().UnixMilli() == t1.Val().UnixMilli() {
 			if pttl.Val() < 0 {
-				t.Fatalf("PTTL %q = %s, want a live expiry", key, pttl.Val())
+				return 0, pttl.Val(), false
 			}
-			return t0.Val().UnixMilli() + pttl.Val().Milliseconds()
+			return t0.Val().UnixMilli() + pttl.Val().Milliseconds(), pttl.Val(), true
 		}
 	}
 	t.Fatal("no PTTL bracketed by TIME readings within one millisecond in 100 attempts")
-	return 0
+	return 0, 0, false
+}
+
+func realExpiryMs(t *testing.T, c goredis.UniversalClient, key string) int64 {
+	t.Helper()
+	e, pttl, live := expiryMsIfLive(t, c, key)
+	if !live {
+		t.Fatalf("PTTL %q = %s, want a live expiry", key, pttl)
+	}
+	return e
 }
 
 func durCeilMs(d time.Duration) int64 {
@@ -122,7 +133,7 @@ func checkExactWithoutRefill(t *testing.T, s *Store, key string) {
 	t.Helper()
 	ctx := context.Background()
 	l := store.Limit{Algorithm: store.TokenBucket, Count: 1, Period: time.Hour, Burst: 3}
-	start := time.Now()
+	t0 := serverMs(t, s.c)
 	for i := 1; i <= 3; i++ {
 		d, err := s.Take(ctx, key, l)
 		if err != nil {
@@ -132,7 +143,7 @@ func checkExactWithoutRefill(t *testing.T, s *Store, key string) {
 			t.Fatalf("take %d of %q: %+v, want allowed with Remaining %d", i, key, d, 3-i)
 		}
 		want := time.Duration(i) * time.Hour
-		delta := time.Since(start)
+		delta := time.Duration(serverMs(t, s.c)-t0+1) * time.Millisecond
 		if d.ResetAfter > want || d.ResetAfter < want-delta {
 			t.Errorf("take %d of %q: ResetAfter %s, want within [%s, %s]", i, key, d.ResetAfter, want-delta, want)
 		}
@@ -149,45 +160,53 @@ func checkExactWithoutRefill(t *testing.T, s *Store, key string) {
 	}
 }
 
-func hammer(t *testing.T, stores []*Store, key string, l store.Limit, window time.Duration) (int64, int64, time.Duration) {
+// hammer runs takes from perStore callers per store until the limit has denied minDenied takes. It returns the admitted takes, the total takes and the server time that passed, plus one millisecond.
+func hammer(t *testing.T, stores []*Store, key string, l store.Limit, minDenied int64) (int64, int64, time.Duration) {
 	t.Helper()
 	ctx := context.Background()
 	const perStore = 8
-	counts := make([]int64, len(stores)*perStore)
-	totals := make([]int64, len(stores)*perStore)
+	var admitted, total, denied atomic.Int64
 	errs := make([]error, len(stores)*perStore)
-	start := time.Now()
-	deadline := start.Add(window)
+	var stop atomic.Bool
+	defer stop.Store(true)
+	start := serverMs(t, stores[0].c)
 	var wg sync.WaitGroup
-	for g := range counts {
+	for g := range errs {
 		s := stores[g%len(stores)]
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for time.Now().Before(deadline) {
+			for !stop.Load() && denied.Load() < minDenied {
 				d, err := s.Take(ctx, key, l)
 				if err != nil {
 					errs[g] = err
+					stop.Store(true)
 					return
 				}
-				totals[g]++
+				total.Add(1)
 				if d.Allowed {
-					counts[g]++
+					admitted.Add(1)
+				} else {
+					denied.Add(1)
 				}
 			}
 		}()
 	}
-	wg.Wait()
-	elapsed := time.Since(start)
-	var admitted, total int64
-	for g := range counts {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	testwait.Done(t, fmt.Sprintf("%d denied takes of %q", minDenied, key), done, func() string {
+		return fmt.Sprintf("admitted %d, denied %d, total %d", admitted.Load(), denied.Load(), total.Load())
+	})
+	elapsed := time.Duration(serverMs(t, stores[0].c)-start+1) * time.Millisecond
+	for g := range errs {
 		if errs[g] != nil {
 			t.Fatalf("take %q: %v", key, errs[g])
 		}
-		admitted += counts[g]
-		total += totals[g]
 	}
-	return admitted, total, elapsed
+	return admitted.Load(), total.Load(), elapsed
 }
 
 func checkBoundUnderConcurrency(t *testing.T, open storeFactory) {
@@ -197,7 +216,8 @@ func checkBoundUnderConcurrency(t *testing.T, open storeFactory) {
 	cleanPrefix(t, stores[0])
 
 	tb := store.Limit{Algorithm: store.TokenBucket, Count: 20, Period: time.Second, Burst: 5}
-	admitted, total, elapsed := hammer(t, stores, "bound-tb", tb, 600*time.Millisecond)
+	// Run until the limit has denied as many takes as there are callers.
+	admitted, total, elapsed := hammer(t, stores, "bound-tb", tb, 16)
 	if bound := 5 + int64(elapsed/(50*time.Millisecond)); admitted > bound {
 		t.Errorf("token bucket admitted %d in %s, want at most %d", admitted, elapsed, bound)
 	}
@@ -209,7 +229,8 @@ func checkBoundUnderConcurrency(t *testing.T, open storeFactory) {
 	}
 
 	sw := store.Limit{Algorithm: store.SlidingWindow, Count: 10, Period: 500 * time.Millisecond}
-	admitted, total, elapsed = hammer(t, stores, "bound-sw", sw, 600*time.Millisecond)
+	// Run until the limit has denied as many takes as there are callers.
+	admitted, total, elapsed = hammer(t, stores, "bound-sw", sw, 16)
 	windows := int64((elapsed + 500*time.Millisecond - 1) / (500 * time.Millisecond))
 	if bound := 10 * (1 + windows); admitted > bound {
 		t.Errorf("sliding window admitted %d in %s, want at most %d", admitted, elapsed, bound)
@@ -274,11 +295,18 @@ func serverMs(t *testing.T, c goredis.UniversalClient) int64 {
 	return now.UnixMilli()
 }
 
+// checkFloodExpires runs floodExpires with the key period. An attempt that does not finish within the key period is inconclusive: its keys are deleted and it is repeated with twice the period.
 func checkFloodExpires(t *testing.T, s *Store) {
+	t.Helper()
+	for period := 10 * time.Second; !floodExpires(t, s, period); period *= 2 {
+		t.Logf("flood and checks outlasted the %s key period; repeating with %s", period, 2*period)
+	}
+}
+
+func floodExpires(t *testing.T, s *Store, period time.Duration) bool {
 	t.Helper()
 	ctx := context.Background()
 	const n = 10000
-	const period = 10 * time.Second
 	periodMs := period.Milliseconds()
 	l := store.Limit{Algorithm: store.TokenBucket, Count: 1, Period: period, Burst: 1}
 
@@ -330,50 +358,46 @@ func checkFloodExpires(t *testing.T, s *Store) {
 	}
 	samples := []int{0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 9999}
 	for _, i := range samples {
-		e := realExpiryMs(t, s.c, s.keyFor(fmt.Sprintf("flood:%d", i), store.TokenBucket))
+		e, _, live := expiryMsIfLive(t, s.c, s.keyFor(fmt.Sprintf("flood:%d", i), store.TokenBucket))
+		if !live {
+			deleteAllPrefix(t, s.c, s.prefix)
+			return false
+		}
 		if e < t0+periodMs || e > t1+periodMs+1 {
 			t.Errorf("key flood:%d expires at %d ms, want within [%d, %d]", i, e, t0+periodMs, t1+periodMs+1)
 		}
 	}
 	t2 := serverMs(t, s.c)
 	if t2 >= t0+periodMs {
-		t.Fatalf("flood and checks took %d ms of server time, not within the %s period: expiry check inconclusive", t2-t0, period)
+		deleteAllPrefix(t, s.c, s.prefix)
+		return false
 	}
 	if size != n {
 		t.Fatalf("DBSIZE = %d right after the flood, want %d", size, n)
 	}
 
 	maxExp := t1 + periodMs + 1
-	giveUp := time.Now().Add(period + 5*time.Second)
-	for {
-		if serverMs(t, s.c) > maxExp {
-			break
-		}
-		if time.Now().After(giveUp) {
-			t.Fatalf("server time did not pass the flood expiries within %s", period+5*time.Second)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	testwait.Until(t, "server time to pass the flood expiries", func() bool {
+		return serverMs(t, s.c) > maxExp
+	}, func() string {
+		return fmt.Sprintf("server time %d ms, last expiry %d ms", serverMs(t, s.c), maxExp)
+	})
 	for _, i := range samples {
 		if s.c.Exists(ctx, s.keyFor(fmt.Sprintf("flood:%d", i), store.TokenBucket)).Val() != 0 {
 			t.Errorf("key flood:%d still exists after server time passed its expiry", i)
 		}
 	}
 
-	deadline := time.Now().Add(15 * time.Second)
-	for {
+	testwait.Until(t, "every flood key to be removed after its expiry", func() bool {
 		left, err := s.c.DBSize(ctx).Result()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if left == 0 {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("DBSIZE = %d 15 s after every flood key expired, want 0", left)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+		return left == 0
+	}, func() string {
+		return fmt.Sprintf("DBSIZE = %d", s.c.DBSize(ctx).Val())
+	})
+	return true
 }
 
 func checkScriptFlush(t *testing.T, s *Store) {
@@ -538,7 +562,7 @@ func TestIntegrationSuite(t *testing.T) {
 	})
 
 	t.Run("MultiInstance", func(t *testing.T) {
-		runMultiInstance(t, redisServer{addr: addr, db: 15, exact: false, advance: time.Sleep})
+		runMultiInstance(t, redisServer{addr: addr, db: 15, exact: false, advance: time.Sleep, now: func(t *testing.T) time.Time { return time.UnixMilli(serverMs(t, c)) }})
 	})
 
 	t.Run("Sentinel", func(t *testing.T) {

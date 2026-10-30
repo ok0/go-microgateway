@@ -15,6 +15,8 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/testwait"
 	"github.com/ok0/go-microgateway/store"
 )
 
@@ -42,19 +44,20 @@ func mustPanic(t *testing.T, want string, f func()) {
 	f()
 }
 
-func newStoreWithReadTimeout(t *testing.T, addr string, readTimeout time.Duration) *Store {
+func newStoreWithReadTimeout(t *testing.T, addr string, readTimeout time.Duration) (*Store, *clock.Fake) {
 	t.Helper()
 	d := config.Duration(readTimeout)
-	s, err := NewFromConfig(&config.RedisStore{
+	fake := clock.NewFake(miniStart)
+	s, err := newFromConfig(&config.RedisStore{
 		Mode:        "standalone",
 		Addresses:   []string{addr},
 		ReadTimeout: &d,
-	}, nil)
+	}, nil, fake)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	return s
+	return s, fake
 }
 
 func TestTakeOrder(t *testing.T) {
@@ -262,52 +265,74 @@ func TestHangBoundedByDeadline(t *testing.T) {
 	want := "redis: take: timeout: " + store.ErrUnavailable.Error()
 	t.Run("ContextDeadline", func(t *testing.T) {
 		addr, _ := blackhole(t)
-		s := newStoreWithReadTimeout(t, addr, 5*time.Second)
+		// The read timeout cannot fire during the test, so only the context deadline can end the call.
+		s, _ := newStoreWithReadTimeout(t, addr, time.Hour)
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
-		start := time.Now()
-		_, err := s.Take(ctx, "hang", storeTB)
-		elapsed := time.Since(start)
+		errc := make(chan error, 1)
+		go func() {
+			_, err := s.Take(ctx, "hang", storeTB)
+			errc <- err
+		}()
+		err, _ := testwait.Recv(t, "Take to end at the context deadline", errc, nil)
 		if err == nil || err.Error() != want {
 			t.Errorf("error %v, want %q", err, want)
 		}
 		if !errors.Is(err, store.ErrUnavailable) || errors.Is(err, context.DeadlineExceeded) {
 			t.Errorf("error %v, want ErrUnavailable and not context.DeadlineExceeded", err)
 		}
-		if elapsed > 250*time.Millisecond {
-			t.Errorf("Take returned after %s, want within 250ms", elapsed)
-		}
 	})
 
 	t.Run("ReadTimeout", func(t *testing.T) {
 		addr, _ := blackhole(t)
-		s := newStoreWithReadTimeout(t, addr, 100*time.Millisecond)
-		start := time.Now()
-		_, err := s.Take(context.Background(), "hang", storeTB)
-		elapsed := time.Since(start)
+		s, fake := newStoreWithReadTimeout(t, addr, 100*time.Millisecond)
+		errc := make(chan error, 1)
+		go func() {
+			_, err := s.Take(context.Background(), "hang", storeTB)
+			errc <- err
+		}()
+		testwait.Until(t, "the read timer to be armed", func() bool { return fake.Due(100*time.Millisecond) >= 1 }, nil)
+		fake.Advance(100 * time.Millisecond)
+		err, _ := testwait.Recv(t, "Take to end at the read timeout", errc, nil)
 		if err == nil || err.Error() != want {
 			t.Errorf("error %v, want %q", err, want)
 		}
 		if !errors.Is(err, store.ErrUnavailable) {
 			t.Errorf("error %v, want ErrUnavailable", err)
 		}
-		if elapsed > 250*time.Millisecond {
-			t.Errorf("Take returned after %s, want within 250ms", elapsed)
-		}
 	})
 
 	t.Run("CallerCancel", func(t *testing.T) {
-		addr, accepted := blackhole(t)
-		s := newStoreWithReadTimeout(t, addr, 300*time.Millisecond)
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+		conns := make(chan net.Conn, 1)
+		go func() {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			// Hand the connection over once the client has sent its first bytes, so the call is waiting for a reply.
+			if _, err := c.Read(make([]byte, 1)); err != nil {
+				_ = c.Close()
+				return
+			}
+			conns <- c
+		}()
+		// The read timeout cannot fire during the test, so the canceled context alone has to end the call.
+		s, _ := newStoreWithReadTimeout(t, ln.Addr().String(), time.Hour)
 		cctx, ccancel := context.WithCancel(context.Background())
 		errc := make(chan error, 1)
 		go func() {
 			_, err := s.Take(cctx, "hang", storeTB)
 			errc <- err
 		}()
-		<-accepted
+		c, _ := testwait.Recv(t, "the store's call to reach the black hole", conns, nil)
+		t.Cleanup(func() { _ = c.Close() })
 		ccancel()
-		err := <-errc
+		err, _ = testwait.Recv(t, "the canceled Take to return", errc, nil)
 		if !errors.Is(err, context.Canceled) || errors.Is(err, store.ErrUnavailable) {
 			t.Errorf("canceled hung Take: error %v, want context.Canceled and not ErrUnavailable", err)
 		}

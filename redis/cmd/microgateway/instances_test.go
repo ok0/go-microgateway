@@ -77,10 +77,10 @@ func twoInstances(t *testing.T, target redisTarget, useStore bool, wantAdmitted 
 	opts.ExtraRoute = true
 	writeFile(t, aPath, instanceDoc(opts))
 	a.sig <- syscall.SIGHUP
-	eventually(t, func() bool {
+	eventuallyAdvancing(t, "instance A to serve /extra after SIGHUP", a.clk, 250*time.Millisecond, func() bool {
 		resp, _ := get(t, baseA+"/extra")
 		return resp.StatusCode == http.StatusOK && metric(t, adminA, reloadSeries) > beforeA
-	})
+	}, a.errb.String)
 	if resp, _ := get(t, baseB+"/extra"); resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("instance B serves /extra with status %d after A reloaded, want 404", resp.StatusCode)
 	}

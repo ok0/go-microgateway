@@ -118,11 +118,13 @@ func runOutage(t *testing.T, policy string) {
 		}
 	}
 
+	// The proxy goes down with the server, so a connection a dial opens around this moment is refused or closed here,
+	// never left open to a proxy that has not yet noticed the server is gone.
+	p.Down()
 	m.Close()
 	for i, status := range outageStatuses(policy) {
-		start := time.Now()
-		rec := doGet(g, "/rl", outageClientAddr)
-		if d := time.Since(start); d > 300*time.Millisecond {
+		rec, d := getAdvancing(t, g, fake, 200*time.Millisecond, "/rl", outageClientAddr)
+		if d > 300*time.Millisecond {
 			t.Errorf("outage request %d took %s, want at most 300ms", i+1, d)
 		}
 		checkOutageReply(t, policy, "outage request "+strconv.Itoa(i+1), rec, status)
@@ -134,6 +136,9 @@ func runOutage(t *testing.T, policy string) {
 	requireSeries(t, body, "microgateway_ratelimit_store_fallback_total", map[string]string{"route": "rl", "policy": policy}, 5)
 
 	if err := m.Restart(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Up(); err != nil {
 		t.Fatal(err)
 	}
 	p.Reset()
@@ -165,21 +170,39 @@ func runOutage(t *testing.T, policy string) {
 }
 
 func TestOutageBlackholeRealTimers(t *testing.T) {
-	addr, _ := blackhole(t)
-	stores := redisStoreYAML("shared", []string{addr}, "", "consecutive_failures: 3\nopen_timeout: 2s\n")
 	route := "rate: 1\nper: 1h\nburst: 2\nstore: shared\non_store_error: deny\nstore_timeout: 50ms\n"
-	doc := gwDoc(stores, routeYAML("rl", route), upstream(t))
-	g := mustGateway(t, doc, nil, nil)
+	t.Run("real clock", func(t *testing.T) {
+		addr, _ := blackhole(t)
+		stores := redisStoreYAML("shared", []string{addr}, "", "consecutive_failures: 3\nopen_timeout: 2s\n")
+		doc := gwDoc(stores, routeYAML("rl", route), upstream(t))
+		// Real clock: the black-holed store's timeout has to fire on the production clock.
+		g := mustGateway(t, doc, clock.Real(), nil)
 
-	for i := 1; i <= 6; i++ {
-		start := time.Now()
-		rec := doGet(g, "/rl", outageClientAddr)
-		if d := time.Since(start); d > 150*time.Millisecond {
-			t.Errorf("request %d took %s, want at most 150ms", i, d)
+		for i := 1; i <= 6; i++ {
+			rec := getGuarded(t, g, "/rl", outageClientAddr)
+			checkOutageReply(t, "deny", "blackhole request "+strconv.Itoa(i), rec, http.StatusServiceUnavailable)
+			if i == 3 {
+				requireSeries(t, metricsText(t, g), "microgateway_store_available", map[string]string{"store": "shared"}, 0)
+			}
 		}
-		checkOutageReply(t, "deny", "blackhole request "+strconv.Itoa(i), rec, http.StatusServiceUnavailable)
-		if i == 3 {
-			requireSeries(t, metricsText(t, g), "microgateway_store_available", map[string]string{"store": "shared"}, 0)
+	})
+
+	t.Run("fake clock", func(t *testing.T) {
+		addr, _ := blackhole(t)
+		stores := redisStoreYAML("shared", []string{addr}, "", "consecutive_failures: 3\nopen_timeout: 2s\n")
+		doc := gwDoc(stores, routeYAML("rl", route), upstream(t))
+		fake := clock.NewFake(miniStart)
+		g := mustGateway(t, doc, fake, nil)
+
+		for i := 1; i <= 6; i++ {
+			rec, d := getAdvancing(t, g, fake, 50*time.Millisecond, "/rl", outageClientAddr)
+			if d > 150*time.Millisecond {
+				t.Errorf("request %d took %s, want at most 150ms", i, d)
+			}
+			checkOutageReply(t, "deny", "blackhole request "+strconv.Itoa(i), rec, http.StatusServiceUnavailable)
+			if i == 3 {
+				requireSeries(t, metricsText(t, g), "microgateway_store_available", map[string]string{"store": "shared"}, 0)
+			}
 		}
-	}
+	})
 }

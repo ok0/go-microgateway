@@ -15,12 +15,13 @@ import (
 
 // redisServer is the Redis server shared by the gateways under test. exact
 // reports that the server clock moves only through advance, so decisions are
-// fully determined; otherwise advance moves real time.
+// fully determined; otherwise advance moves real time. now reads the server clock.
 type redisServer struct {
 	addr    string
 	db      int
 	exact   bool
 	advance func(time.Duration)
+	now     func(t *testing.T) time.Time
 }
 
 const (
@@ -153,7 +154,7 @@ func runBurst(t *testing.T, srv redisServer, n int, route string, useStore bool)
 func runElapsed(t *testing.T, srv redisServer, n int) {
 	t.Helper()
 	gws := multiGateways(t, srv, n, multiElapsedBody+multiStoreTail, true)
-	start := time.Now()
+	start := srv.now(t)
 	var admitted, sent int
 	for round := 0; round < 4; round++ {
 		if round > 0 {
@@ -163,7 +164,8 @@ func runElapsed(t *testing.T, srv redisServer, n int) {
 		admitted += a
 		sent += s
 	}
-	elapsed := time.Since(start)
+	// Server time is read at millisecond resolution; one extra millisecond keeps elapsed at or above the server time that passed.
+	elapsed := srv.now(t).Sub(start) + time.Millisecond
 	if srv.exact {
 		elapsed = 750 * time.Millisecond
 	}
@@ -206,5 +208,5 @@ func runMultiInstance(t *testing.T, srv redisServer) {
 func TestMultiInstance(t *testing.T) {
 	m := newMini(t)
 	mc := &miniClock{m: m, now: miniStart}
-	runMultiInstance(t, redisServer{addr: m.Addr(), exact: true, advance: mc.Advance})
+	runMultiInstance(t, redisServer{addr: m.Addr(), exact: true, advance: mc.Advance, now: func(*testing.T) time.Time { return mc.now }})
 }

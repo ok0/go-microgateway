@@ -45,6 +45,68 @@ func checkDisabledMaint(t *testing.T, c *maintnotifications.Config) {
 	checkEq(t, "MaintNotificationsConfig.Mode", c.Mode, maintnotifications.ModeDisabled)
 }
 
+// checkSentinels checks the go-redis option values that turn off go-redis's own limits on the wall clock.
+func checkSentinels(t *testing.T, dial, read, write, pool, idle time.Duration, dialer bool) {
+	t.Helper()
+	checkEq(t, "DialTimeout negative", dial < 0, true)
+	checkEq(t, "Dialer set", dialer, true)
+	checkEq(t, "ReadTimeout", read, -2)
+	checkEq(t, "WriteTimeout", write, -2)
+	checkEq(t, "PoolTimeout at least 100 years", pool >= 100*365*24*time.Hour, true)
+	checkEq(t, "ConnMaxIdleTime", idle, -1)
+}
+
+// TestClientOptionSentinels pins how go-redis interprets the sentinel values: -2 becomes its "no deadline call"
+// value -1, and a negative dial timeout, the pool wait and -1 for idle connections are kept as given.
+func TestClientOptionSentinels(t *testing.T) {
+	addrs := []string{"127.0.0.1:1"}
+	build := func(t *testing.T, cfg *config.RedisStore) any {
+		t.Helper()
+		opts, err := clientOptions(cfg, nil, clock.NewFake(miniStart))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return opts
+	}
+	t.Run("standalone", func(t *testing.T) {
+		o := build(t, &config.RedisStore{Mode: "standalone", Addresses: addrs}).(*goredis.Options)
+		checkSentinels(t, o.DialTimeout, o.ReadTimeout, o.WriteTimeout, o.PoolTimeout, o.ConnMaxIdleTime, o.Dialer != nil)
+		c := goredis.NewClient(o)
+		defer c.Close()
+		n := c.Options()
+		checkEq(t, "normalized ReadTimeout", n.ReadTimeout, -1)
+		checkEq(t, "normalized WriteTimeout", n.WriteTimeout, -1)
+		checkEq(t, "normalized DialTimeout negative", n.DialTimeout < 0, true)
+		checkEq(t, "normalized PoolTimeout", n.PoolTimeout, poolWaitForever)
+		checkEq(t, "normalized ConnMaxIdleTime", n.ConnMaxIdleTime, -1)
+	})
+	t.Run("sentinel", func(t *testing.T) {
+		o := build(t, &config.RedisStore{Mode: "sentinel", MasterName: "mymaster", Addresses: addrs}).(*goredis.FailoverOptions)
+		checkSentinels(t, o.DialTimeout, o.ReadTimeout, o.WriteTimeout, o.PoolTimeout, o.ConnMaxIdleTime, o.Dialer != nil)
+		c := goredis.NewFailoverClient(o)
+		defer c.Close()
+		n := c.Options()
+		checkEq(t, "normalized ReadTimeout", n.ReadTimeout, -1)
+		checkEq(t, "normalized WriteTimeout", n.WriteTimeout, -1)
+		checkEq(t, "normalized DialTimeout negative", n.DialTimeout < 0, true)
+		checkEq(t, "normalized PoolTimeout", n.PoolTimeout, poolWaitForever)
+		checkEq(t, "normalized ConnMaxIdleTime", n.ConnMaxIdleTime, -1)
+	})
+	t.Run("cluster", func(t *testing.T) {
+		o := build(t, &config.RedisStore{Mode: "cluster", Addresses: addrs}).(*goredis.ClusterOptions)
+		checkSentinels(t, o.DialTimeout, o.ReadTimeout, o.WriteTimeout, o.PoolTimeout, o.ConnMaxIdleTime, o.Dialer != nil)
+		c := goredis.NewClusterClient(o)
+		defer c.Close()
+		// The cluster keeps the values and hands them to each node client, which normalizes them as above.
+		n := c.Options()
+		checkEq(t, "cluster ReadTimeout", n.ReadTimeout, -2)
+		checkEq(t, "cluster WriteTimeout", n.WriteTimeout, -2)
+		checkEq(t, "cluster DialTimeout negative", n.DialTimeout < 0, true)
+		checkEq(t, "cluster PoolTimeout", n.PoolTimeout, poolWaitForever)
+		checkEq(t, "cluster ConnMaxIdleTime", n.ConnMaxIdleTime, -1)
+	})
+}
+
 func TestClientOptions(t *testing.T) {
 	pw := uniqueSecret(t, "pw-")
 	spw := uniqueSecret(t, "spw-")
@@ -63,7 +125,7 @@ func TestClientOptions(t *testing.T) {
 			PoolSize:     7,
 			MinIdleConns: 2,
 		}
-		opts, err := clientOptions(cfg, tlsCfg)
+		opts, err := clientOptions(cfg, tlsCfg, clock.NewFake(miniStart))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -78,9 +140,8 @@ func TestClientOptions(t *testing.T) {
 		checkEq(t, "Protocol", o.Protocol, 2)
 		checkEq(t, "MaxRetries", o.MaxRetries, -1)
 		checkEq(t, "DialerRetries", o.DialerRetries, 1)
-		checkEq(t, "DialTimeout", o.DialTimeout, 2*time.Second)
-		checkEq(t, "ReadTimeout", o.ReadTimeout, 3*time.Second)
-		checkEq(t, "WriteTimeout", o.WriteTimeout, 4*time.Second)
+		checkEq(t, "limits", limitsOf(cfg), connLimits{dial: 2 * time.Second, read: 3 * time.Second, write: 4 * time.Second})
+		checkSentinels(t, o.DialTimeout, o.ReadTimeout, o.WriteTimeout, o.PoolTimeout, o.ConnMaxIdleTime, o.Dialer != nil)
 		checkEq(t, "ContextTimeoutEnabled", o.ContextTimeoutEnabled, true)
 		checkEq(t, "PoolSize", o.PoolSize, 7)
 		checkEq(t, "MinIdleConns", o.MinIdleConns, 2)
@@ -91,7 +152,7 @@ func TestClientOptions(t *testing.T) {
 
 	t.Run("standalone defaults", func(t *testing.T) {
 		cfg := &config.RedisStore{Addresses: []string{"10.0.0.2:6379"}}
-		opts, err := clientOptions(cfg, nil)
+		opts, err := clientOptions(cfg, nil, clock.NewFake(miniStart))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -100,15 +161,14 @@ func TestClientOptions(t *testing.T) {
 			t.Fatalf("options type %T, want *goredis.Options", opts)
 		}
 		checkEq(t, "Addr", o.Addr, "10.0.0.2:6379")
-		checkEq(t, "DialTimeout", o.DialTimeout, time.Second)
-		checkEq(t, "ReadTimeout", o.ReadTimeout, 500*time.Millisecond)
-		checkEq(t, "WriteTimeout", o.WriteTimeout, 500*time.Millisecond)
+		checkEq(t, "limits", limitsOf(cfg), connLimits{dial: time.Second, read: 500 * time.Millisecond, write: 500 * time.Millisecond})
+		checkSentinels(t, o.DialTimeout, o.ReadTimeout, o.WriteTimeout, o.PoolTimeout, o.ConnMaxIdleTime, o.Dialer != nil)
 		checkEq(t, "TLSConfig nil", o.TLSConfig == nil, true)
 		checkDisabledMaint(t, o.MaintNotificationsConfig)
 	})
 
 	t.Run("empty mode is standalone", func(t *testing.T) {
-		opts, err := clientOptions(&config.RedisStore{Addresses: []string{"10.0.0.3:6379"}}, nil)
+		opts, err := clientOptions(&config.RedisStore{Addresses: []string{"10.0.0.3:6379"}}, nil, clock.NewFake(miniStart))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -133,7 +193,7 @@ func TestClientOptions(t *testing.T) {
 			PoolSize:         7,
 			MinIdleConns:     2,
 		}
-		opts, err := clientOptions(cfg, tlsCfg)
+		opts, err := clientOptions(cfg, tlsCfg, clock.NewFake(miniStart))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -151,9 +211,8 @@ func TestClientOptions(t *testing.T) {
 		checkEq(t, "Protocol", o.Protocol, 2)
 		checkEq(t, "MaxRetries", o.MaxRetries, -1)
 		checkEq(t, "DialerRetries", o.DialerRetries, 1)
-		checkEq(t, "DialTimeout", o.DialTimeout, 2*time.Second)
-		checkEq(t, "ReadTimeout", o.ReadTimeout, 3*time.Second)
-		checkEq(t, "WriteTimeout", o.WriteTimeout, 4*time.Second)
+		checkEq(t, "limits", limitsOf(cfg), connLimits{dial: 2 * time.Second, read: 3 * time.Second, write: 4 * time.Second})
+		checkSentinels(t, o.DialTimeout, o.ReadTimeout, o.WriteTimeout, o.PoolTimeout, o.ConnMaxIdleTime, o.Dialer != nil)
 		checkEq(t, "ContextTimeoutEnabled", o.ContextTimeoutEnabled, true)
 		checkEq(t, "PoolSize", o.PoolSize, 7)
 		checkEq(t, "MinIdleConns", o.MinIdleConns, 2)
@@ -166,7 +225,7 @@ func TestClientOptions(t *testing.T) {
 
 	t.Run("sentinel defaults", func(t *testing.T) {
 		cfg := &config.RedisStore{Mode: "sentinel", MasterName: "mymaster", Addresses: []string{"s1:26379"}}
-		opts, err := clientOptions(cfg, nil)
+		opts, err := clientOptions(cfg, nil, clock.NewFake(miniStart))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -174,9 +233,8 @@ func TestClientOptions(t *testing.T) {
 		if !ok {
 			t.Fatalf("options type %T, want *goredis.FailoverOptions", opts)
 		}
-		checkEq(t, "DialTimeout", o.DialTimeout, time.Second)
-		checkEq(t, "ReadTimeout", o.ReadTimeout, 500*time.Millisecond)
-		checkEq(t, "WriteTimeout", o.WriteTimeout, 500*time.Millisecond)
+		checkEq(t, "limits", limitsOf(cfg), connLimits{dial: time.Second, read: 500 * time.Millisecond, write: 500 * time.Millisecond})
+		checkSentinels(t, o.DialTimeout, o.ReadTimeout, o.WriteTimeout, o.PoolTimeout, o.ConnMaxIdleTime, o.Dialer != nil)
 	})
 
 	t.Run("cluster explicit", func(t *testing.T) {
@@ -191,7 +249,7 @@ func TestClientOptions(t *testing.T) {
 			PoolSize:     7,
 			MinIdleConns: 2,
 		}
-		opts, err := clientOptions(cfg, tlsCfg)
+		opts, err := clientOptions(cfg, tlsCfg, clock.NewFake(miniStart))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -206,9 +264,8 @@ func TestClientOptions(t *testing.T) {
 		checkEq(t, "MaxRetries", o.MaxRetries, -1)
 		checkEq(t, "MaxRedirects", o.MaxRedirects, -1)
 		checkEq(t, "DialerRetries", o.DialerRetries, 1)
-		checkEq(t, "DialTimeout", o.DialTimeout, 2*time.Second)
-		checkEq(t, "ReadTimeout", o.ReadTimeout, 3*time.Second)
-		checkEq(t, "WriteTimeout", o.WriteTimeout, 4*time.Second)
+		checkEq(t, "limits", limitsOf(cfg), connLimits{dial: 2 * time.Second, read: 3 * time.Second, write: 4 * time.Second})
+		checkSentinels(t, o.DialTimeout, o.ReadTimeout, o.WriteTimeout, o.PoolTimeout, o.ConnMaxIdleTime, o.Dialer != nil)
 		checkEq(t, "ContextTimeoutEnabled", o.ContextTimeoutEnabled, true)
 		checkEq(t, "PoolSize", o.PoolSize, 7)
 		checkEq(t, "MinIdleConns", o.MinIdleConns, 2)
@@ -221,7 +278,8 @@ func TestClientOptions(t *testing.T) {
 	})
 
 	t.Run("cluster defaults", func(t *testing.T) {
-		opts, err := clientOptions(&config.RedisStore{Mode: "cluster", Addresses: []string{"c1:6379"}}, nil)
+		cfg := &config.RedisStore{Mode: "cluster", Addresses: []string{"c1:6379"}}
+		opts, err := clientOptions(cfg, nil, clock.NewFake(miniStart))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -229,9 +287,8 @@ func TestClientOptions(t *testing.T) {
 		if !ok {
 			t.Fatalf("options type %T, want *goredis.ClusterOptions", opts)
 		}
-		checkEq(t, "DialTimeout", o.DialTimeout, time.Second)
-		checkEq(t, "ReadTimeout", o.ReadTimeout, 500*time.Millisecond)
-		checkEq(t, "WriteTimeout", o.WriteTimeout, 500*time.Millisecond)
+		checkEq(t, "limits", limitsOf(cfg), connLimits{dial: time.Second, read: 500 * time.Millisecond, write: 500 * time.Millisecond})
+		checkSentinels(t, o.DialTimeout, o.ReadTimeout, o.WriteTimeout, o.PoolTimeout, o.ConnMaxIdleTime, o.Dialer != nil)
 		checkEq(t, "MaxRedirects", o.MaxRedirects, -1)
 	})
 }
@@ -419,11 +476,11 @@ func TestTLS(t *testing.T) {
 		}
 		t.Cleanup(m.Close)
 		m.SetTime(miniStart)
-		s, err := NewFromConfig(&config.RedisStore{
+		s, err := newFromConfig(&config.RedisStore{
 			Mode:      "standalone",
 			Addresses: []string{m.Addr()},
 			TLS:       &config.RedisTLS{Enabled: true, CAFile: certFile},
-		}, nil)
+		}, nil, clock.NewFake(miniStart))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -443,13 +500,13 @@ func TestTLS(t *testing.T) {
 
 func storeWithAuth(t *testing.T, addr, username, password string, db int) *Store {
 	t.Helper()
-	s, err := NewFromConfig(&config.RedisStore{
+	s, err := newFromConfig(&config.RedisStore{
 		Mode:      "standalone",
 		Addresses: []string{addr},
 		Username:  username,
 		Password:  config.NewSecret(password),
 		DB:        db,
-	}, nil)
+	}, nil, clock.NewFake(miniStart))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -3,15 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"net"
-	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/ok0/go-microgateway/internal/cli"
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
 func lineOf(t *testing.T, src, substr string) int {
@@ -55,17 +53,28 @@ func TestValidateRedisStore(t *testing.T) {
 		t.Fatalf("stdout %q, want configuration is valid", out.String())
 	}
 
-	tcp := probe.(*net.TCPListener)
-	if err := tcp.SetDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
+	sentinel, err := net.Dial("tcp", probe.Addr().String())
+	if err != nil {
 		t.Fatal(err)
 	}
-	conn, err := probe.Accept()
-	if err == nil {
-		conn.Close()
-		t.Fatal("validate opened a connection to the Redis address")
+	defer sentinel.Close()
+	type acceptResult struct {
+		conn net.Conn
+		err  error
 	}
-	if !errors.Is(err, os.ErrDeadlineExceeded) {
-		t.Fatalf("Accept: %v, want a deadline timeout", err)
+	acc := make(chan acceptResult, 1)
+	go func() {
+		c, err := probe.Accept()
+		acc <- acceptResult{c, err}
+	}()
+	// Connections are accepted in arrival order, so the first one is the sentinel unless validate connected earlier.
+	first, _ := testwait.Recv(t, "the first connection to the Redis address to be accepted", acc, nil)
+	if first.err != nil {
+		t.Fatalf("Accept: %v", first.err)
+	}
+	defer first.conn.Close()
+	if first.conn.RemoteAddr().String() != sentinel.LocalAddr().String() {
+		t.Fatal("validate opened a connection to the Redis address")
 	}
 }
 

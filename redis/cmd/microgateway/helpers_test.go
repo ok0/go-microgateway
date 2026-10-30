@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,6 +23,8 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/ok0/go-microgateway/internal/cli"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
 type syncBuffer struct {
@@ -126,11 +129,12 @@ type instance struct {
 	sig   chan os.Signal
 	done  chan int
 	errb  *syncBuffer
+	clk   *clock.Fake
 }
 
 func startInstance(t *testing.T, ctx context.Context, path string, lookup func(string) (string, bool), extraArgs ...string) *instance {
 	t.Helper()
-	inst := &instance{sig: make(chan os.Signal, 2), done: make(chan int, 1), errb: &syncBuffer{}}
+	inst := &instance{sig: make(chan os.Signal, 2), done: make(chan int, 1), errb: &syncBuffer{}, clk: clock.NewFake(time.Now())}
 	ready := make(chan cli.Addrs, 1)
 	args := append([]string{"run", "-config", path}, extraArgs...)
 	go func() {
@@ -141,35 +145,33 @@ func startInstance(t *testing.T, ctx context.Context, path string, lookup func(s
 			LookupEnv: lookup,
 			Signals:   inst.sig,
 			Ready:     func(a cli.Addrs) { ready <- a },
+			Clock:     inst.clk,
 		})
 	}()
-	select {
-	case inst.addrs = <-ready:
-	case code := <-inst.done:
-		t.Fatalf("run exited with code %d before listening: %s", code, inst.errb.String())
-	case <-time.After(10 * time.Second):
-		t.Fatalf("run not listening after 10s: %s", inst.errb.String())
-	}
+	testwait.Until(t, "run to report its listeners", func() bool {
+		select {
+		case inst.addrs = <-ready:
+			return true
+		case code := <-inst.done:
+			t.Fatalf("run exited with code %d before listening: %s", code, inst.errb.String())
+		default:
+		}
+		return false
+	}, inst.errb.String)
 	return inst
 }
 
 func (in *instance) stop(t *testing.T) int {
 	t.Helper()
 	in.sig <- syscall.SIGTERM
-	select {
-	case code := <-in.done:
-		return code
-	case <-time.After(10 * time.Second):
-		t.Fatalf("run did not stop within 10s: %s", in.errb.String())
-		return -1
-	}
+	code, _ := testwait.Recv(t, "run to stop after SIGTERM", in.done, in.errb.String)
+	return code
 }
-
-var httpClient = &http.Client{Timeout: 10 * time.Second}
 
 func get(t *testing.T, url string) (*http.Response, []byte) {
 	t.Helper()
-	resp, err := httpClient.Get(url)
+	client := &http.Client{Timeout: testwait.Guard(t)}
+	resp, err := client.Get(url)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,21 +228,57 @@ func metric(t *testing.T, adminAddr, series string) float64 {
 	return 0
 }
 
-func eventually(t *testing.T, cond func() bool) {
+func eventually(t *testing.T, what string, cond func() bool, state func() string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatal("condition not met within 10s")
+	testwait.Until(t, what, cond, state)
+}
+
+func eventuallyAdvancing(t *testing.T, what string, fake *clock.Fake, step time.Duration, cond func() bool, state func() string) {
+	t.Helper()
+	var advanced time.Duration
+	testwait.Until(t, what, func() bool {
+		if cond() {
+			return true
 		}
-		time.Sleep(10 * time.Millisecond)
+		if fake.Due(step) > 0 {
+			fake.Advance(step)
+			advanced += step
+		}
+		return false
+	}, func() string {
+		s := fmt.Sprintf("fake clock advanced %v; timers due within %v: %d", advanced, step, fake.Due(step))
+		if state != nil {
+			s = state() + "; " + s
+		}
+		return s
+	})
+}
+
+// newRawClient returns a go-redis client for o that has no limit on the wall clock: it sets no socket deadline, waits
+// for a pool connection until the call's context ends, never reaps idle connections, and bounds dials on a fake clock
+// that nothing advances. These are the values the redis store uses.
+func newRawClient(o *goredis.Options) *goredis.Client {
+	fake := clock.NewFake(time.Now())
+	o.Dialer = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		bound := fake.AfterFunc(time.Second, cancel)
+		defer bound.Stop()
+		var d net.Dialer
+		return d.DialContext(dctx, network, addr)
 	}
+	o.DialTimeout = -1
+	o.ReadTimeout = -2
+	o.WriteTimeout = -2
+	o.PoolTimeout = 100 * 365 * 24 * time.Hour
+	o.ConnMaxIdleTime = -1
+	return goredis.NewClient(o)
 }
 
 func deletePrefix(t *testing.T, addr, password string, db int, prefix string) {
 	t.Helper()
 	ctx := context.Background()
-	c := goredis.NewClient(&goredis.Options{Addr: addr, Password: password, DB: db})
+	c := newRawClient(&goredis.Options{Addr: addr, Password: password, DB: db})
 	defer c.Close()
 	var cursor uint64
 	for {
