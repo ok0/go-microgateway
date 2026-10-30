@@ -18,12 +18,13 @@ import (
 
 	"github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/reqctx"
 	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
 func TestNewFromYAMLInvalid(t *testing.T) {
-	_, err := microgateway.NewFromYAML([]byte("version: 2\nlisteners: []\n"))
+	_, err := newGatewayFromYAML([]byte("version: 2\nlisteners: []\n"))
 	var ve *config.ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("err = %v, want *config.ValidationError", err)
@@ -31,7 +32,7 @@ func TestNewFromYAMLInvalid(t *testing.T) {
 }
 
 func TestNewNilConfig(t *testing.T) {
-	if _, err := microgateway.New(nil); err == nil {
+	if _, err := newGateway(nil); err == nil {
 		t.Fatal("New(nil) returned no error")
 	}
 }
@@ -97,7 +98,7 @@ func TestCloseNoLeak(t *testing.T) {
 	be := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	}))
-	g, err := microgateway.NewFromYAML([]byte(oneRouteDoc("", be.URL)))
+	g, err := newGatewayFromYAML([]byte(oneRouteDoc("", be.URL)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,6 +143,7 @@ func TestErrors(t *testing.T) {
 	cases := []struct {
 		name   string
 		doc    string
+		opts   []microgateway.Option
 		path   string
 		status int
 		code   string
@@ -170,15 +172,19 @@ routes:
 			code:   "bad_gateway",
 		},
 		{
-			name:   "response header timeout",
-			doc:    "version: 1\n" + listenersYAML + fmt.Sprintf("upstreams:\n  - name: up\n    hosts:\n      - url: %q\n    timeouts:\n      response_header: 50ms\nroutes:\n  - name: all\n    upstream: up\n", blocked.URL),
+			name: "response header timeout",
+			doc:  "version: 1\n" + listenersYAML + fmt.Sprintf("upstreams:\n  - name: up\n    hosts:\n      - url: %q\n    timeouts:\n      connect: 1h\n      response_header: 50ms\nroutes:\n  - name: all\n    upstream: up\n", blocked.URL),
+			// Real clock: the hung peer's response-header limit has to fire on the production clock.
+			opts:   []microgateway.Option{withClock(clock.Real())},
 			path:   "/",
 			status: http.StatusGatewayTimeout,
 			code:   "gateway_timeout",
 		},
 		{
-			name:   "route timeout",
-			doc:    "version: 1\n" + listenersYAML + fmt.Sprintf("upstreams:\n  - name: up\n    hosts:\n      - url: %q\nroutes:\n  - name: all\n    upstream: up\n    timeout: 50ms\n", blocked.URL),
+			name: "route timeout",
+			doc:  "version: 1\n" + listenersYAML + fmt.Sprintf("upstreams:\n  - name: up\n    hosts:\n      - url: %q\n    timeouts:\n      connect: 1h\n      response_header: 1h\nroutes:\n  - name: all\n    upstream: up\n    timeout: 50ms\n", blocked.URL),
+			// Real clock: the hung peer's route deadline has to fire on the production clock.
+			opts:   []microgateway.Option{withClock(clock.Real())},
 			path:   "/",
 			status: http.StatusGatewayTimeout,
 			code:   "gateway_timeout",
@@ -194,7 +200,7 @@ routes:
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			g := gw(t, tc.doc)
+			g := gwWith(t, tc.doc, tc.opts...)
 			rec := httptest.NewRecorder()
 			g.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tc.path, nil))
 			resp := rec.Result()
@@ -459,5 +465,93 @@ func TestSSEIncremental(t *testing.T) {
 	}
 	closeRelease()
 	for recvLine(t, lines) != "data: two\n" {
+	}
+}
+
+func TestGatewaysRunOnFakeClockByDefault(t *testing.T) {
+	const stampMetric = "microgateway_config_last_reload_success_timestamp_seconds"
+	n := newMemNetwork()
+	be := n.serve(t, echoHandler("c"))
+	doc, edited := watchDoc(be.URL, "/a"), watchDoc(be.URL, "/b")
+	stamp := func(g *microgateway.Gateway) float64 {
+		t.Helper()
+		return metricValue(t, metricsText(t, g), stampMetric)
+	}
+	reload := func(name string, g *microgateway.Gateway) {
+		t.Helper()
+		if err := g.ReloadYAML([]byte(edited)); err != nil {
+			t.Fatalf("%s: reload = %v", name, err)
+		}
+	}
+
+	yamlGW, err := newGatewayFromYAML([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = yamlGW.Close() })
+	cfgGW, err := newGateway(gbParse(t, doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cfgGW.Close() })
+
+	frozen := []struct {
+		name string
+		g    *microgateway.Gateway
+	}{
+		{"gw", gw(t, doc)},
+		{"gwWith", gwWith(t, doc)},
+		{"memNetwork.gateway", n.gateway(t, doc)},
+		{"tcpNetwork.gateway", tcpNetwork{}.gateway(t, doc)},
+		{"newGatewayFromYAML", yamlGW},
+		{"newGateway", cfgGW},
+	}
+	starts := make([]float64, len(frozen))
+	var latest float64
+	for i, c := range frozen {
+		starts[i] = stamp(c.g)
+		latest = max(latest, starts[i])
+	}
+	eventually(t, "wall clock to pass the second the gateways were built in", func() bool {
+		return float64(time.Now().Unix()) > latest
+	}, func() string {
+		return fmt.Sprintf("now=%d latest=%v", time.Now().Unix(), latest)
+	})
+	for i, c := range frozen {
+		reload(c.name, c.g)
+		if got := stamp(c.g); got != starts[i] {
+			t.Fatalf("%s: last reload timestamp after a later reload = %v, want %v (frozen clock)", c.name, got, starts[i])
+		}
+	}
+
+	opts1, f1 := fakeByDefault(nil)
+	opts2, f2 := fakeByDefault(nil)
+	if f1 == f2 {
+		t.Fatal("two default clocks are one instance")
+	}
+	g1, g2 := gwWith(t, doc, opts1...), gwWith(t, doc, opts2...)
+	s1, s2 := stamp(g1), stamp(g2)
+	f1.Advance(time.Hour)
+	reload("g1", g1)
+	reload("g2", g2)
+	if got := stamp(g1); got != s1+3600 {
+		t.Fatalf("g1 timestamp = %v, want %v", got, s1+3600)
+	}
+	if got := stamp(g2); got != s2 {
+		t.Fatalf("g2 timestamp = %v, want %v (clock not shared)", got, s2)
+	}
+
+	epoch := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	explicit := []struct {
+		name string
+		g    *microgateway.Gateway
+	}{
+		{"gwWith", gwWith(t, doc, withClock(clock.NewFake(epoch)))},
+		{"memNetwork.gateway", n.gateway(t, doc, withClock(clock.NewFake(epoch)))},
+	}
+	for _, c := range explicit {
+		if got := stamp(c.g); got != float64(epoch.Unix()) {
+			t.Fatalf("%s with an explicit clock: timestamp = %v, want %v", c.name, got, float64(epoch.Unix()))
+		}
 	}
 }

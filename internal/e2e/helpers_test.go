@@ -34,6 +34,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/ok0/go-microgateway"
+	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/authkey"
 	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/hooks"
@@ -43,6 +44,25 @@ import (
 )
 
 func withClock(c clock.Clock) microgateway.Option { return hooks.WithClock(c).(microgateway.Option) }
+
+// fakeByDefault returns opts preceded by a clock option for a new fake clock that starts at the current time, so a
+// gateway built from the result runs on frozen time unless opts set its clock; the new fake is returned as well.
+func fakeByDefault(opts []microgateway.Option) ([]microgateway.Option, *clock.Fake) {
+	fake := clock.NewFake(time.Now())
+	return append([]microgateway.Option{withClock(fake)}, opts...), fake
+}
+
+// newGateway is microgateway.New on fakeByDefault(opts); every gateway in this package is built through it or newGatewayFromYAML.
+func newGateway(cfg *config.Config, opts ...microgateway.Option) (*microgateway.Gateway, error) {
+	all, _ := fakeByDefault(opts)
+	return microgateway.New(cfg, all...)
+}
+
+// newGatewayFromYAML is microgateway.NewFromYAML on fakeByDefault(opts).
+func newGatewayFromYAML(data []byte, opts ...microgateway.Option) (*microgateway.Gateway, error) {
+	all, _ := fakeByDefault(opts)
+	return microgateway.NewFromYAML(data, all...)
+}
 
 func withRand(r clock.Rand) microgateway.Option { return hooks.WithRand(r).(microgateway.Option) }
 
@@ -99,12 +119,7 @@ func backend(t *testing.T, name string) *httptest.Server {
 
 func gw(t *testing.T, doc string) *microgateway.Gateway {
 	t.Helper()
-	g, err := microgateway.NewFromYAML([]byte(doc))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = g.Close() })
-	return g
+	return gwWith(t, doc)
 }
 
 func oneRouteDoc(global, backendURL string) string {
@@ -152,9 +167,45 @@ func eventually(t *testing.T, what string, cond func() bool, state func() string
 	testwait.Until(t, what, cond, state)
 }
 
+// awaitDue waits until n timers of fake are due within the given duration; what and state (may be nil) describe the wait if the hang guard expires.
+func awaitDue(t *testing.T, fake *clock.Fake, n int, within time.Duration, what string, state func() string) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	due := make(chan struct{})
+	go func() {
+		defer close(due)
+		_ = fake.WaitDue(ctx, n, within)
+	}()
+	testwait.Done(t, what, due, state)
+}
+
+// eventuallyAdvancing waits until cond holds, as eventually does; whenever a timer of fake is due within step,
+// it advances fake by step so that the timer fires. It never advances while no timer is due within step.
+func eventuallyAdvancing(t *testing.T, what string, fake *clock.Fake, step time.Duration, cond func() bool, state func() string) {
+	t.Helper()
+	var advanced time.Duration
+	testwait.Until(t, what, func() bool {
+		if cond() {
+			return true
+		}
+		if fake.Due(step) > 0 {
+			fake.Advance(step)
+			advanced += step
+		}
+		return false
+	}, func() string {
+		s := fmt.Sprintf("fake clock advanced %v; timers due within %v: %d", advanced, step, fake.Due(step))
+		if state != nil {
+			s = state() + "; " + s
+		}
+		return s
+	})
+}
+
 func gwWith(t *testing.T, doc string, opts ...microgateway.Option) *microgateway.Gateway {
 	t.Helper()
-	g, err := microgateway.NewFromYAML([]byte(doc), opts...)
+	g, err := newGatewayFromYAML([]byte(doc), opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
