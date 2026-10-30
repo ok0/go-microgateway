@@ -134,6 +134,10 @@ func auSignHS256(t *testing.T) string {
 
 func auBuild(t *testing.T, reg *state.Registry, doc string, d Deps) (*Snapshot, *state.Lease) {
 	t.Helper()
+	// a snapshot's limits and timers run on a fake clock unless the test passes its own
+	if d.Clock == nil {
+		d.Clock = clock.NewFake(auStart)
+	}
 	tx := reg.Begin()
 	s, err := Build(mustParse(t, doc), d, tx)
 	if err != nil {

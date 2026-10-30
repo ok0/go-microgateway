@@ -22,7 +22,10 @@ import (
 	"github.com/ok0/go-microgateway/internal/retry"
 	"github.com/ok0/go-microgateway/internal/router"
 	"github.com/ok0/go-microgateway/internal/state"
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
+
+var buildStart = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 func mustParse(t *testing.T, doc string) *config.Config {
 	t.Helper()
@@ -35,6 +38,10 @@ func mustParse(t *testing.T, doc string) *config.Config {
 
 func build(t *testing.T, cfg *config.Config, d Deps) (*Snapshot, *state.Registry, error) {
 	t.Helper()
+	// a snapshot's limits and timers run on a fake clock unless the test passes its own
+	if d.Clock == nil {
+		d.Clock = clock.NewFake(buildStart)
+	}
 	reg := state.NewRegistry(nil)
 	t.Cleanup(reg.Close)
 	tx := reg.Begin()
@@ -208,13 +215,9 @@ routes:
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	select {
-	case p := <-seen:
-		if p != "/u/7" {
-			t.Errorf("backend path = %q, want /u/7", p)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("backend was not called")
+	p, _ := testwait.Recv(t, "backend request", seen, nil)
+	if p != "/u/7" {
+		t.Errorf("backend path = %q, want /u/7", p)
 	}
 }
 
@@ -571,15 +574,16 @@ routes:
 func TestBudgetStateRetention(t *testing.T) {
 	reg := state.NewRegistry(nil)
 	t.Cleanup(reg.Close)
+	clk := clock.NewFake(buildStart)
 	budgetFor := func(t *testing.T, doc string) *retry.Budget {
 		t.Helper()
 		cfg := mustParse(t, doc)
 		tx := reg.Begin()
-		if _, err := Build(cfg, Deps{}, tx); err != nil {
+		if _, err := Build(cfg, Deps{Clock: clk}, tx); err != nil {
 			tx.Abort()
 			t.Fatal(err)
 		}
-		b, err := retryBudget(tx, "api", *cfg.Routes[0].Retry, clock.Real())
+		b, err := retryBudget(tx, "api", *cfg.Routes[0].Retry, clk)
 		if err != nil {
 			tx.Abort()
 			t.Fatal(err)
