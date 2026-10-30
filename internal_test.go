@@ -21,6 +21,8 @@ import (
 	"github.com/ok0/go-microgateway/internal/leakcheck"
 	"github.com/ok0/go-microgateway/internal/middleware"
 	"github.com/ok0/go-microgateway/internal/runtime"
+	"github.com/ok0/go-microgateway/internal/testwait"
+	"github.com/ok0/go-microgateway/store"
 )
 
 const listenersYAML = "listeners:\n  - name: public\n    address: \"127.0.0.1:0\"\n"
@@ -53,28 +55,14 @@ func backend(t *testing.T, name string) *httptest.Server {
 	return s
 }
 
-func eventually(t *testing.T, cond func() bool) {
+func eventually(t *testing.T, what string, cond func() bool, state func() string) {
 	t.Helper()
-	deadline := time.NewTimer(5 * time.Second)
-	defer deadline.Stop()
-	tick := time.NewTimer(5 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		if cond() {
-			return
-		}
-		select {
-		case <-deadline.C:
-			t.Fatal("condition not met within 5s")
-		case <-tick.C:
-			tick.Reset(5 * time.Millisecond)
-		}
-	}
+	testwait.Until(t, what, cond, state)
 }
 
 func gwWith(t *testing.T, doc string, opts ...Option) *Gateway {
 	t.Helper()
-	g, err := NewFromYAML([]byte(doc), opts...)
+	g, err := NewFromYAML([]byte(doc), append([]Option{withClock(clock.NewFake(time.Now()))}, opts...)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +160,7 @@ func TestHooksInspect(t *testing.T) {
 		g := gwWith(t, doc)
 		check := func(t *testing.T) hooks.Stats {
 			t.Helper()
-			eventually(t, func() bool { return g.live.Load() == 1 })
+			eventually(t, "one live generation", func() bool { return g.live.Load() == 1 }, func() string { return fmt.Sprintf("live generations: %d", g.live.Load()) })
 			s := hooks.Inspect(g)
 			if s.StateEntries != g.state.Len() {
 				t.Fatalf("StateEntries = %d, want %d", s.StateEntries, g.state.Len())
@@ -271,6 +259,52 @@ func TestHooksWithClock(t *testing.T) {
 	opt(&o)
 	if o.clk != clock.Clock(fake) {
 		t.Fatalf("option clock = %v, want the fake clock", o.clk)
+	}
+}
+
+func TestHooksStoreClock(t *testing.T) {
+	doc := "version: 1\n" + listenersYAML + `upstreams:
+  - name: up
+    hosts:
+      - url: "http://127.0.0.1:1"
+stores:
+  - name: s
+    type: probe
+routes:
+  - name: r
+    upstream: up
+    rate_limit: {rate: 5, per: 1s, store: s}
+`
+	fake := clock.NewFake(time.Now())
+	cases := []struct {
+		name string
+		opts []Option
+		want func(clock.Clock) bool
+	}{
+		{"gateway clock", []Option{withClock(fake)}, func(c clock.Clock) bool { return c == clock.Clock(fake) }},
+		// Real clock: a gateway without a clock option runs on the real clock, and so must its stores.
+		{"default", nil, clock.IsReal},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got clock.Clock
+			called := false
+			probe := func(p StoreParams) (store.Backend, error) {
+				called = true
+				got = hooks.StoreClock(p)
+				return nil, errors.New("probe: no backend")
+			}
+			opts := append([]Option{WithStoreType("probe", store.CapRateLimit, probe)}, tc.opts...)
+			if _, err := NewFromYAML([]byte(doc), opts...); err == nil {
+				t.Fatal("NewFromYAML succeeded, want the error of the probe factory")
+			}
+			if !called {
+				t.Fatal("the store factory was not called")
+			}
+			if got == nil || !tc.want(got) {
+				t.Fatalf("hooks.StoreClock = %v, want the clock of the gateway", got)
+			}
+		})
 	}
 }
 
@@ -447,7 +481,7 @@ func TestUserMiddlewareParamsSecret(t *testing.T) {
 			return passthrough, nil
 		}
 		doc := routeDoc(be.URL, "    middlewares: [m]\n") + "middlewares:\n  - name: m\n    type: tok\n    params:\n      n: \"${MW_TOKEN}\"\n"
-		_, err := NewFromYAML([]byte(doc), WithMiddleware("tok", factory), env)
+		_, err := NewFromYAML([]byte(doc), withClock(clock.NewFake(time.Now())), WithMiddleware("tok", factory), env)
 		if err == nil {
 			t.Fatal("expected an error")
 		}
@@ -469,7 +503,7 @@ func TestUserMiddlewareParamsSecret(t *testing.T) {
 			return nil, fmt.Errorf("bad token %s / %x", tok, tok)
 		}
 		doc := routeDoc(be.URL, "    middlewares: [m]\n") + "middlewares:\n  - name: m\n    type: tok\n    params:\n      token: \"${MW_TOKEN}\"\n"
-		_, err := NewFromYAML([]byte(doc), WithMiddleware("tok", factory), env)
+		_, err := NewFromYAML([]byte(doc), withClock(clock.NewFake(time.Now())), WithMiddleware("tok", factory), env)
 		if err == nil {
 			t.Fatal("expected an error")
 		}
