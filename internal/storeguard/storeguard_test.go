@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/testwait"
 	"github.com/ok0/go-microgateway/store"
 )
 
@@ -70,15 +71,19 @@ func blockOn(gate <-chan error) func(context.Context) error {
 	return func(context.Context) error { return <-gate }
 }
 
+// blockUntil waits until fake has at least n pending timers, tickers or After channels.
+func blockUntil(t *testing.T, fake *clock.Fake, n int, what string) {
+	t.Helper()
+	testwait.Until(t, what, func() bool { return fake.Waiters() >= n }, func() string {
+		return fmt.Sprintf("fake waiters=%d, want >= %d", fake.Waiters(), n)
+	})
+}
+
 func waitInflight(t *testing.T, g *Guard, want int64) {
 	t.Helper()
-	for range 10000 {
-		if g.inflight.Load() == want {
-			return
-		}
-		runtime.Gosched()
-	}
-	t.Fatalf("inflight = %d, want %d", g.inflight.Load(), want)
+	testwait.Until(t, fmt.Sprintf("inflight == %d", want), func() bool { return g.inflight.Load() == want }, func() string {
+		return fmt.Sprintf("inflight=%d", g.inflight.Load())
+	})
 }
 
 func TestSettingsValidate(t *testing.T) {
@@ -191,12 +196,12 @@ func TestHalfOpenSingleProbe(t *testing.T) {
 			return <-gate
 		})
 	}()
-	<-started
+	testwait.Done(t, "probe call started", started, nil)
 
 	expectOpenReject(t, g)
 
 	gate <- nil
-	if err := <-probeDone; err != nil {
+	if err, _ := testwait.Recv(t, "probe Do to return", probeDone, nil); err != nil {
 		t.Fatalf("probe Do() = %v", err)
 	}
 	if !g.Available() {
@@ -257,9 +262,9 @@ func TestTimeoutIgnoringCancellation(t *testing.T) {
 	go func() {
 		first <- g.Do(context.Background(), 50*time.Millisecond, fn)
 	}()
-	f.BlockUntil(1)
+	blockUntil(t, f, 1, "timeout timer")
 	f.Advance(50 * time.Millisecond)
-	err := <-first
+	err, _ := testwait.Recv(t, "first Do to return", first, nil)
 	var se *Error
 	if !errors.As(err, &se) || se.Reason != ReasonTimeout {
 		t.Fatalf("Do() = %v, want ReasonTimeout", err)
@@ -274,7 +279,7 @@ func TestTimeoutIgnoringCancellation(t *testing.T) {
 	}
 
 	gate <- nil
-	<-returned
+	testwait.Done(t, "timed-out call to return after release", returned, nil)
 	waitInflight(t, g, 0)
 	if err := g.Do(context.Background(), callTimeout, func(context.Context) error { return nil }); err != nil {
 		t.Fatalf("Do() after release = %v", err)
@@ -296,8 +301,8 @@ func TestInflightCapDoesNotTrip(t *testing.T) {
 			})
 		}()
 	}
-	<-started
-	<-started
+	testwait.Done(t, "first blocked call started", started, nil)
+	testwait.Done(t, "second blocked call started", started, nil)
 
 	for range 5 {
 		err := g.Do(context.Background(), callTimeout, func(context.Context) error { return nil })
@@ -316,7 +321,7 @@ func TestInflightCapDoesNotTrip(t *testing.T) {
 	gate <- nil
 	gate <- nil
 	for range 2 {
-		if err := <-results; err != nil {
+		if err, _ := testwait.Recv(t, "blocked Do to return", results, nil); err != nil {
 			t.Fatalf("blocked Do() = %v", err)
 		}
 	}
@@ -354,9 +359,9 @@ func TestCallerCancellation(t *testing.T) {
 				return c.Err()
 			})
 		}()
-		<-started
+		testwait.Done(t, "call started", started, nil)
 		cancel()
-		if err := <-res; !errors.Is(err, context.Canceled) {
+		if err, _ := testwait.Recv(t, "Do to return after cancel", res, nil); !errors.Is(err, context.Canceled) {
 			t.Fatalf("Do() = %v, want context.Canceled", err)
 		}
 	}
@@ -497,10 +502,10 @@ func TestGoroutinesReturnToBaseline(t *testing.T) {
 			results <- g.Do(context.Background(), 50*time.Millisecond, fn)
 		}()
 	}
-	f.BlockUntil(4)
+	blockUntil(t, f, 4, "4 timeout timers")
 	f.Advance(50 * time.Millisecond)
 	for range 4 {
-		err := <-results
+		err, _ := testwait.Recv(t, "timed-out Do to return", results, nil)
 		var se *Error
 		if !errors.As(err, &se) || se.Reason != ReasonTimeout {
 			t.Fatalf("Do() = %v, want ReasonTimeout", err)
@@ -510,12 +515,12 @@ func TestGoroutinesReturnToBaseline(t *testing.T) {
 		gate <- nil
 	}
 	for range 4 {
-		<-exited
+		testwait.Done(t, "fn to exit", exited, nil)
 	}
 	waitInflight(t, g, 0)
-	for i := 0; runtime.NumGoroutine() > baseline && i < 10000; i++ {
-		runtime.Gosched()
-	}
+	testwait.Until(t, "goroutines back to baseline", func() bool { return runtime.NumGoroutine() <= baseline }, func() string {
+		return fmt.Sprintf("goroutines=%d baseline=%d", runtime.NumGoroutine(), baseline)
+	})
 	if n := runtime.NumGoroutine(); n > baseline {
 		t.Fatalf("goroutines = %d, baseline = %d", n, baseline)
 	}

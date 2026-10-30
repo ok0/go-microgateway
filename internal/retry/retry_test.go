@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"go/parser"
 	"go/token"
 	"io"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
 var testStart = time.Unix(1000, 0)
@@ -91,11 +93,19 @@ func bodyRequest(method string, rc io.ReadCloser, cl int64) *http.Request {
 	return r
 }
 
+// blockUntil waits until fake has at least n pending timers, tickers or After channels.
+func blockUntil(t *testing.T, fake *clock.Fake, n int, what string) {
+	t.Helper()
+	testwait.Until(t, what, func() bool { return fake.Waiters() >= n }, func() string {
+		return fmt.Sprintf("fake waiters=%d, want >= %d", fake.Waiters(), n)
+	})
+}
+
 func waitForGoroutines(t *testing.T, want int) {
 	t.Helper()
-	for i := 0; i < 100000 && runtime.NumGoroutine() > want; i++ {
-		runtime.Gosched()
-	}
+	testwait.Until(t, "goroutines back to baseline", func() bool { return runtime.NumGoroutine() <= want }, func() string {
+		return fmt.Sprintf("goroutines=%d want<=%d", runtime.NumGoroutine(), want)
+	})
 	if got := runtime.NumGoroutine(); got > want {
 		t.Fatalf("goroutines = %d, want <= %d", got, want)
 	}
@@ -606,9 +616,9 @@ func TestSleep(t *testing.T) {
 		fk := clock.NewFake(testStart)
 		errc := make(chan error, 1)
 		go func() { errc <- Sleep(context.Background(), fk, time.Second) }()
-		fk.BlockUntil(1)
+		blockUntil(t, fk, 1, "Sleep timer")
 		fk.Advance(time.Second)
-		if err := <-errc; err != nil {
+		if err, _ := testwait.Recv(t, "Sleep to return", errc, nil); err != nil {
 			t.Fatalf("Sleep() = %v, want nil", err)
 		}
 	})
@@ -618,9 +628,9 @@ func TestSleep(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		errc := make(chan error, 1)
 		go func() { errc <- Sleep(ctx, fk, time.Second) }()
-		fk.BlockUntil(1)
+		blockUntil(t, fk, 1, "Sleep timer")
 		cancel()
-		if err := <-errc; !errors.Is(err, context.Canceled) {
+		if err, _ := testwait.Recv(t, "Sleep to return", errc, nil); !errors.Is(err, context.Canceled) {
 			t.Fatalf("Sleep() = %v, want context.Canceled", err)
 		}
 		if n := fk.Waiters(); n != 0 {
@@ -656,9 +666,9 @@ func TestSleep(t *testing.T) {
 		for i := 0; i < 100; i++ {
 			errc := make(chan error, 1)
 			go func() { errc <- Sleep(context.Background(), fk, time.Millisecond) }()
-			fk.BlockUntil(1)
+			blockUntil(t, fk, 1, "Sleep timer")
 			fk.Advance(time.Millisecond)
-			if err := <-errc; err != nil {
+			if err, _ := testwait.Recv(t, "Sleep to return", errc, nil); err != nil {
 				t.Fatalf("Sleep() = %v, want nil", err)
 			}
 		}

@@ -1,6 +1,7 @@
 package health
 
 import (
+	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
 const probeInterval = 10 * time.Second
@@ -106,18 +108,19 @@ func (h *harness) start(rt http.RoundTripper, ts ...Target) {
 	h.c.SetTargets(ts, rt)
 }
 
+func (h *harness) blockUntil(t *testing.T, n int) {
+	t.Helper()
+	testwait.Until(t, fmt.Sprintf("%d pending probe timers", n), func() bool { return h.clk.Waiters() >= n }, func() string { return fmt.Sprintf("waiters=%d", h.clk.Waiters()) })
+}
+
 func (h *harness) tick(t *testing.T, n int) []probeEvent {
 	t.Helper()
-	h.clk.BlockUntil(n)
+	h.blockUntil(t, n)
 	h.clk.Advance(probeInterval)
 	out := make([]probeEvent, 0, n)
 	for i := 0; i < n; i++ {
-		select {
-		case ev := <-h.probed:
-			out = append(out, ev)
-		case <-time.After(10 * time.Second):
-			t.Fatal("probe did not complete")
-		}
+		ev, _ := testwait.Recv(t, "probe to complete", h.probed, nil)
+		out = append(out, ev)
 	}
 	return out
 }
@@ -261,18 +264,14 @@ func TestProbeTimeout(t *testing.T) {
 	h := newHarness(t, activeCfg(3, 2), 1)
 	h.start(rt, Target{Key: "h1", URL: mustURL(t, "http://h1:8080")})
 
-	h.clk.BlockUntil(1)
+	h.blockUntil(t, 1)
 	h.clk.Advance(probeInterval)
-	h.clk.BlockUntil(1)
+	h.blockUntil(t, 1)
 	h.clk.Advance(2 * time.Second)
 
-	select {
-	case ev := <-h.probed:
-		if ev.pass {
-			t.Fatal("timed out probe must not pass")
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("probe did not time out")
+	ev, _ := testwait.Recv(t, "timed out probe", h.probed, nil)
+	if ev.pass {
+		t.Fatal("timed out probe must not pass")
 	}
 }
 
@@ -309,7 +308,7 @@ func TestOneProbeInFlight(t *testing.T) {
 	h.start(rt, Target{Key: "h1", URL: mustURL(t, "http://h1:8080")})
 
 	for i := 0; i < 10; i++ {
-		h.clk.BlockUntil(1)
+		h.blockUntil(t, 1)
 		h.clk.Advance(probeInterval)
 	}
 	h.c.Close()
@@ -360,16 +359,12 @@ func TestJitter(t *testing.T) {
 	last := h.clk.Now()
 	var intervals []time.Duration
 	for k := 0; k < probes; k++ {
-		h.clk.BlockUntil(1)
+		h.blockUntil(t, 1)
 		deadline := h.clk.Now().Add(nextDelay(interval, jitter, ref))
 		for h.clk.Now().Before(deadline) {
 			h.clk.Advance(step)
 		}
-		select {
-		case <-h.probed:
-		case <-time.After(10 * time.Second):
-			t.Fatal("probe did not complete")
-		}
+		testwait.Recv(t, "probe to complete", h.probed, nil)
 		now := h.clk.Now()
 		intervals = append(intervals, now.Sub(last))
 		last = now
@@ -434,18 +429,14 @@ func TestSetTargets(t *testing.T) {
 	if h.c.Status("h1") != nil {
 		t.Fatal("removed key must have no status")
 	}
-	h.clk.BlockUntil(1)
+	h.blockUntil(t, 1)
 	if n := h.clk.Waiters(); n != 1 {
 		t.Fatalf("pending timers after removal = %d, want 1", n)
 	}
 	h.clk.Advance(probeInterval)
-	select {
-	case ev := <-h.probed:
-		if ev.key != "h2" {
-			t.Fatalf("probe key = %s, want h2", ev.key)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("remaining target did not probe")
+	ev, _ := testwait.Recv(t, "remaining target to probe", h.probed, nil)
+	if ev.key != "h2" {
+		t.Fatalf("probe key = %s, want h2", ev.key)
 	}
 	select {
 	case ev := <-h.probed:
@@ -473,9 +464,9 @@ func TestCloseJoins(t *testing.T) {
 	h := newHarness(t, activeCfg(3, 2), 1)
 	h.start(rt, Target{Key: "h1", URL: mustURL(t, "http://h1:8080")})
 
-	h.clk.BlockUntil(1)
+	h.blockUntil(t, 1)
 	h.clk.Advance(probeInterval)
-	<-entered
+	testwait.Done(t, "probe round trip entered", entered, nil)
 
 	if err := h.c.Close(); err != nil {
 		t.Fatal(err)
@@ -483,9 +474,7 @@ func TestCloseJoins(t *testing.T) {
 	if err := h.c.Close(); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 100000 && runtime.NumGoroutine() > base; i++ {
-		runtime.Gosched()
-	}
+	testwait.Until(t, "goroutines back to baseline", func() bool { return runtime.NumGoroutine() <= base }, func() string { return fmt.Sprintf("goroutines=%d baseline=%d", runtime.NumGoroutine(), base) })
 	if n := runtime.NumGoroutine(); n > base {
 		t.Fatalf("goroutines = %d after Close, baseline %d", n, base)
 	}
@@ -498,7 +487,7 @@ func TestCloseJoins(t *testing.T) {
 		Target{Key: "h2", URL: mustURL(t, "http://h2:8080")},
 		Target{Key: "h3", URL: mustURL(t, "http://h3:8080")},
 	)
-	idle.clk.BlockUntil(3)
+	idle.blockUntil(t, 3)
 	if err := idle.c.Close(); err != nil {
 		t.Fatal(err)
 	}
