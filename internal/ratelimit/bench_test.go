@@ -46,6 +46,7 @@ func BenchmarkRateLimitStage(b *testing.B) {
 }
 
 func BenchmarkStoredRouteStage(b *testing.B) {
+	// Real clock: the benchmark measures the production clock path; no limit decides an outcome.
 	clk := clock.Real()
 	rl := memstore.NewRateLimiter(memstore.RateLimiterOptions{MaxKeys: 1000, Clock: clk})
 	b.Cleanup(func() { _ = rl.Close() })

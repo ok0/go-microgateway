@@ -171,6 +171,7 @@ func TestTimeout(t *testing.T) {
 		t.Error("Timeout(0) is not nil")
 	}
 	var ok bool
+	// Real clock: nil selects the real clock; only the deadline's presence is checked, nothing waits on it.
 	h := Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, ok = r.Context().Deadline()
 	}), Timeout(time.Hour, nil))

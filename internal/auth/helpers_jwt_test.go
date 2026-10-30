@@ -10,13 +10,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
 type keyset struct {
@@ -183,16 +184,13 @@ func (m *memFetcher) FetchKeySet(ctx context.Context, provider, keySetURL string
 
 var errTestFetch = errors.New("upstream unavailable")
 
-func waitWaiters(j *JWKS, n int) {
-	for {
+func waitWaiters(t *testing.T, j *JWKS, n int) {
+	t.Helper()
+	testwait.Until(t, fmt.Sprintf("%d waiters on the in-flight fetch", n), func() bool {
 		j.mu.Lock()
-		ok := j.flight != nil && j.flight.waiters >= n
-		j.mu.Unlock()
-		if ok {
-			return
-		}
-		runtime.Gosched()
-	}
+		defer j.mu.Unlock()
+		return j.flight != nil && j.flight.waiters >= n
+	}, nil)
 }
 
 var testNow = time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)

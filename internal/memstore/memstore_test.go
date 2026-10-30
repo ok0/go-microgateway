@@ -15,6 +15,7 @@ import (
 	"unsafe"
 
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/testwait"
 	"github.com/ok0/go-microgateway/store"
 )
 
@@ -415,9 +416,9 @@ func TestJanitor(t *testing.T) {
 	for _, k := range []string{"a", "b", "c"} {
 		take(t, r, k, l)
 	}
-	clk.BlockUntil(1)
+	testwait.Until(t, "janitor timer", func() bool { return clk.Waiters() >= 1 }, nil)
 	clk.Advance(JanitorInterval)
-	if n := <-ch; n != 3 {
+	if n, _ := testwait.Recv(t, "janitor sweep", ch, nil); n != 3 {
 		t.Fatalf("janitor removed %d, want 3", n)
 	}
 	if r.Len() != 0 {
@@ -435,9 +436,7 @@ func TestJanitor(t *testing.T) {
 		t.Fatalf("sweep %d after Close", n)
 	default:
 	}
-	for i := 0; i < 10000 && janitorRunning(); i++ {
-		runtime.Gosched()
-	}
+	testwait.Until(t, "janitor goroutine exit", func() bool { return !janitorRunning() }, nil)
 	if janitorRunning() {
 		t.Fatal("janitor goroutine still running after Close")
 	}

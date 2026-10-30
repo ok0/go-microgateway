@@ -13,6 +13,7 @@ import (
 
 	"github.com/ok0/go-microgateway/internal/authkey"
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
 const (
@@ -238,10 +239,10 @@ func TestJWKSSingleflight(t *testing.T) {
 			errs <- err
 		}()
 	}
-	waitWaiters(j, n)
+	waitWaiters(t, j, n)
 	close(block)
 	for i := 0; i < n; i++ {
-		if err := <-errs; err != nil {
+		if err, _ := testwait.Recv(t, "Lookup to return", errs, nil); err != nil {
 			t.Fatalf("Lookup: %v", err)
 		}
 	}
@@ -269,14 +270,14 @@ func TestJWKSWaiterCancel(t *testing.T) {
 		_, err := j.Lookup(t.Context(), "rs256")
 		bErr <- err
 	}()
-	waitWaiters(j, 2)
+	waitWaiters(t, j, 2)
 
 	cancelA()
-	if err := <-aErr; !errors.Is(err, ErrKeysUnavailable) || !errors.Is(err, context.Canceled) {
+	if err, _ := testwait.Recv(t, "cancelled waiter to return", aErr, nil); !errors.Is(err, ErrKeysUnavailable) || !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled waiter err = %v", err)
 	}
 	close(block)
-	if err := <-bErr; err != nil {
+	if err, _ := testwait.Recv(t, "remaining waiter to return", bErr, nil); err != nil {
 		t.Fatalf("remaining waiter: %v", err)
 	}
 	if c := mf.count(); c != 1 {
@@ -342,12 +343,12 @@ func TestJWKSTimeout(t *testing.T) {
 		_, err := j.Lookup(t.Context(), "rs256")
 		errc <- err
 	}()
-	clk.BlockUntil(1)
+	testwait.Until(t, "fetch timeout timer", func() bool { return clk.Waiters() >= 1 }, nil)
 	clk.Advance(testFetchTimeout)
-	if err := <-errc; !errors.Is(err, ErrKeysUnavailable) {
+	if err, _ := testwait.Recv(t, "Lookup to return after timeout", errc, nil); !errors.Is(err, ErrKeysUnavailable) {
 		t.Fatalf("Lookup after timeout: err = %v, want ErrKeysUnavailable", err)
 	}
-	<-mf.canceled
+	testwait.Done(t, "fetch canceled after timeout", mf.canceled, nil)
 }
 
 func TestJWKSDownAtStart(t *testing.T) {
@@ -388,12 +389,12 @@ func TestJWKSClose(t *testing.T) {
 		_, err := j.Lookup(ctx, "rs256")
 		errc <- err
 	}()
-	waitWaiters(j, 1)
+	waitWaiters(t, j, 1)
 	if err := j.Close(); err != nil {
 		t.Fatal(err)
 	}
-	<-mf.canceled
-	if err := <-errc; !errors.Is(err, ErrKeysUnavailable) {
+	testwait.Done(t, "fetch canceled by Close", mf.canceled, nil)
+	if err, _ := testwait.Recv(t, "in-flight Lookup to return", errc, nil); !errors.Is(err, ErrKeysUnavailable) {
 		t.Fatalf("in-flight waiter: err = %v", err)
 	}
 	if _, err := j.Lookup(ctx, "rs256"); !errors.Is(err, ErrKeysUnavailable) {
