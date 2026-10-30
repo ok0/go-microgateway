@@ -81,6 +81,7 @@ type Server struct {
 	mu        sync.Mutex
 	addrs     map[string]net.Addr
 	adminAddr net.Addr
+	clk       clock.Clock
 	// shutdownDelay and drainTimeout are guarded by mu.
 	shutdownDelay time.Duration
 	drainTimeout  time.Duration
@@ -91,11 +92,17 @@ type Option func(*options)
 
 type options struct {
 	certs *Certificates
+	clk   clock.Clock
 }
 
 // WithCertificates makes TLS listeners present the certificates held by c, which must already hold one for every TLS listener.
 func WithCertificates(c *Certificates) Option {
 	return func(o *options) { o.certs = c }
+}
+
+// WithClock makes the server time its shutdown delay and drain timeout with c. Without it the server uses the real clock.
+func WithClock(c clock.Clock) Option {
+	return func(o *options) { o.clk = c }
 }
 
 // New prepares a server for every listener in cfg. The data handler h serves the listeners and the admin handler
@@ -112,9 +119,13 @@ func New(cfg *config.Config, h http.Handler, admin http.Handler, ready func(bool
 	for _, opt := range opts {
 		opt(&o)
 	}
+	clk := o.clk
+	if clk == nil {
+		clk = clock.Real()
+	}
 	certs := o.certs
 	if certs == nil {
-		certs = NewCertificates(logger, clock.Real())
+		certs = NewCertificates(logger, clk)
 		_, next, errs := certs.load(cfg)
 		if len(errs) > 0 {
 			return nil, fmt.Errorf("listener %q: load certificate: %s", cfg.Listeners[errs[0].listener].Name, errs[0].fe.Msg)
@@ -134,6 +145,7 @@ func New(cfg *config.Config, h http.Handler, admin http.Handler, ready func(bool
 		addrs:         make(map[string]net.Addr),
 		shutdownDelay: cfg.Global.ShutdownDelay.Std(),
 		drainTimeout:  cfg.Global.DrainTimeout.Std(),
+		clk:           clk,
 	}
 	s.base, s.cancel = context.WithCancel(context.Background())
 	errLog := slog.NewLogLogger(logger.Handler(), slog.LevelWarn)
@@ -280,21 +292,19 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	delay, drain := s.shutdownDelay, s.drainTimeout
 	s.mu.Unlock()
 	if delay > 0 {
-		t := time.NewTimer(delay)
 		select {
-		case <-t.C:
+		case <-s.clk.After(delay):
 		case <-ctx.Done():
 		}
-		t.Stop()
 	}
-	drainCtx, cancel := context.WithTimeout(ctx, drain)
+	drainCtx, cancel := clock.WithTimeout(ctx, s.clk, drain)
 	errs := make([]error, len(s.data))
 	var wg sync.WaitGroup
 	for i, l := range s.data {
 		wg.Add(1)
 		go func(i int, l *listener) {
 			defer wg.Done()
-			if err := l.srv.Shutdown(drainCtx); err != nil && !isContextErr(err) {
+			if err := l.srv.Shutdown(clock.WithoutDeadline(drainCtx)); err != nil && !isContextErr(err) {
 				errs[i] = err
 			}
 		}(i, l)
@@ -302,13 +312,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	wg.Wait()
 	drained := s.active.wait(drainCtx)
 	forced := !drained || drainCtx.Err() != nil
-	s.cancel()
+	// Close the servers before canceling the base context so that handlers whose requests are canceled
+	// cannot return with an implicit 200 to a connection that is still open.
 	for _, l := range s.data {
 		l.srv.Close()
 	}
 	if s.admin != nil {
 		s.admin.srv.Close()
 	}
+	s.cancel()
 	cancel()
 	if forced {
 		s.logger.Warn("drain timeout; connections force-closed")

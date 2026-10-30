@@ -52,6 +52,7 @@ type Env struct {
 	LookupEnv func(string) (string, bool) // resolves ${VAR}; nil means os.LookupEnv
 	Signals   <-chan os.Signal            // nil: run subscribes to SIGINT, SIGTERM and SIGHUP while serving
 	Ready     func(Addrs)                 // optional; called once run has bound its listeners
+	Clock     clock.Clock                 // nil: the real clock; times the gateway, certificate expiry checks, the reload watcher and shutdown
 }
 
 // Main runs one invocation and returns its exit code. It never exits the process. opts are passed to every
@@ -77,7 +78,7 @@ func Main(ctx context.Context, env Env, opts ...microgateway.Option) int {
 	case "validate":
 		return runValidate(args[1:], stdout, stderr, lookup, opts)
 	case "run":
-		return runServe(ctx, args[1:], stdout, stderr, lookup, env.Signals, env.Ready, opts)
+		return runServe(ctx, args[1:], stdout, stderr, lookup, env.Signals, env.Ready, env.Clock, opts)
 	case "version":
 		fmt.Fprintf(stdout, "microgateway %s (commit %s, built %s)\n", version, commit, date)
 		return 0
@@ -146,7 +147,7 @@ func printLoadError(stderr io.Writer, cmd, path string, err error) int {
 	return 1
 }
 
-func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, lookup func(string) (string, bool), signals <-chan os.Signal, ready func(Addrs), opts []microgateway.Option) int {
+func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, lookup func(string) (string, bool), signals <-chan os.Signal, ready func(Addrs), envClock clock.Clock, opts []microgateway.Option) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	path := fs.String("config", "", "path to the configuration file")
@@ -190,8 +191,15 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, look
 	}
 	logger := newLogger(stderr, logCfg)
 
-	certs := server.NewCertificates(logger, clock.Real())
+	clk := envClock
+	if clk == nil {
+		clk = clock.Real()
+	}
+	certs := server.NewCertificates(logger, clk)
 	gwOpts := []microgateway.Option{microgateway.WithLogger(logger), microgateway.WithEnvLookup(lookup), internalhooks.WithParticipant(certs).(microgateway.Option)}
+	if envClock != nil {
+		gwOpts = append(gwOpts, internalhooks.WithClock(clk).(microgateway.Option))
+	}
 	gwOpts = append(gwOpts, opts...)
 	g, err := microgateway.New(cfg, gwOpts...)
 	if err != nil {
@@ -201,7 +209,7 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, look
 	if cfg.Admin.Enabled == nil || *cfg.Admin.Enabled {
 		admin = g.AdminHandler()
 	}
-	srv, err := server.New(cfg, g, admin, g.SetReady, logger, server.WithCertificates(certs))
+	srv, err := server.New(cfg, g, admin, g.SetReady, logger, server.WithCertificates(certs), server.WithClock(clk))
 	if err != nil {
 		fmt.Fprintf(stderr, "microgateway run: %v\n", err)
 		g.Close()
@@ -237,7 +245,7 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, look
 		Paths:        func() []string { return watchPaths(*path, g.Config()) },
 		Debounce:     cfg.Global.Reload.Debounce.Std(),
 		PollInterval: cfg.Global.Reload.PollInterval.Std(),
-		Clock:        clock.Real(),
+		Clock:        clk,
 		Logger:       logger,
 		Apply:        func() error { return applyReload(g, srv, *path, logger) },
 		Fatal:        func(err error) bool { return errors.Is(err, microgateway.ErrClosed) },

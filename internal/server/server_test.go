@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -573,5 +574,81 @@ func TestShutdownCanceledContext(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Shutdown with canceled context did not return within 2s")
+	}
+}
+
+// TestShutdownForcedClosesBeforeCancel pins the order of a forced shutdown: the listeners' connections are closed
+// before the base context of the requests is canceled. A handler that returns when its request is canceled
+// without writing would otherwise send an implicit 200 over a connection that is still open, so the client
+// would take a request cut off by the shutdown for a success.
+func TestShutdownForcedClosesBeforeCancel(t *testing.T) {
+	cfg := testConfig(t, func(c *config.Config) {
+		c.Global.DrainTimeout = config.Duration(time.Hour)
+	})
+	entered := make(chan struct{}, 1)
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		entered <- struct{}{}
+		<-r.Context().Done()
+	})
+	srv, err := New(cfg, h, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// finished closes when the connection of the request has sent its response or has been closed.
+	finished := make(chan struct{})
+	var once sync.Once
+	srv.data[0].srv.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateIdle || state == http.StateClosed {
+			once.Do(func() { close(finished) })
+		}
+	}
+	// Cancel the base context, then hold the shutdown until the request has finished one way or the other, so
+	// that a response written because of the cancellation is on the wire before anything closes the connection.
+	cancelBase := srv.cancel
+	srv.cancel = func() {
+		cancelBase()
+		select {
+		case <-finished:
+		case <-time.After(5 * time.Second):
+			t.Error("request neither answered nor closed after the base context was canceled")
+		}
+	}
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.Shutdown(ctx)
+	})
+	addr := srv.Addrs()["public"].String()
+
+	type result struct {
+		status int
+		err    error
+	}
+	got := make(chan result, 1)
+	go func() {
+		resp, _, err := fetch(&http.Client{Transport: &http.Transport{}}, "http://"+addr+"/hang")
+		r := result{err: err}
+		if resp != nil {
+			r.status = resp.StatusCode
+		}
+		got <- r
+	}()
+	waitSignal(t, entered, "hang handler")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := srv.Shutdown(ctx); !errors.Is(err, ErrForcedClose) {
+		t.Fatalf("Shutdown error = %v, want ErrForcedClose", err)
+	}
+	select {
+	case r := <-got:
+		if r.err == nil {
+			t.Fatalf("client received status %d from a request cut off by a forced shutdown, want a connection error", r.status)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("client request did not end after the forced shutdown")
 	}
 }
