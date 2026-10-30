@@ -4,6 +4,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
 var testStart = time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -124,9 +126,14 @@ func TestFakeBlockUntil(t *testing.T) {
 		close(done)
 	}()
 
-	f.BlockUntil(1)
+	blocked := make(chan struct{})
+	go func() {
+		f.BlockUntil(1)
+		close(blocked)
+	}()
+	testwait.Done(t, "BlockUntil(1) to return", blocked, nil)
 	f.Advance(time.Second)
-	<-done
+	testwait.Done(t, "After(1s) to fire", done, nil)
 }
 
 func TestBlockUntilDue(t *testing.T) {
@@ -137,7 +144,12 @@ func TestBlockUntilDue(t *testing.T) {
 	}
 
 	go f.AfterFunc(100*time.Millisecond, func() {})
-	f.BlockUntilDue(1, 250*time.Millisecond)
+	blocked := make(chan struct{})
+	go func() {
+		f.BlockUntilDue(1, 250*time.Millisecond)
+		close(blocked)
+	}()
+	testwait.Done(t, "BlockUntilDue to return", blocked, nil)
 	if n := f.Due(250 * time.Millisecond); n != 1 {
 		t.Fatalf("Due(250ms) after BlockUntilDue = %d, want 1", n)
 	}
@@ -235,13 +247,14 @@ func TestRandConcurrent(t *testing.T) {
 }
 
 func TestRealClock(t *testing.T) {
+	// Real clock: the real implementation is under test; only firing is awaited, never its timing.
 	c := Real()
 	if c.Now().IsZero() {
 		t.Fatal("Real().Now() is zero")
 	}
-	<-c.After(time.Millisecond)
+	testwait.Recv(t, "Real().After to fire", c.After(time.Millisecond), nil)
 
 	done := make(chan struct{})
 	c.AfterFunc(time.Millisecond, func() { close(done) })
-	<-done
+	testwait.Done(t, "Real().AfterFunc to run", done, nil)
 }

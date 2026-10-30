@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
 func isClosed(ch <-chan struct{}) bool {
@@ -30,6 +32,7 @@ func TestIsReal(t *testing.T) {
 
 func TestWithTimeoutRealClock(t *testing.T) {
 	before := time.Now()
+	// Real clock: the real implementation is under test; only the deadline's ordering against two reads is asserted.
 	ctx, cancel := WithTimeout(context.Background(), Real(), time.Hour)
 	after := time.Now()
 	defer cancel()
@@ -42,13 +45,10 @@ func TestWithTimeoutRealClock(t *testing.T) {
 	}
 
 	errX := errors.New("x")
+	// Real clock: nil selects the real clock; only expiry is awaited, never its timing.
 	ctx2, cancel2 := WithTimeoutCause(context.Background(), nil, time.Nanosecond, errX)
 	defer cancel2()
-	select {
-	case <-ctx2.Done():
-	case <-time.After(10 * time.Second):
-		t.Fatal("nil clock: context did not expire")
-	}
+	testwait.Done(t, "nil-clock context to expire", ctx2.Done(), nil)
 	if err := ctx2.Err(); err != context.DeadlineExceeded {
 		t.Errorf("Err = %v, want DeadlineExceeded", err)
 	}
@@ -92,11 +92,7 @@ func TestWithTimeoutFakeExpires(t *testing.T) {
 	if cause := context.Cause(ctx); cause != errX {
 		t.Errorf("Cause = %v, want %v", cause, errX)
 	}
-	select {
-	case <-child.Done():
-	case <-time.After(10 * time.Second):
-		t.Fatal("child context did not end")
-	}
+	testwait.Done(t, "child context to end", child.Done(), nil)
 	if err := child.Err(); err != context.DeadlineExceeded {
 		t.Errorf("child Err = %v, want DeadlineExceeded", err)
 	}
@@ -133,11 +129,7 @@ func TestWithTimeoutFakeParent(t *testing.T) {
 	ctx, cancel := WithTimeout(parent, fk, time.Minute)
 	defer cancel()
 	pc()
-	select {
-	case <-ctx.Done():
-	case <-time.After(10 * time.Second):
-		t.Fatal("context not done after parent canceled")
-	}
+	testwait.Done(t, "context to end after parent cancel", ctx.Done(), nil)
 	if err := ctx.Err(); err != context.Canceled {
 		t.Fatalf("Err = %v, want Canceled", err)
 	}
@@ -179,11 +171,7 @@ func TestWithoutDeadline(t *testing.T) {
 		t.Fatalf("Deadline = %v, %v; want zero, false", dl, ok)
 	}
 	cancel()
-	select {
-	case <-w.Done():
-	case <-time.After(10 * time.Second):
-		t.Fatal("wrapped context not done after cancel")
-	}
+	testwait.Done(t, "wrapped context to end after cancel", w.Done(), nil)
 	if err := w.Err(); err != context.Canceled {
 		t.Errorf("Err = %v, want Canceled", err)
 	}
@@ -205,13 +193,9 @@ func TestWaitDue(t *testing.T) {
 			errc <- fk.WaitDue(context.Background(), 1, 100*time.Millisecond)
 		}()
 		fk.AfterFunc(50*time.Millisecond, func() {})
-		select {
-		case err := <-errc:
-			if err != nil {
-				t.Errorf("WaitDue = %v, want nil", err)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatal("WaitDue did not return after a due waiter was added")
+		err, _ := testwait.Recv(t, "WaitDue to return", errc, nil)
+		if err != nil {
+			t.Errorf("WaitDue = %v, want nil", err)
 		}
 	})
 
@@ -224,13 +208,9 @@ func TestWaitDue(t *testing.T) {
 			errc <- fk.WaitDue(ctx, 1, time.Hour)
 		}()
 		cancel()
-		select {
-		case err := <-errc:
-			if !errors.Is(err, context.Canceled) {
-				t.Errorf("WaitDue = %v, want context.Canceled", err)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatal("WaitDue did not return after its context was canceled")
+		err, _ := testwait.Recv(t, "WaitDue to return", errc, nil)
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("WaitDue = %v, want context.Canceled", err)
 		}
 	})
 }
