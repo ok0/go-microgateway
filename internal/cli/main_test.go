@@ -23,6 +23,8 @@ import (
 
 	"github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
 func runCmd(t *testing.T, args ...string) (int, string, string) {
@@ -33,7 +35,7 @@ func runCmd(t *testing.T, args ...string) (int, string, string) {
 func runWith(t *testing.T, opts []microgateway.Option, args ...string) (int, string, string) {
 	t.Helper()
 	var out, errb bytes.Buffer
-	code := Main(context.Background(), Env{Args: args, Stdout: &out, Stderr: &errb}, opts...)
+	code := Main(context.Background(), Env{Args: args, Stdout: &out, Stderr: &errb, Clock: clock.NewFake(time.Now())}, opts...)
 	return code, out.String(), errb.String()
 }
 
@@ -43,6 +45,7 @@ type runHandle struct {
 	sig    chan os.Signal
 	done   chan int
 	cancel context.CancelFunc
+	clk    *clock.Fake
 	errb   interface {
 		io.Writer
 		String() string
@@ -51,18 +54,13 @@ type runHandle struct {
 
 func (h *runHandle) stop() int {
 	h.cancel()
-	return h.wait(h.t, 10*time.Second)
+	return h.wait(h.t)
 }
 
-func (h *runHandle) wait(t *testing.T, d time.Duration) int {
+func (h *runHandle) wait(t *testing.T) int {
 	t.Helper()
-	select {
-	case code := <-h.done:
-		return code
-	case <-time.After(d):
-		t.Fatalf("run did not return within %s; stderr:\n%s", d, h.errb.String())
-		return -1
-	}
+	code, _ := testwait.Recv(t, "run to return", h.done, func() string { return "stderr:\n" + h.errb.String() })
+	return code
 }
 
 func startRun(t *testing.T, cfgPath string) *runHandle {
@@ -80,21 +78,30 @@ func startRunArgs(t *testing.T, args []string, errb interface {
 	ready := make(chan Addrs, 1)
 	done := make(chan int, 1)
 	sig := make(chan os.Signal, 2)
+	clk := clock.NewFake(time.Now())
 	var out bytes.Buffer
 	go func() {
-		done <- Main(ctx, Env{Args: append([]string{"run"}, args...), Stdout: &out, Stderr: errb, Signals: sig, Ready: func(a Addrs) { ready <- a }})
+		done <- Main(ctx, Env{Args: append([]string{"run"}, args...), Stdout: &out, Stderr: errb, Signals: sig, Ready: func(a Addrs) { ready <- a }, Clock: clk})
 	}()
-	h := &runHandle{t: t, sig: sig, done: done, cancel: cancel, errb: errb}
-	select {
-	case a := <-ready:
-		h.addrs = a
-		return h
-	case code := <-done:
+	h := &runHandle{t: t, sig: sig, done: done, cancel: cancel, clk: clk, errb: errb}
+	var addrs Addrs
+	exited, code := false, 0
+	testwait.Until(t, "run to report its listeners", func() bool {
+		select {
+		case addrs = <-ready:
+			return true
+		case code = <-done:
+			exited = true
+			return true
+		default:
+			return false
+		}
+	}, func() string { return "stderr:\n" + errb.String() })
+	if exited {
 		t.Fatalf("run exited with code %d before listening; stderr:\n%s", code, errb.String())
-	case <-time.After(10 * time.Second):
-		t.Fatalf("run not ready within 10s; stderr:\n%s", errb.String())
 	}
-	return nil
+	h.addrs = addrs
+	return h
 }
 
 type echoBody struct {
@@ -315,7 +322,7 @@ func TestRunExample(t *testing.T) {
 	h := startRun(t, path)
 	public := h.addrs.Listeners["public"].String()
 	admin := h.addrs.Admin.String()
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: testwait.Guard(t)}
 
 	t.Run("users api", func(t *testing.T) {
 		resp, body := doGet(t, client, public, "/api/users/42", "", nil)

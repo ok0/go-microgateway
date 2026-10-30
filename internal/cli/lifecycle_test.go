@@ -2,48 +2,120 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/testcert"
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
-func freePort(t *testing.T) string {
+// listeningAddrs returns the local addresses of the TCP sockets this process holds bound and unconnected
+// (listeners), read from its open descriptors. It first checks that it sees a listener it opens itself, so an
+// empty result cannot come from a descriptor table it failed to read.
+func listeningAddrs(t *testing.T) map[string]bool {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	addr := ln.Addr().String()
-	ln.Close()
-	return addr
-}
-
-func eventually(t *testing.T, cond func() bool) {
-	t.Helper()
-	deadline := time.After(5 * time.Second)
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		if cond() {
-			return
+	defer probe.Close()
+	entries, err := os.ReadDir("/dev/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addrs := make(map[string]bool)
+	for _, e := range entries {
+		fd, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
 		}
-		select {
-		case <-deadline:
-			t.Fatal("condition not met within 5s")
-		case <-ticker.C:
+		typ, err := syscall.GetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_TYPE)
+		if err != nil || typ != syscall.SOCK_STREAM {
+			continue
+		}
+		if _, err := syscall.Getpeername(fd); !errors.Is(err, syscall.ENOTCONN) {
+			continue
+		}
+		sa, err := syscall.Getsockname(fd)
+		if err != nil {
+			continue
+		}
+		var a *net.TCPAddr
+		switch s := sa.(type) {
+		case *syscall.SockaddrInet4:
+			a = &net.TCPAddr{IP: net.IP(s.Addr[:]), Port: s.Port}
+		case *syscall.SockaddrInet6:
+			a = &net.TCPAddr{IP: net.IP(s.Addr[:]), Port: s.Port}
+		default:
+			continue
+		}
+		if a.Port != 0 {
+			addrs[a.String()] = true
 		}
 	}
+	if !addrs[probe.Addr().String()] {
+		t.Fatalf("own listener %s not found among open descriptors: %v", probe.Addr(), addrs)
+	}
+	delete(addrs, probe.Addr().String())
+	return addrs
+}
+
+func eventually(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	testwait.Until(t, what, cond, nil)
+}
+
+const reloadStep = 250 * time.Millisecond // the default global.reload.debounce
+
+// awaitDue waits until n timers of fake are due within the given duration; what and state (may be nil) describe the wait if the hang guard expires.
+func awaitDue(t *testing.T, fake *clock.Fake, n int, within time.Duration, what string, state func() string) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	due := make(chan struct{})
+	go func() {
+		defer close(due)
+		_ = fake.WaitDue(ctx, n, within)
+	}()
+	testwait.Done(t, what, due, state)
+}
+
+// eventuallyAdvancing waits until cond holds, as eventually does; whenever a timer of fake is due within step,
+// it advances fake by step so that the timer fires. It never advances while no timer is due within step.
+func eventuallyAdvancing(t *testing.T, what string, fake *clock.Fake, step time.Duration, cond func() bool, state func() string) {
+	t.Helper()
+	var advanced time.Duration
+	testwait.Until(t, what, func() bool {
+		if cond() {
+			return true
+		}
+		if fake.Due(step) > 0 {
+			fake.Advance(step)
+			advanced += step
+		}
+		return false
+	}, func() string {
+		s := fmt.Sprintf("fake clock advanced %v; timers due within %v: %d", advanced, step, fake.Due(step))
+		if state != nil {
+			s = state() + "; " + s
+		}
+		return s
+	})
 }
 
 func holdBackend(t *testing.T) (*httptest.Server, chan struct{}, chan struct{}) {
@@ -144,10 +216,10 @@ type holdResult struct {
 	err    error
 }
 
-func startHold(addr string) <-chan holdResult {
+func startHold(t *testing.T, addr string) <-chan holdResult {
 	out := make(chan holdResult, 1)
+	client := &http.Client{Timeout: testwait.Guard(t)}
 	go func() {
-		client := &http.Client{Timeout: 30 * time.Second}
 		resp, err := client.Get("http://" + addr + "/hold")
 		if err != nil {
 			out <- holdResult{err: err}
@@ -160,8 +232,8 @@ func startHold(addr string) <-chan holdResult {
 	return out
 }
 
-func readyzStatus(addr string) int {
-	client := &http.Client{Timeout: 2 * time.Second}
+func readyzStatus(t *testing.T, addr string) int {
+	client := &http.Client{Timeout: testwait.Guard(t)}
 	resp, err := client.Get("http://" + addr + "/readyz")
 	if err != nil {
 		return -1
@@ -226,7 +298,7 @@ func TestRunTLS(t *testing.T) {
 	plain := h.addrs.Listeners["plain"].String()
 
 	tlsClient := &http.Client{
-		Timeout: 5 * time.Second,
+		Timeout: testwait.Guard(t),
 		Transport: &http.Transport{
 			TLSClientConfig:   &tls.Config{RootCAs: pool},
 			ForceAttemptHTTP2: true,
@@ -247,7 +319,7 @@ func TestRunTLS(t *testing.T) {
 		t.Errorf("X-Forwarded-Host = %q, want %q", got, secure)
 	}
 
-	plainClient := &http.Client{Timeout: 5 * time.Second}
+	plainClient := &http.Client{Timeout: testwait.Guard(t)}
 	resp, body = fetchURL(t, plainClient, "http://"+plain+"/api")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("http status = %d, want 200; body %s", resp.StatusCode, body)
@@ -288,7 +360,7 @@ func TestRunTLSHTTP1Only(t *testing.T) {
 	h := startRun(t, path)
 	secure := h.addrs.Listeners["secure"].String()
 	client := &http.Client{
-		Timeout: 5 * time.Second,
+		Timeout: testwait.Guard(t),
 		Transport: &http.Transport{
 			TLSClientConfig:   &tls.Config{RootCAs: pool},
 			ForceAttemptHTTP2: true,
@@ -308,7 +380,7 @@ func TestRunTLSHTTP1Only(t *testing.T) {
 }
 
 func TestRunBadCertPath(t *testing.T) {
-	plain := freePort(t)
+	plain := "127.0.0.1:0"
 	missing := filepath.Join(t.TempDir(), "missing.pem")
 	path := writeTemp(t, fmt.Sprintf(`version: 1
 listeners:
@@ -331,6 +403,7 @@ routes:
     upstream: users
 `, plain, missing, missing))
 
+	before := listeningAddrs(t)
 	code, _, errs := runCmd(t, "run", "-config", path)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1; stderr:\n%s", code, errs)
@@ -344,11 +417,11 @@ routes:
 	if !strings.Contains(errs, ": 2 error(s)") {
 		t.Errorf("stderr = %q, want it to contain %q", errs, ": 2 error(s)")
 	}
-	ln, err := net.Listen("tcp", plain)
-	if err != nil {
-		t.Fatalf("port %s not released: %v", plain, err)
+	for addr := range listeningAddrs(t) {
+		if !before[addr] {
+			t.Fatalf("address %s not released: still listening after run returned", addr)
+		}
 	}
-	ln.Close()
 }
 
 func TestRunBindConflict(t *testing.T) {
@@ -358,8 +431,8 @@ func TestRunBindConflict(t *testing.T) {
 	}
 	defer held.Close()
 	conflict := held.Addr().String()
-	free := freePort(t)
-	admin := freePort(t)
+	free := "127.0.0.1:0"
+	admin := "127.0.0.1:0"
 	path := writeTemp(t, fmt.Sprintf(`version: 1
 listeners:
   - name: a
@@ -380,6 +453,10 @@ admin:
   address: %q
 `, free, conflict, admin))
 
+	before := listeningAddrs(t)
+	if !before[conflict] {
+		t.Fatalf("held listener %s not seen before run: %v", conflict, before)
+	}
 	code, _, errs := runCmd(t, "run", "-config", path)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1; stderr:\n%s", code, errs)
@@ -387,12 +464,13 @@ admin:
 	if !strings.Contains(errs, `listener "b"`) {
 		t.Errorf("stderr = %q, want it to contain %q", errs, `listener "b"`)
 	}
-	for _, addr := range []string{free, admin} {
-		ln, err := net.Listen("tcp", addr)
-		if err != nil {
-			t.Fatalf("address %s not released: %v", addr, err)
+	for addr := range listeningAddrs(t) {
+		if !before[addr] {
+			t.Fatalf("address %s not released: still listening after run returned", addr)
 		}
-		ln.Close()
+	}
+	if !listeningAddrs(t)[conflict] {
+		t.Fatalf("held listener %s closed by run", conflict)
 	}
 }
 
@@ -404,15 +482,11 @@ func TestRunGracefulShutdown(t *testing.T) {
 	public := h.addrs.Listeners["public"].String()
 	admin := h.addrs.Admin.String()
 
-	holdRes := startHold(public)
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("/hold request did not reach the backend")
-	}
+	holdRes := startHold(t, public)
+	testwait.Recv(t, "/hold request to reach the backend", entered, nil)
 
 	h.sig <- syscall.SIGTERM
-	eventually(t, func() bool { return readyzStatus(admin) == http.StatusServiceUnavailable })
+	eventually(t, "readiness to report 503 after SIGTERM", func() bool { return readyzStatus(t, admin) == http.StatusServiceUnavailable })
 	select {
 	case r := <-holdRes:
 		t.Fatalf("/hold finished before release: %+v", r)
@@ -420,7 +494,7 @@ func TestRunGracefulShutdown(t *testing.T) {
 	}
 
 	fastClient := &http.Client{
-		Timeout:   5 * time.Second,
+		Timeout:   testwait.Guard(t),
 		Transport: &http.Transport{DisableKeepAlives: true},
 	}
 	resp, body := fetchURL(t, fastClient, "http://"+public+"/fast")
@@ -428,17 +502,29 @@ func TestRunGracefulShutdown(t *testing.T) {
 		t.Fatalf("/fast during shutdown delay: status = %d, want 200; body %s", resp.StatusCode, body)
 	}
 
-	close(release)
+	awaitDue(t, h.clk, 1, 2*time.Second, "shutdown delay timer armed", nil)
+	h.clk.Advance(2 * time.Second)
+	eventually(t, "data listener to refuse new connections once the shutdown delay ended", func() bool {
+		conn, err := net.Dial("tcp", public)
+		if err != nil {
+			return true
+		}
+		conn.Close()
+		return false
+	})
 	select {
 	case r := <-holdRes:
-		if r.err != nil || r.status != http.StatusOK {
-			t.Errorf("/hold result = %+v, want status 200", r)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("/hold did not complete after release")
+		t.Fatalf("/hold finished before release after the listener closed: %+v", r)
+	default:
 	}
 
-	if code := h.wait(t, 10*time.Second); code != 0 {
+	close(release)
+	r, _ := testwait.Recv(t, "/hold to complete after release", holdRes, nil)
+	if r.err != nil || r.status != http.StatusOK {
+		t.Errorf("/hold result = %+v, want status 200", r)
+	}
+
+	if code := h.wait(t); code != 0 {
 		t.Errorf("exit code = %d, want 0", code)
 	}
 	if conn, err := net.Dial("tcp", public); err == nil {
@@ -481,12 +567,8 @@ routes:
 	h := startRun(t, path)
 	public := h.addrs.Listeners["public"].String()
 
-	holdRes := startHold(public)
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("/hold request did not reach the backend")
-	}
+	holdRes := startHold(t, public)
+	testwait.Recv(t, "/hold request to reach the backend", entered, nil)
 
 	conn, err := net.Dial("tcp", public)
 	if err != nil {
@@ -496,17 +578,15 @@ routes:
 	br := wsHandshake(t, conn, public)
 
 	h.sig <- syscall.SIGTERM
-	if code := h.wait(t, 5*time.Second); code == 0 {
+	awaitDue(t, h.clk, 1, 300*time.Millisecond, "drain timer armed", nil)
+	h.clk.Advance(300 * time.Millisecond)
+	if code := h.wait(t); code == 0 {
 		t.Fatal("exit code = 0, want nonzero after forced shutdown")
 	}
 
-	select {
-	case r := <-holdRes:
-		if r.err == nil && r.status == http.StatusOK {
-			t.Errorf("/hold result = %+v, want an error or non-200", r)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("/hold client did not return after forced shutdown")
+	r, _ := testwait.Recv(t, "/hold client to return after forced shutdown", holdRes, nil)
+	if r.err == nil && r.status == http.StatusOK {
+		t.Errorf("/hold result = %+v, want an error or non-200", r)
 	}
 
 	readErr := make(chan error, 1)
@@ -514,13 +594,9 @@ routes:
 		_, err := br.ReadByte()
 		readErr <- err
 	}()
-	select {
-	case err := <-readErr:
-		if err == nil {
-			t.Error("websocket read returned data, want an error")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("websocket connection still open after forced shutdown")
+	err, _ = testwait.Recv(t, "websocket read to end after forced shutdown", readErr, nil)
+	if err == nil {
+		t.Error("websocket read returned data, want an error")
 	}
 }
 
@@ -532,18 +608,14 @@ func TestRunSecondSignal(t *testing.T) {
 	public := h.addrs.Listeners["public"].String()
 	admin := h.addrs.Admin.String()
 
-	_ = startHold(public)
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("/hold request did not reach the backend")
-	}
+	_ = startHold(t, public)
+	testwait.Recv(t, "/hold request to reach the backend", entered, nil)
 
 	h.sig <- syscall.SIGTERM
-	eventually(t, func() bool { return readyzStatus(admin) == http.StatusServiceUnavailable })
+	eventually(t, "readiness to report 503 after SIGTERM", func() bool { return readyzStatus(t, admin) == http.StatusServiceUnavailable })
 
 	h.sig <- syscall.SIGTERM
-	if code := h.wait(t, 3*time.Second); code == 0 {
+	if code := h.wait(t); code == 0 {
 		t.Error("exit code = 0, want nonzero after second signal")
 	}
 }

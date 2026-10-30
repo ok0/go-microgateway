@@ -10,6 +10,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
 type signalWriter struct {
@@ -52,16 +55,13 @@ func TestRunSignalsSentAtReadyAreHandled(t *testing.T) {
 			done <- Main(context.Background(), Env{
 				Args:   []string{"run", "-config", path},
 				Stderr: errb,
+				Clock:  clock.NewFake(time.Now()),
 				Ready:  func(Addrs) { _ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM) },
 			})
 		}()
-		select {
-		case code := <-done:
-			if code != 0 {
-				t.Errorf("exit code = %d, want 0; stderr:\n%s", code, errb.String())
-			}
-		case <-time.After(15 * time.Second):
-			t.Fatalf("run did not return; stderr:\n%s", errb.String())
+		code, _ := testwait.Recv(t, "run to return after the signals", done, errb.String)
+		if code != 0 {
+			t.Errorf("exit code = %d, want 0; stderr:\n%s", code, errb.String())
 		}
 		if !strings.Contains(errb.String(), "shutting down") {
 			t.Errorf("stderr missing shutdown log; stderr:\n%s", errb.String())
@@ -79,6 +79,7 @@ func TestRunSignalsSentAtReadyAreHandled(t *testing.T) {
 			done <- Main(context.Background(), Env{
 				Args:   []string{"run", "-config", path},
 				Stderr: errb,
+				Clock:  clock.NewFake(time.Now()),
 				Ready: func(Addrs) {
 					go func() {
 						<-reloaded
@@ -87,13 +88,9 @@ func TestRunSignalsSentAtReadyAreHandled(t *testing.T) {
 				},
 			})
 		}()
-		select {
-		case code := <-done:
-			if code != 0 {
-				t.Errorf("exit code = %d, want 0; stderr:\n%s", code, errb.String())
-			}
-		case <-time.After(15 * time.Second):
-			t.Fatalf("run did not return; stderr:\n%s", errb.String())
+		code, _ := testwait.Recv(t, "run to return after the signals", done, errb.String)
+		if code != 0 {
+			t.Errorf("exit code = %d, want 0; stderr:\n%s", code, errb.String())
 		}
 		if !strings.Contains(errb.String(), "shutting down") {
 			t.Errorf("stderr missing shutdown log; stderr:\n%s", errb.String())

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ok0/go-microgateway/internal/testcert"
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
 type syncBuffer struct {
@@ -49,7 +50,7 @@ func logAfter(buf *syncBuffer, marker string) string {
 
 func metric(t *testing.T, adminAddr, series string) float64 {
 	t.Helper()
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: testwait.Guard(t)}
 	_, body := doGet(t, client, adminAddr, "/metrics", "", nil)
 	for _, line := range strings.Split(string(body), "\n") {
 		if v, ok := strings.CutPrefix(line, series+" "); ok {
@@ -193,20 +194,13 @@ func TestRunReloadOnFileEdit(t *testing.T) {
 
 	h := startRun(t, path)
 	public := h.addrs.Listeners["public"].String()
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: testwait.Guard(t)}
 	if resp, body := doGet(t, client, public, "/a/x", "", nil); resp.StatusCode != http.StatusOK {
 		t.Fatalf("/a status = %d, want 200; body %s", resp.StatusCode, body)
 	}
 
-	start := time.Now()
 	replaceAtomic(t, path, []byte(twoRouteConfig(a.URL, b.URL, true)))
-	for statusOf(client, "http://"+public+"/b/y") != http.StatusOK {
-		if time.Since(start) > 2*time.Second {
-			t.Fatal("/b not served within 2s of the rename")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Logf("/b served %s after the rename", time.Since(start))
+	eventuallyAdvancing(t, "/b served after the rename", h.clk, reloadStep, func() bool { return statusOf(client, "http://"+public+"/b/y") == http.StatusOK }, nil)
 	resp, body := doGet(t, client, public, "/b/y", "", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("/b status = %d, want 200; body %s", resp.StatusCode, body)
@@ -256,23 +250,25 @@ admin:
 	h := startRunArgs(t, []string{"-config", path, "-log-level", "debug"}, &errb)
 	public := h.addrs.Listeners["public"].String()
 	admin := h.addrs.Admin.String()
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: testwait.Guard(t)}
 	resp, _ := doGet(t, client, public, "/", "", nil)
 	if got := resp.Header.Get("X-Env"); got != "one" {
 		t.Fatalf("X-Env before SIGHUP = %q, want one", got)
 	}
 
+	const unchanged = `microgateway_config_reloads_total{result="unchanged"}`
+	testwait.Until(t, "watcher startup attempt counted", func() bool { return metric(t, admin, unchanged) >= 1 }, errb.String)
+
 	t.Setenv("MICROGATEWAY_TEST_ENV", "two")
 	h.sig <- syscall.SIGHUP
-	eventually(t, func() bool {
+	eventuallyAdvancing(t, "X-Env two after SIGHUP", h.clk, reloadStep, func() bool {
 		resp, _ := doGet(t, client, public, "/", "", nil)
 		return resp.Header.Get("X-Env") == "two"
-	})
+	}, errb.String)
 
-	const unchanged = `microgateway_config_reloads_total{result="unchanged"}`
 	before := metric(t, admin, unchanged)
 	h.sig <- syscall.SIGHUP
-	eventually(t, func() bool { return metric(t, admin, unchanged) == before+1 })
+	eventuallyAdvancing(t, "unchanged reload counted after the second SIGHUP", h.clk, reloadStep, func() bool { return metric(t, admin, unchanged) == before+1 }, errb.String)
 
 	if code := h.stop(); code != 0 {
 		t.Errorf("exit code = %d, want 0; log:\n%s", code, errb.String())
@@ -306,8 +302,10 @@ admin:
 	h := startRunArgs(t, []string{"-config", path, "-log-level", "debug"}, &errb)
 	public := h.addrs.Listeners["public"].String()
 	admin := h.addrs.Admin.String()
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: testwait.Guard(t)}
 	const failure = `microgateway_config_reloads_total{result="failure"}`
+	const unchanged = `microgateway_config_reloads_total{result="unchanged"}`
+	testwait.Until(t, "watcher startup attempt counted", func() bool { return metric(t, admin, unchanged) >= 1 }, errb.String)
 	before := metric(t, admin, failure)
 
 	writeFile(t, path, []byte(`version: 1
@@ -327,11 +325,11 @@ routes:
 admin:
   address: "127.0.0.1:0"
 `))
-	eventually(t, func() bool { return strings.Contains(errb.String(), "configuration reload failed") })
+	eventuallyAdvancing(t, "failed reload logged", h.clk, reloadStep, func() bool { return strings.Contains(errb.String(), "configuration reload failed") }, errb.String)
 	if !strings.Contains(errb.String(), "routes[0].upstream (line ") {
 		t.Errorf("log does not name routes[0].upstream with its line:\n%s", errb.String())
 	}
-	eventually(t, func() bool { return metric(t, admin, failure) == before+1 })
+	eventuallyAdvancing(t, "failed reload counted", h.clk, reloadStep, func() bool { return metric(t, admin, failure) == before+1 }, errb.String)
 	select {
 	case code := <-h.done:
 		t.Fatalf("process exited with code %d after a failed reload; log:\n%s", code, errb.String())
@@ -343,7 +341,7 @@ admin:
 	}
 
 	writeFile(t, path, []byte(valid("/edited")))
-	eventually(t, func() bool { return statusOf(client, "http://"+public+"/edited") == http.StatusOK })
+	eventuallyAdvancing(t, "/edited served after the fix", h.clk, reloadStep, func() bool { return statusOf(client, "http://"+public+"/edited") == http.StatusOK }, errb.String)
 
 	if code := h.stop(); code != 0 {
 		t.Errorf("exit code = %d, want 0", code)
@@ -383,17 +381,16 @@ routes:
   address: %q
 `, level, listen, backend.URL, extra, admin)
 	}
-	listen := freePort(t)
-	adminAddr := freePort(t)
-	path := writeTemp(t, configOf(listen, adminAddr, "info", false))
+	path := writeTemp(t, configOf("127.0.0.1:0", "127.0.0.1:0", "info", false))
 
 	var errb syncBuffer
 	h := startRunArgs(t, []string{"-config", path}, &errb)
-	client := &http.Client{Timeout: 5 * time.Second}
+	listen := h.addrs.Listeners["public"].String()
+	client := &http.Client{Timeout: testwait.Guard(t)}
 
-	writeFile(t, path, []byte(configOf(freePort(t), freePort(t), "warn", true)))
-	eventually(t, func() bool { return statusOf(client, "http://"+listen+"/new") == http.StatusOK })
-	eventually(t, func() bool { return len(restartFields(t, &errb)) >= 3 })
+	writeFile(t, path, []byte(configOf("localhost:0", "localhost:0", "warn", true)))
+	eventuallyAdvancing(t, "/new served after the edit", h.clk, reloadStep, func() bool { return statusOf(client, "http://"+listen+"/new") == http.StatusOK }, errb.String)
+	eventually(t, "three restart-required warnings logged", func() bool { return len(restartFields(t, &errb)) >= 3 })
 
 	want := []string{"listeners[0].address", "admin.address", "global.log.level"}
 	if got := restartFields(t, &errb); !slices.Equal(got, want) {
@@ -414,15 +411,18 @@ func TestRunNoReloadAfterShutdown(t *testing.T) {
 	h := startRunArgs(t, []string{"-config", path, "-log-level", "debug"}, &errb)
 
 	h.sig <- syscall.SIGTERM
-	eventually(t, func() bool { return strings.Contains(errb.String(), "shutting down") })
+	eventually(t, "shutdown to begin", func() bool { return strings.Contains(errb.String(), "shutting down") })
 	h.sig <- syscall.SIGHUP
+	eventually(t, "SIGHUP ignored during shutdown", func() bool { return strings.Contains(errb.String(), "reload ignored; shutting down") })
 	writeFile(t, path, []byte(lifecycleConfig(global, backend.URL)+`  - name: extra
     match:
       path: /extra
       path_type: prefix
     upstream: backend
 `))
-	if code := h.wait(t, 10*time.Second); code != 0 {
+	awaitDue(t, h.clk, 1, time.Second, "shutdown delay timer armed", errb.String)
+	h.clk.Advance(time.Second)
+	if code := h.wait(t); code != 0 {
 		t.Errorf("exit code = %d, want 0; log:\n%s", code, errb.String())
 	}
 	after := logAfter(&errb, "shutting down")
@@ -503,7 +503,7 @@ admin:
 	admin := h.addrs.Admin.String()
 	addrOf := func(listener string) string { return h.addrs.Listeners[listener].String() }
 	fresh := &http.Client{
-		Timeout:   5 * time.Second,
+		Timeout:   testwait.Guard(t),
 		Transport: &http.Transport{TLSClientConfig: insecureTLS(), DisableKeepAlives: true},
 	}
 	const success = `microgateway_config_reloads_total{result="success"}`
@@ -513,7 +513,7 @@ admin:
 		t.Helper()
 		addr := addrOf(listener)
 		held := &http.Client{
-			Timeout:   5 * time.Second,
+			Timeout:   testwait.Guard(t),
 			Transport: &http.Transport{TLSClientConfig: insecureTLS(), MaxConnsPerHost: 1},
 		}
 		if got := tlsSerial(t, held, addr); got != oldSerial {
@@ -521,14 +521,14 @@ admin:
 		}
 		before := metric(t, admin, success)
 		apply()
-		eventually(t, func() bool {
+		eventuallyAdvancing(t, name+": new serial served", h.clk, reloadStep, func() bool {
 			s, err := serialOf(fresh, addr)
 			return err == nil && s == newSerial
-		})
+		}, errb.String)
 		if got := tlsSerial(t, held, addr); got != oldSerial {
 			t.Errorf("%s: held connection serial = %d, want %d", name, got, oldSerial)
 		}
-		eventually(t, func() bool { return metric(t, admin, success) >= before+1 })
+		eventuallyAdvancing(t, name+": reload counted", h.clk, reloadStep, func() bool { return metric(t, admin, success) >= before+1 }, errb.String)
 		if got := metric(t, admin, success); got != before+1 {
 			t.Errorf("%s: success count moved by %v, want 1", name, got-before)
 		}
@@ -563,7 +563,7 @@ admin:
 	beforeFail := metric(t, admin, failure)
 	mismatched, _ := genPair(t, 5)
 	replaceAtomic(t, renCert, mismatched)
-	eventually(t, func() bool { return metric(t, admin, failure) >= beforeFail+1 })
+	eventuallyAdvancing(t, "failed reload counted", h.clk, reloadStep, func() bool { return metric(t, admin, failure) >= beforeFail+1 }, errb.String)
 	if got := metric(t, admin, failure); got != beforeFail+1 {
 		t.Errorf("failure count moved by %v, want 1", got-beforeFail)
 	}
@@ -578,11 +578,11 @@ admin:
 	writeFile(t, pairCert, c6)
 	writeFile(t, pairKey, k6)
 	writeFile(t, path, []byte(certConfig(pairCert, pairKey)))
-	eventually(t, func() bool {
+	eventuallyAdvancing(t, "serial 6 served after the YAML edit", h.clk, reloadStep, func() bool {
 		s, err := serialOf(fresh, addrOf("rename"))
 		return err == nil && s == 6
-	})
-	eventually(t, func() bool { return metric(t, admin, success) >= beforeEdit+1 })
+	}, errb.String)
+	eventuallyAdvancing(t, "YAML edit reload counted", h.clk, reloadStep, func() bool { return metric(t, admin, success) >= beforeEdit+1 }, errb.String)
 	if got := metric(t, admin, success); got != beforeEdit+1 {
 		t.Errorf("success count moved by %v after YAML edit, want 1", got-beforeEdit)
 	}
