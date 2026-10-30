@@ -11,7 +11,6 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"reflect"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,6 +25,7 @@ import (
 	"github.com/ok0/go-microgateway/internal/metrics"
 	"github.com/ok0/go-microgateway/internal/reqctx"
 	"github.com/ok0/go-microgateway/internal/state"
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
 var testStart = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -74,13 +74,15 @@ func newTestMetrics(t *testing.T) *Metrics {
 
 func eventually(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", what)
-		}
-		runtime.Gosched()
-	}
+	testwait.Until(t, what, cond, nil)
+}
+
+// blockUntil waits until fake has at least n pending timers, tickers or After channels.
+func blockUntil(t *testing.T, fake *clock.Fake, n int, what string) {
+	t.Helper()
+	testwait.Until(t, what, func() bool { return fake.Waiters() >= n }, func() string {
+		return fmt.Sprintf("fake waiters=%d, want >= %d", fake.Waiters(), n)
+	})
 }
 
 func hostByURL(t *testing.T, u *Upstream, rawURL string) *Host {
@@ -108,7 +110,7 @@ func gaugeValue(g *metrics.GaugeVec, labels ...string) float64 {
 
 func buildTx(t *testing.T, reg *state.Registry, cfg config.Upstream) (*Upstream, *state.Lease) {
 	t.Helper()
-	return buildDeps(t, reg, cfg, Deps{})
+	return buildDeps(t, reg, cfg, Deps{Clock: clock.NewFake(testStart)})
 }
 
 func buildDeps(t *testing.T, reg *state.Registry, cfg config.Upstream, d Deps) (*Upstream, *state.Lease) {
@@ -441,7 +443,7 @@ func TestHashKeySources(t *testing.T) {
 		u, _ := buildDeps(t, reg, config.Upstream{Name: "u", LoadBalancer: config.LoadBalancer{
 			Algorithm: "consistent_hash",
 			Hash:      config.Hash{Source: "ip"},
-		}, Hosts: hosts("http://a:1", "http://b:1", "http://c:1")}, Deps{Rand: clock.NewRand(7)})
+		}, Hosts: hosts("http://a:1", "http://b:1", "http://c:1")}, Deps{Rand: clock.NewRand(7), Clock: clock.NewFake(testStart)})
 		out := make([]int, 0, 50)
 		for i := 0; i < 50; i++ {
 			h, _, err := u.Acquire(noIP(), nil, false)
@@ -469,7 +471,7 @@ func TestStatus(t *testing.T) {
 	reg := state.NewRegistry(nil)
 	t.Cleanup(reg.Close)
 	tx := reg.Begin()
-	pre, err := Build(cfg, Deps{State: tx})
+	pre, err := Build(cfg, Deps{State: tx, Clock: clock.NewFake(testStart)})
 	if err != nil {
 		tx.Abort()
 		t.Fatal(err)
@@ -554,6 +556,7 @@ func TestNewTransportHasNoWallTwinsUnderAnyClock(t *testing.T) {
 		},
 		Pool: config.Pool{MaxIdlePerHost: 7, MaxConnsPerHost: 9},
 	}
+	// Real clock: the nil and real entries check the transport fields built for the default clock; nothing waits on them.
 	clocks := []struct {
 		name string
 		clk  clock.Clock
@@ -607,9 +610,9 @@ func TestConnectTimeoutFakeClock(t *testing.T) {
 		}
 		errCh <- err
 	}()
-	fake.BlockUntil(1)
+	blockUntil(t, fake, 1, "connect timer")
 	fake.Advance(time.Hour)
-	err = <-errCh
+	err, _ = testwait.Recv(t, "RoundTrip after the connect limit", errCh, nil)
 	var oe *net.OpError
 	if !errors.As(err, &oe) || oe.Op != "dial" {
 		t.Fatalf("err = %v, want *net.OpError with Op dial", err)
@@ -686,11 +689,9 @@ func TestBuildUsesDial(t *testing.T) {
 		}
 		ch <- err
 	}()
-	select {
-	case <-started:
-	case <-time.After(transportGuard):
-		t.Fatalf("hang guard: injected dial not started within %v; fake waiters=%d", transportGuard, fake.Waiters())
-	}
+	testwait.Done(t, "injected dial started", started, func() string {
+		return fmt.Sprintf("fake waiters=%d", fake.Waiters())
+	})
 	dueWithin(t, fake, 1, 3*time.Second, "connect timer armed")
 	if n := fake.Waiters(); n != 1 {
 		t.Fatalf("Waiters() = %d during the dial, want 1 (one connect timer, no other limit)", n)
@@ -699,11 +700,7 @@ func TestBuildUsesDial(t *testing.T) {
 		t.Fatalf("Due(3s-1ns) = %d, want 0 (connect timer is exactly the configured 3s)", n)
 	}
 	fake.Advance(3 * time.Second)
-	select {
-	case err = <-ch:
-	case <-time.After(transportGuard):
-		t.Fatalf("hang guard: RoundTrip not returned within %v after the connect limit", transportGuard)
-	}
+	err, _ = testwait.Recv(t, "RoundTrip after the connect limit", ch, nil)
 	var oe *net.OpError
 	if !errors.As(err, &oe) || oe.Op != "dial" || oe.Err != errConnectTimeout {
 		t.Fatalf("err = %v, want *net.OpError{Op: dial, Err: errConnectTimeout}", err)
@@ -897,7 +894,7 @@ func TestTransportFingerprint(t *testing.T) {
 func TestBuildInvalidURLHidesCredentials(t *testing.T) {
 	reg := state.NewRegistry(nil)
 	tx := reg.Begin()
-	_, err := Build(config.Upstream{Name: "u", Hosts: hosts("http://u:p%zz@h:1")}, Deps{State: tx})
+	_, err := Build(config.Upstream{Name: "u", Hosts: hosts("http://u:p%zz@h:1")}, Deps{State: tx, Clock: clock.NewFake(testStart)})
 	tx.Abort()
 	if err == nil {
 		t.Fatal("Build error = nil, want invalid URL error")
@@ -914,7 +911,7 @@ func TestBuildBadURLCreatesNothing(t *testing.T) {
 	tx := reg.Begin()
 	cfg := carryBase()
 	cfg.Hosts[1].URL = config.NewSecretURL("http://[::1")
-	_, err := Build(cfg, Deps{State: tx})
+	_, err := Build(cfg, Deps{State: tx, Clock: clock.NewFake(testStart)})
 	tx.Abort()
 	if err == nil {
 		t.Fatal("Build error = nil, want URL parse error")
@@ -1025,7 +1022,7 @@ func TestCarryOverHealth(t *testing.T) {
 	b := hostByURL(t, u1, "http://b:1")
 	d := hostByURL(t, u1, "http://d:1")
 
-	fake.BlockUntil(5)
+	blockUntil(t, fake, 5, "5 probe timers")
 	for i := 0; i < 3; i++ {
 		u1.Record(a, breaker.Token{}, health.Failure)
 	}
@@ -1037,7 +1034,7 @@ func TestCarryOverHealth(t *testing.T) {
 	eventually(t, "first probe round", func() bool {
 		return probeSum(m, "a:1", "b:1", "c:1", "d:1", "f:1") == 5
 	})
-	fake.BlockUntil(5)
+	blockUntil(t, fake, 5, "5 probe timers")
 	fake.Advance(5 * time.Second)
 
 	withE := hosts("http://a:1", "http://b:1", "http://c:1", "http://d:1", "http://e:1")
@@ -1084,7 +1081,7 @@ func TestCarryOverHealth(t *testing.T) {
 		t.Errorf("weight of d = %d, want 2", d2.Weight)
 	}
 
-	fake.BlockUntil(5)
+	blockUntil(t, fake, 5, "5 probe timers")
 	fake.Advance(5 * time.Second)
 	eventually(t, "second probe round", func() bool {
 		return probeSum(m, "a:1", "b:1", "c:1", "d:1") == 8
@@ -1338,7 +1335,7 @@ func TestHostCredentialsNotSurfaced(t *testing.T) {
 	}
 
 	tx := reg.Begin()
-	_, err = Build(config.Upstream{Name: "u", Hosts: hosts("http://user:s3cret@h:bad")}, Deps{State: tx})
+	_, err = Build(config.Upstream{Name: "u", Hosts: hosts("http://user:s3cret@h:bad")}, Deps{State: tx, Clock: clock.NewFake(testStart)})
 	tx.Abort()
 	if err == nil {
 		t.Fatal("Build error = nil, want invalid URL error")

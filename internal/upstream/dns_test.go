@@ -94,7 +94,7 @@ func TestDNSRefresh(t *testing.T) {
 	}
 
 	res.set([]string{"10.0.0.4", "10.0.0.3", "10.0.0.2"}, nil)
-	fake.BlockUntil(1)
+	blockUntil(t, fake, 1, "DNS refresh timer")
 	fake.Advance(30 * time.Second)
 	want := []string{"http://10.0.0.2:8080", "http://10.0.0.3:8080", "http://10.0.0.4:8080"}
 	eventually(t, "refreshed host set", func() bool { return slices.Equal(hostURLs(u), want) })
@@ -125,7 +125,7 @@ func TestDNSFailureKeepsLastGood(t *testing.T) {
 	want := []string{"http://10.0.0.1:8080", "http://10.0.0.2:8080"}
 
 	res.set(nil, errors.New("servfail"))
-	fake.BlockUntil(1)
+	blockUntil(t, fake, 1, "DNS refresh timer")
 	fake.Advance(30 * time.Second)
 	eventually(t, "lookup failure logged", func() bool {
 		return strings.Contains(logs.String(), "upstream dns lookup failed")
@@ -138,7 +138,7 @@ func TestDNSFailureKeepsLastGood(t *testing.T) {
 	}
 
 	res.set([]string{}, nil)
-	fake.BlockUntil(1)
+	blockUntil(t, fake, 1, "DNS refresh timer")
 	fake.Advance(30 * time.Second)
 	eventually(t, "empty answer logged", func() bool {
 		return strings.Contains(logs.String(), "upstream dns lookup returned no addresses")
@@ -163,7 +163,7 @@ func TestDNSFirstLookupFails(t *testing.T) {
 	}
 
 	res.set([]string{"10.0.0.7"}, nil)
-	fake.BlockUntil(1)
+	blockUntil(t, fake, 1, "DNS refresh timer")
 	fake.Advance(30 * time.Second)
 	eventually(t, "hosts after recovery", func() bool { return len(u.Hosts()) == 1 })
 	if got := hostURLs(u); !slices.Equal(got, []string{"http://10.0.0.7:8080"}) {
@@ -228,7 +228,7 @@ func TestDNSStaleWatcherIgnored(t *testing.T) {
 	}
 
 	res1.set([]string{"10.0.0.9"}, nil)
-	fake.BlockUntil(2)
+	blockUntil(t, fake, 2, "DNS refresh timers")
 	fake.Advance(30 * time.Second)
 	eventually(t, "stale watcher refresh", func() bool {
 		return m.DNSRefresh.With("u", "success").Value() == 3
@@ -266,7 +266,7 @@ func TestDNSPerInstance(t *testing.T) {
 	}
 
 	resA.set([]string{"10.4.0.9"}, nil)
-	fake.BlockUntil(2)
+	blockUntil(t, fake, 2, "DNS refresh timers")
 	fake.Advance(30 * time.Second)
 	eventually(t, "instance A refresh", func() bool {
 		return slices.Equal(hostURLs(uA), []string{"http://10.4.0.9:8080"})
@@ -281,7 +281,7 @@ func TestDNSWatcherCloseStopsTimer(t *testing.T) {
 	reg := state.NewRegistry(nil)
 	t.Cleanup(reg.Close)
 	u, _ := buildDeps(t, reg, dnsUpstream(), Deps{Clock: fake, Resolver: &fakeResolver{answers: []string{"10.5.0.1"}}})
-	fake.BlockUntil(1)
+	blockUntil(t, fake, 1, "DNS refresh timer")
 	if err := u.dns.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +306,7 @@ func TestDNSBreakerMembership(t *testing.T) {
 	keptBreaker := kept.Breaker
 
 	res.set([]string{"10.0.0.2", "10.0.0.3"}, nil)
-	fake.BlockUntil(1)
+	blockUntil(t, fake, 1, "DNS refresh timer")
 	fake.Advance(30 * time.Second)
 	want := []string{"http://10.0.0.2:8080", "http://10.0.0.3:8080"}
 	eventually(t, "refreshed host set", func() bool { return slices.Equal(hostURLs(u), want) })

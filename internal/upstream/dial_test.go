@@ -3,6 +3,7 @@ package upstream
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
 type stubResolver struct {
@@ -108,20 +110,16 @@ func orderOf(d *addrDialer) []string {
 
 func awaitStarted(t *testing.T, d *addrDialer, addr string) {
 	t.Helper()
-	select {
-	case <-d.started[addr]:
-	case <-time.After(transportGuard):
-		t.Fatalf("hang guard: dial to %s not started within %v; dialed so far %v", addr, transportGuard, orderOf(d))
-	}
+	testwait.Done(t, "dial to "+addr+" started", d.started[addr], func() string {
+		return fmt.Sprintf("dialed so far %v", orderOf(d))
+	})
 }
 
 func awaitEnded(t *testing.T, d *addrDialer, addr string) {
 	t.Helper()
-	select {
-	case <-d.ends[addr]:
-	case <-time.After(transportGuard):
-		t.Fatalf("hang guard: dial to %s not ended within %v; dialed so far %v", addr, transportGuard, orderOf(d))
-	}
+	testwait.Done(t, "dial to "+addr+" ended", d.ends[addr], func() string {
+		return fmt.Sprintf("dialed so far %v", orderOf(d))
+	})
 }
 
 func TestConnectFailsOverWithinConnectTimeout(t *testing.T) {

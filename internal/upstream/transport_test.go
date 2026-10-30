@@ -3,6 +3,7 @@ package upstream
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"testing"
@@ -11,9 +12,8 @@ import (
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/httperr"
+	"github.com/ok0/go-microgateway/internal/testwait"
 )
-
-const transportGuard = 2 * time.Minute
 
 var errDialProbe = errors.New("probe")
 
@@ -24,22 +24,22 @@ type dialResult struct {
 
 func dueWithin(t *testing.T, fake *clock.Fake, n int, within time.Duration, what string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), transportGuard)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if fake.WaitDue(ctx, n, within) != nil {
-		t.Fatalf("hang guard: %s not observed within %v; fake waiters=%d due=%d", what, transportGuard, fake.Waiters(), fake.Due(within))
-	}
+	due := make(chan struct{})
+	go func() {
+		defer close(due)
+		_ = fake.WaitDue(ctx, n, within)
+	}()
+	testwait.Done(t, what, due, func() string {
+		return fmt.Sprintf("fake waiters=%d due within %v=%d", fake.Waiters(), within, fake.Due(within))
+	})
 }
 
 func recvDial(t *testing.T, ch <-chan dialResult, what string) dialResult {
 	t.Helper()
-	select {
-	case r := <-ch:
-		return r
-	case <-time.After(transportGuard):
-		t.Fatalf("hang guard: %s not observed within %v", what, transportGuard)
-	}
-	return dialResult{}
+	r, _ := testwait.Recv(t, what, ch, nil)
+	return r
 }
 
 // transportClocks lists the clocks under test; connect is a limit meant to fire (used only with dialers that hang until it does). Tests where the limit must not fire use an hour under both clocks.
@@ -57,6 +57,7 @@ func transportClocks(t *testing.T) []struct {
 		fake    *clock.Fake
 		connect time.Duration
 	}{
+		// Real clock: a hung dialer must hit the 20ms connect limit on the production clock.
 		{"real", clock.Real(), nil, 20 * time.Millisecond},
 		{"fake", f, f, time.Hour},
 	}
@@ -110,11 +111,7 @@ func TestDialContextHasNoDeadline(t *testing.T) {
 				conn, err := tr.DialContext(parent, "tcp", "backend.test:80")
 				ch <- dialResult{conn, err}
 			}()
-			select {
-			case <-started:
-			case <-time.After(transportGuard):
-				t.Fatal("hang guard: dialer not started within guard")
-			}
+			testwait.Done(t, "dialer started", started, nil)
 			if c.fake != nil {
 				dueWithin(t, c.fake, 1, time.Hour, "connect timer armed")
 			}
@@ -162,11 +159,7 @@ func TestConnectTimeoutReplacesDialError(t *testing.T) {
 					conn, err := tr.DialContext(context.Background(), "tcp", "backend.test:80")
 					ch <- dialResult{conn, err}
 				}()
-				select {
-				case <-started:
-				case <-time.After(transportGuard):
-					t.Fatal("hang guard: dialer not started within guard")
-				}
+				testwait.Done(t, "dialer started", started, nil)
 				if c.fake != nil {
 					dueWithin(t, c.fake, 1, time.Hour, "connect timer armed")
 					c.fake.Advance(time.Hour)

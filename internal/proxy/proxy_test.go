@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -26,12 +27,13 @@ import (
 	"github.com/ok0/go-microgateway/internal/reqctx"
 	"github.com/ok0/go-microgateway/internal/retry"
 	"github.com/ok0/go-microgateway/internal/state"
+	"github.com/ok0/go-microgateway/internal/testwait"
 	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
-func newUpstream(t *testing.T, rawURL string) *upstream.Upstream {
+func newUpstream(t *testing.T, rawURL string, clk clock.Clock) *upstream.Upstream {
 	t.Helper()
-	return newUpstreamWith(t, config.Upstream{Name: "u", Hosts: []config.Host{{URL: config.NewSecretURL(rawURL)}}}, upstream.Deps{})
+	return newUpstreamWith(t, config.Upstream{Name: "u", Hosts: []config.Host{{URL: config.NewSecretURL(rawURL)}}}, upstream.Deps{Clock: clk})
 }
 
 func newUpstreamWith(t *testing.T, cfg config.Upstream, d upstream.Deps) *upstream.Upstream {
@@ -52,22 +54,32 @@ func newUpstreamWith(t *testing.T, cfg config.Upstream, d upstream.Deps) *upstre
 	return up
 }
 
-func eventually(t *testing.T, cond func() bool) {
+func eventually(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.NewTimer(5 * time.Second)
-	defer deadline.Stop()
-	for {
-		if cond() {
-			return
-		}
-		tick := time.NewTimer(5 * time.Millisecond)
-		select {
-		case <-deadline.C:
-			tick.Stop()
-			t.Fatal("condition not met before deadline")
-		case <-tick.C:
-		}
-	}
+	testwait.Until(t, what, cond, nil)
+}
+
+// blockUntil waits until fake has at least n pending timers, tickers or After channels.
+func blockUntil(t *testing.T, fake *clock.Fake, n int, what string) {
+	t.Helper()
+	testwait.Until(t, what, func() bool { return fake.Waiters() >= n }, func() string {
+		return fmt.Sprintf("fake waiters=%d, want >= %d", fake.Waiters(), n)
+	})
+}
+
+// awaitDue waits until n timers of fake are due within the given duration.
+func awaitDue(t *testing.T, fake *clock.Fake, n int, within time.Duration, what string) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	due := make(chan struct{})
+	go func() {
+		defer close(due)
+		_ = fake.WaitDue(ctx, n, within)
+	}()
+	testwait.Done(t, what, due, func() string {
+		return fmt.Sprintf("fake waiters=%d due within %v=%d", fake.Waiters(), within, fake.Due(within))
+	})
 }
 
 func TestRewritePath(t *testing.T) {
@@ -147,8 +159,9 @@ func TestPreserveHost(t *testing.T) {
 			if tt.useBack {
 				want = strings.TrimPrefix(backend.URL, "http://")
 			}
-			up := newUpstream(t, backend.URL)
-			gw := httptest.NewServer(New(RouteSpec{PreserveHost: tt.preserve}, up, Deps{}))
+			fake := clock.NewFake(time.Unix(0, 0))
+			up := newUpstream(t, backend.URL, fake)
+			gw := httptest.NewServer(New(RouteSpec{PreserveHost: tt.preserve}, up, Deps{Clock: fake}))
 			defer gw.Close()
 
 			req, err := http.NewRequest(http.MethodGet, gw.URL+"/", nil)
@@ -163,13 +176,9 @@ func TestPreserveHost(t *testing.T) {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
 
-			select {
-			case got := <-hosts:
-				if got != want {
-					t.Errorf("backend Host = %q, want %q", got, want)
-				}
-			case <-time.After(5 * time.Second):
-				t.Fatal("backend did not receive request")
+			got, _ := testwait.Recv(t, "backend request", hosts, nil)
+			if got != want {
+				t.Errorf("backend Host = %q, want %q", got, want)
 			}
 		})
 	}
@@ -205,8 +214,9 @@ func TestInFlightUpgrade(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	up := newUpstream(t, backend.URL)
-	gw := httptest.NewServer(New(RouteSpec{}, up, Deps{}))
+	fake := clock.NewFake(time.Unix(0, 0))
+	up := newUpstream(t, backend.URL, fake)
+	gw := httptest.NewServer(New(RouteSpec{}, up, Deps{Clock: fake}))
 	defer gw.Close()
 
 	conn, err := net.Dial("tcp", gw.Listener.Addr().String())
@@ -240,7 +250,7 @@ func TestInFlightUpgrade(t *testing.T) {
 	}
 
 	_ = conn.Close()
-	eventually(t, func() bool { return up.Hosts()[0].InFlight() == 0 })
+	eventually(t, "in-flight count back to 0", func() bool { return up.Hosts()[0].InFlight() == 0 })
 }
 
 func TestInFlightNormal(t *testing.T) {
@@ -249,8 +259,9 @@ func TestInFlightNormal(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	up := newUpstream(t, backend.URL)
-	gw := httptest.NewServer(New(RouteSpec{}, up, Deps{}))
+	fake := clock.NewFake(time.Unix(0, 0))
+	up := newUpstream(t, backend.URL, fake)
+	gw := httptest.NewServer(New(RouteSpec{}, up, Deps{Clock: fake}))
 	defer gw.Close()
 
 	resp, err := http.Get(gw.URL + "/")
@@ -265,7 +276,7 @@ func TestInFlightNormal(t *testing.T) {
 	if string(body) != "ok" {
 		t.Errorf("body = %q, want %q", body, "ok")
 	}
-	eventually(t, func() bool { return up.Hosts()[0].InFlight() == 0 })
+	eventually(t, "in-flight count back to 0", func() bool { return up.Hosts()[0].InFlight() == 0 })
 }
 
 func blockUntilDone(t *testing.T, started chan<- struct{}) string {
@@ -280,11 +291,11 @@ func blockUntilDone(t *testing.T, started chan<- struct{}) string {
 	return s.URL
 }
 
-func runAttempt(t *testing.T, ctx context.Context, attempts *metrics.CounterVec, rawURL, outcome string) {
+func runAttempt(t *testing.T, ctx context.Context, clk clock.Clock, attempts *metrics.CounterVec, rawURL, outcome string) {
 	t.Helper()
-	up := newUpstream(t, rawURL)
+	up := newUpstream(t, rawURL, clk)
 	req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
-	New(RouteSpec{}, up, Deps{Attempts: attempts}).ServeHTTP(httptest.NewRecorder(), req)
+	New(RouteSpec{}, up, Deps{Attempts: attempts, Clock: clk}).ServeHTTP(httptest.NewRecorder(), req)
 	host := strings.TrimPrefix(rawURL, "http://")
 	if got := attempts.With(up.Name, host, outcome).Value(); got != 1 {
 		t.Errorf("outcome %q count = %v, want 1", outcome, got)
@@ -301,7 +312,7 @@ func TestAttemptOutcomes(t *testing.T) {
 	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	t.Cleanup(ok.Close)
 	t.Run("success", func(t *testing.T) {
-		runAttempt(t, context.Background(), attempts, ok.URL, "success")
+		runAttempt(t, context.Background(), clock.NewFake(time.Unix(0, 0)), attempts, ok.URL, "success")
 	})
 
 	unavailable := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -309,7 +320,7 @@ func TestAttemptOutcomes(t *testing.T) {
 	}))
 	t.Cleanup(unavailable.Close)
 	t.Run("status_5xx_failure", func(t *testing.T) {
-		runAttempt(t, context.Background(), attempts, unavailable.URL, "failure")
+		runAttempt(t, context.Background(), clock.NewFake(time.Unix(0, 0)), attempts, unavailable.URL, "failure")
 	})
 
 	notFound := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -317,14 +328,14 @@ func TestAttemptOutcomes(t *testing.T) {
 	}))
 	t.Cleanup(notFound.Close)
 	t.Run("status_404_ignored", func(t *testing.T) {
-		runAttempt(t, context.Background(), attempts, notFound.URL, "ignored")
+		runAttempt(t, context.Background(), clock.NewFake(time.Unix(0, 0)), attempts, notFound.URL, "ignored")
 	})
 
 	closed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	closedURL := closed.URL
 	closed.Close()
 	t.Run("error", func(t *testing.T) {
-		runAttempt(t, context.Background(), attempts, closedURL, "failure")
+		runAttempt(t, context.Background(), clock.NewFake(time.Unix(0, 0)), attempts, closedURL, "failure")
 	})
 
 	t.Run("canceled", func(t *testing.T) {
@@ -339,14 +350,23 @@ func TestAttemptOutcomes(t *testing.T) {
 			case <-ctx.Done():
 			}
 		}()
-		runAttempt(t, ctx, attempts, backend, "ignored")
+		runAttempt(t, ctx, clock.NewFake(time.Unix(0, 0)), attempts, backend, "ignored")
 	})
 
 	t.Run("timeout", func(t *testing.T) {
-		backend := blockUntilDone(t, nil)
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		fake := clock.NewFake(time.Unix(0, 0))
+		started := make(chan struct{}, 1)
+		backend := blockUntilDone(t, started)
+		ctx, cancel := clock.WithTimeout(context.Background(), fake, 50*time.Millisecond)
 		defer cancel()
-		runAttempt(t, ctx, attempts, backend, "failure")
+		go func() {
+			select {
+			case <-started:
+				fake.Advance(50 * time.Millisecond)
+			case <-ctx.Done():
+			}
+		}()
+		runAttempt(t, ctx, fake, attempts, backend, "failure")
 	})
 }
 
@@ -381,15 +401,10 @@ func TestResponseHeaderTimeoutFakeClock(t *testing.T) {
 		}
 		errc <- err
 	}()
-	fake.BlockUntil(1)
+	blockUntil(t, fake, 1, "response header timer")
 	fake.Advance(time.Hour)
 
-	var got error
-	select {
-	case got = <-errc:
-	case <-time.After(5 * time.Second):
-		t.Fatal("RoundTrip did not return after the response header timeout")
-	}
+	got, _ := testwait.Recv(t, "RoundTrip after the response header timeout", errc, nil)
 	if !errors.Is(got, ErrResponseHeaderTimeout) {
 		t.Fatalf("err = %v, want ErrResponseHeaderTimeout", got)
 	}
@@ -758,15 +773,10 @@ func TestAttemptTokenCompleted(t *testing.T) {
 				ch <- result{resp, err}
 			}()
 			if tt.headerTimeout {
-				fake.BlockUntilDue(1, time.Hour)
+				awaitDue(t, fake, 1, time.Hour, "response header timer")
 				fake.Advance(time.Hour)
 			}
-			var got result
-			select {
-			case got = <-ch:
-			case <-time.After(5 * time.Second):
-				t.Fatal("RoundTrip did not return")
-			}
+			got, _ := testwait.Recv(t, "RoundTrip to return", ch, nil)
 			if got.resp != nil && got.resp.Body != nil {
 				_ = got.resp.Body.Close()
 			}
@@ -848,24 +858,13 @@ func TestHeaderTimerAtRequestDeadline(t *testing.T) {
 		ch <- result{resp, err}
 	}()
 
-	guard, cancelGuard := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancelGuard()
-	select {
-	case <-written:
-	case <-guard.Done():
-		t.Fatal("hang guard: request not written")
-	}
+	testwait.Done(t, "request written", written, nil)
 	if w, d := fake.Waiters(), fake.Due(time.Hour); w != 1 || d != 1 {
 		t.Fatalf("request written: fake waiters=%d due within 1h=%d, want only the response-header timer (connect timer stopped)", w, d)
 	}
 	fake.Advance(time.Hour)
 
-	var got result
-	select {
-	case got = <-ch:
-	case <-time.After(2 * time.Minute):
-		t.Fatal("hang guard: RoundTrip did not return after the request deadline and the response-header timer")
-	}
+	got, _ := testwait.Recv(t, "RoundTrip after the request deadline", ch, nil)
 	if got.resp != nil && got.resp.Body != nil {
 		_ = got.resp.Body.Close()
 	}
