@@ -1022,7 +1022,8 @@ func runTransportLimits(t *testing.T, n testNetwork) {
 func TestIdleConnectionsClosed(t *testing.T) {
 	n := newMemNetwork()
 	be := n.serve(t, echoHandler("idle"))
-	g := n.gateway(t, oneUpstreamDoc(be.URL, "    timeouts:\n      idle: 50ms\n"))
+	fake := clock.NewFake(time.Now())
+	g := n.gateway(t, oneUpstreamDoc(be.URL, "    timeouts:\n      idle: 50ms\n"), withClock(fake))
 	ts := n.serve(t, g)
 	client := n.client(t, nil)
 
@@ -1030,6 +1031,10 @@ func TestIdleConnectionsClosed(t *testing.T) {
 	if got := be.New.Load(); got != 1 {
 		t.Fatalf("backend connections = %d, want 1", got)
 	}
+	eventually(t, "idle timer armed", func() bool { return fake.HousekeepingWaiters() >= 1 }, func() string {
+		return fmt.Sprintf("housekeeping timers=%d open=%d", fake.HousekeepingWaiters(), be.Open.Load())
+	})
+	fake.Advance(50 * time.Millisecond)
 	eventually(t, "idle backend connection to close", func() bool { return be.Open.Load() == 0 }, func() string {
 		return fmt.Sprintf("open=%d", be.Open.Load())
 	})
