@@ -130,13 +130,6 @@ func (d Deps) withDefaults() Deps {
 	return d
 }
 
-type pooledTransport struct{ *http.Transport }
-
-func (t *pooledTransport) Close() error {
-	t.CloseIdleConnections()
-	return nil
-}
-
 type Host struct {
 	// URL never carries userinfo.
 	URL    *url.URL
@@ -195,7 +188,7 @@ func (s *hostSet) isEligible(i int) bool {
 type Upstream struct {
 	Name                  string
 	Algorithm             string
-	Transport             *http.Transport
+	Transport             *Transport
 	ResponseHeaderTimeout time.Duration
 
 	lbCfg   config.LoadBalancer
@@ -273,8 +266,8 @@ func Build(cfg config.Upstream, d Deps) (*Upstream, error) {
 		algo = "p2c"
 	}
 
-	tr, err := state.Get(d.State, KindTransport, cfg.Name, TransportFingerprint(cfg), func() (*pooledTransport, error) {
-		return &pooledTransport{NewTransport(cfg, d.Dial, d.Clock)}, nil
+	tr, err := state.Get(d.State, KindTransport, cfg.Name, TransportFingerprint(cfg), func() (*Transport, error) {
+		return NewTransport(cfg, d.Dial, d.Clock), nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("upstream %q: %w", cfg.Name, err)
@@ -353,7 +346,7 @@ func Build(cfg config.Upstream, d Deps) (*Upstream, error) {
 	return &Upstream{
 		Name:                  cfg.Name,
 		Algorithm:             algo,
-		Transport:             tr.Transport,
+		Transport:             tr,
 		ResponseHeaderTimeout: cfg.Timeouts.ResponseHeader.Std(),
 		lbCfg:                 cfg.LoadBalancer,
 		static:                static,

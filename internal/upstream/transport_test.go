@@ -81,7 +81,7 @@ func TestDialContextHasNoDeadline(t *testing.T) {
 			}
 			tr := NewTransport(cfgWithConnect(time.Hour), dial, c.clk)
 
-			if _, err := tr.DialContext(context.Background(), "tcp", "backend.test:80"); err != errDialProbe {
+			if _, err := tr.inner.DialContext(context.Background(), "tcp", "backend.test:80"); err != errDialProbe {
 				t.Fatalf("err = %v, want the dialer's error by identity", err)
 			}
 			if sawDeadline || !sawDone {
@@ -90,7 +90,7 @@ func TestDialContextHasNoDeadline(t *testing.T) {
 
 			timed, cancelTimed := context.WithTimeout(context.Background(), time.Hour)
 			defer cancelTimed()
-			if _, err := tr.DialContext(timed, "tcp", "backend.test:80"); err != errDialProbe {
+			if _, err := tr.inner.DialContext(timed, "tcp", "backend.test:80"); err != errDialProbe {
 				t.Fatalf("err = %v, want the dialer's error by identity", err)
 			}
 			if sawDeadline || !sawDone {
@@ -108,7 +108,7 @@ func TestDialContextHasNoDeadline(t *testing.T) {
 			tr = NewTransport(cfgWithConnect(time.Hour), blocking, c.clk)
 			ch := make(chan dialResult, 1)
 			go func() {
-				conn, err := tr.DialContext(parent, "tcp", "backend.test:80")
+				conn, err := tr.inner.DialContext(parent, "tcp", "backend.test:80")
 				ch <- dialResult{conn, err}
 			}()
 			testwait.Done(t, "dialer started", started, nil)
@@ -156,7 +156,7 @@ func TestConnectTimeoutReplacesDialError(t *testing.T) {
 				tr := NewTransport(cfgWithConnect(c.connect), dial, c.clk)
 				ch := make(chan dialResult, 1)
 				go func() {
-					conn, err := tr.DialContext(context.Background(), "tcp", "backend.test:80")
+					conn, err := tr.inner.DialContext(context.Background(), "tcp", "backend.test:80")
 					ch <- dialResult{conn, err}
 				}()
 				testwait.Done(t, "dialer started", started, nil)
@@ -194,7 +194,7 @@ func TestDialErrorBeforeConnectTimer(t *testing.T) {
 				return nil, refused
 			}
 			tr := NewTransport(cfgWithConnect(time.Hour), dial, c.clk)
-			_, err := tr.DialContext(context.Background(), "tcp", "backend.test:80")
+			_, err := tr.inner.DialContext(context.Background(), "tcp", "backend.test:80")
 			if err != refused {
 				t.Fatalf("err = %v, want the dialer's error by identity", err)
 			}

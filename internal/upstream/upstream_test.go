@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -514,20 +515,33 @@ func TestNewTransport(t *testing.T) {
 		Pool: config.Pool{MaxIdlePerHost: 7, MaxConnsPerHost: 9},
 	}
 	tr := NewTransport(cfg, nil, nil)
-	if tr.TLSHandshakeTimeout != 2*time.Second {
-		t.Errorf("TLSHandshakeTimeout = %v", tr.TLSHandshakeTimeout)
+	in := tr.inner
+	if in.TLSHandshakeTimeout != 0 {
+		t.Errorf("TLSHandshakeTimeout = %v, want 0 (the limit runs on the injected clock)", in.TLSHandshakeTimeout)
 	}
-	if tr.ResponseHeaderTimeout != 0 {
-		t.Errorf("ResponseHeaderTimeout = %v, want 0 (the header limit is enforced by the proxy timer)", tr.ResponseHeaderTimeout)
+	if in.ResponseHeaderTimeout != 0 {
+		t.Errorf("ResponseHeaderTimeout = %v, want 0 (the header limit is enforced by the proxy timer)", in.ResponseHeaderTimeout)
 	}
-	if tr.IdleConnTimeout != 4*time.Second {
-		t.Errorf("IdleConnTimeout = %v", tr.IdleConnTimeout)
+	if in.IdleConnTimeout != 0 {
+		t.Errorf("IdleConnTimeout = %v, want 0 (the limit runs on the injected clock)", in.IdleConnTimeout)
 	}
-	if tr.MaxIdleConnsPerHost != 7 {
-		t.Errorf("MaxIdleConnsPerHost = %d", tr.MaxIdleConnsPerHost)
+	if in.ExpectContinueTimeout != 0 {
+		t.Errorf("ExpectContinueTimeout = %v, want 0 (the limit runs on the injected clock)", in.ExpectContinueTimeout)
 	}
-	if tr.MaxConnsPerHost != 9 {
-		t.Errorf("MaxConnsPerHost = %d", tr.MaxConnsPerHost)
+	if tr.handshake != 2*time.Second {
+		t.Errorf("handshake limit = %v, want 2s", tr.handshake)
+	}
+	if tr.idle != 4*time.Second {
+		t.Errorf("idle limit = %v, want 4s", tr.idle)
+	}
+	if in.DialTLSContext == nil || in.DialContext == nil {
+		t.Error("DialContext or DialTLSContext is nil, want both set")
+	}
+	if in.MaxIdleConnsPerHost != 7 {
+		t.Errorf("MaxIdleConnsPerHost = %d, want 7", in.MaxIdleConnsPerHost)
+	}
+	if in.MaxConnsPerHost != 9 {
+		t.Errorf("MaxConnsPerHost = %d, want 9", in.MaxConnsPerHost)
 	}
 	if d := newDialer(); d.Timeout != 0 {
 		t.Errorf("dialer Timeout = %v, want 0", d.Timeout)
@@ -535,13 +549,20 @@ func TestNewTransport(t *testing.T) {
 	if d := newDialer(); d.KeepAlive != 30*time.Second {
 		t.Errorf("dialer KeepAlive = %v, want 30s", d.KeepAlive)
 	}
-	if tr.Protocols.HTTP2() {
+	if in.Protocols.HTTP2() {
 		t.Error("HTTP2 enabled, want disabled")
+	}
+	if !slices.Equal(tr.nextProtos, []string{"http/1.1"}) {
+		t.Errorf("nextProtos = %v, want [http/1.1]", tr.nextProtos)
 	}
 
 	cfg.HTTP2 = true
-	if !NewTransport(cfg, nil, nil).Protocols.HTTP2() {
+	h := NewTransport(cfg, nil, nil)
+	if !h.inner.Protocols.HTTP2() {
 		t.Error("HTTP2 disabled, want enabled")
+	}
+	if !slices.Equal(h.nextProtos, []string{"h2", "http/1.1"}) {
+		t.Errorf("nextProtos = %v, want [h2 http/1.1]", h.nextProtos)
 	}
 }
 
@@ -568,20 +589,36 @@ func TestNewTransportHasNoWallTwinsUnderAnyClock(t *testing.T) {
 	for _, c := range clocks {
 		t.Run(c.name, func(t *testing.T) {
 			tr := NewTransport(cfg, nil, c.clk)
-			if tr.ResponseHeaderTimeout != 0 {
-				t.Errorf("ResponseHeaderTimeout = %v, want 0", tr.ResponseHeaderTimeout)
+			in := tr.inner
+			if in.ResponseHeaderTimeout != 0 {
+				t.Errorf("ResponseHeaderTimeout = %v, want 0", in.ResponseHeaderTimeout)
 			}
-			if tr.TLSHandshakeTimeout != 2*time.Second {
-				t.Errorf("TLSHandshakeTimeout = %v", tr.TLSHandshakeTimeout)
+			if in.TLSHandshakeTimeout != 0 {
+				t.Errorf("TLSHandshakeTimeout = %v, want 0 (the limit runs on the injected clock)", in.TLSHandshakeTimeout)
 			}
-			if tr.IdleConnTimeout != 4*time.Second {
-				t.Errorf("IdleConnTimeout = %v", tr.IdleConnTimeout)
+			if in.IdleConnTimeout != 0 {
+				t.Errorf("IdleConnTimeout = %v, want 0 (the limit runs on the injected clock)", in.IdleConnTimeout)
 			}
-			if tr.MaxIdleConnsPerHost != 7 {
-				t.Errorf("MaxIdleConnsPerHost = %d", tr.MaxIdleConnsPerHost)
+			if in.ExpectContinueTimeout != 0 {
+				t.Errorf("ExpectContinueTimeout = %v, want 0 (the limit runs on the injected clock)", in.ExpectContinueTimeout)
 			}
-			if tr.MaxConnsPerHost != 9 {
-				t.Errorf("MaxConnsPerHost = %d", tr.MaxConnsPerHost)
+			if tr.handshake != 2*time.Second {
+				t.Errorf("handshake limit = %v, want 2s", tr.handshake)
+			}
+			if tr.idle != 4*time.Second {
+				t.Errorf("idle limit = %v, want 4s", tr.idle)
+			}
+			if in.MaxIdleConnsPerHost != 7 {
+				t.Errorf("MaxIdleConnsPerHost = %d, want 7", in.MaxIdleConnsPerHost)
+			}
+			if in.MaxConnsPerHost != 9 {
+				t.Errorf("MaxConnsPerHost = %d, want 9", in.MaxConnsPerHost)
+			}
+			if tr.clk == nil {
+				t.Error("clk is nil, want the resolved clock")
+			}
+			if _, ok := c.clk.(*clock.Fake); ok && tr.idleClk == tr.clk {
+				t.Error("idleClk == clk, want the housekeeping view for idle timers")
 			}
 		})
 	}

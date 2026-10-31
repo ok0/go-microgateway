@@ -412,7 +412,7 @@ func TestDefaultDialerDialsLiteralAddress(t *testing.T) {
 		}
 	}()
 	tr := NewTransport(cfgWithConnect(time.Hour), nil, clock.NewFake(testStart))
-	conn, err := tr.DialContext(context.Background(), "tcp", ln.Addr().String())
+	conn, err := tr.inner.DialContext(context.Background(), "tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatalf("DialContext: %v", err)
 	}
