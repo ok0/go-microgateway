@@ -17,11 +17,12 @@ type Fake struct {
 }
 
 type waiter struct {
-	deadline time.Time
-	seq      uint64
-	ch       chan time.Time
-	fn       func()
-	period   time.Duration
+	deadline     time.Time
+	seq          uint64
+	ch           chan time.Time
+	fn           func()
+	period       time.Duration
+	housekeeping bool
 }
 
 // NewFake returns a Fake clock whose current time is start.
@@ -46,6 +47,10 @@ func (f *Fake) Since(t time.Time) time.Duration {
 // After returns a channel that receives the fake time once d has been advanced past.
 // A non-positive d yields a channel that already holds the current time.
 func (f *Fake) After(d time.Duration) <-chan time.Time {
+	return f.after(d, false)
+}
+
+func (f *Fake) after(d time.Duration, hk bool) <-chan time.Time {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	ch := make(chan time.Time, 1)
@@ -53,19 +58,23 @@ func (f *Fake) After(d time.Duration) <-chan time.Time {
 		ch <- f.now
 		return ch
 	}
-	f.addLocked(&waiter{deadline: f.now.Add(d), ch: ch})
+	f.addLocked(&waiter{deadline: f.now.Add(d), ch: ch, housekeeping: hk})
 	return ch
 }
 
 // NewTicker returns a Ticker that delivers ticks every d of fake time.
 // It panics if d is not positive.
 func (f *Fake) NewTicker(d time.Duration) Ticker {
+	return f.newTicker(d, false)
+}
+
+func (f *Fake) newTicker(d time.Duration, hk bool) Ticker {
 	if d <= 0 {
 		panic("non-positive interval for NewTicker")
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	w := &waiter{ch: make(chan time.Time, 1), period: d, deadline: f.now.Add(d)}
+	w := &waiter{ch: make(chan time.Time, 1), period: d, deadline: f.now.Add(d), housekeeping: hk}
 	f.addLocked(w)
 	return &fakeTicker{f: f, w: w}
 }
@@ -74,9 +83,13 @@ func (f *Fake) NewTicker(d time.Duration) Ticker {
 // The function runs synchronously inside Advance. A non-positive d runs fn in a new goroutine
 // and returns a timer that is already stopped.
 func (f *Fake) AfterFunc(d time.Duration, fn func()) Timer {
+	return f.afterFunc(d, fn, false)
+}
+
+func (f *Fake) afterFunc(d time.Duration, fn func(), hk bool) Timer {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	t := &fakeTimer{f: f, w: &waiter{fn: fn}}
+	t := &fakeTimer{f: f, w: &waiter{fn: fn, housekeeping: hk}}
 	if d <= 0 {
 		go fn()
 		return t
@@ -141,16 +154,16 @@ func (f *Fake) Set(t time.Time) {
 	f.mu.Unlock()
 }
 
-// BlockUntil blocks until at least n timers, tickers or After channels are pending.
+// BlockUntil blocks until at least n timers, tickers or After channels are pending, excluding housekeeping timers.
 func (f *Fake) BlockUntil(n int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for len(f.waiters) < n {
+	for f.countLocked() < n {
 		f.cond.Wait()
 	}
 }
 
-// Due returns the number of pending waiters whose deadline is no later than now+within.
+// Due returns the number of pending waiters whose deadline is no later than now+within, excluding housekeeping timers.
 func (f *Fake) Due(within time.Duration) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -158,6 +171,7 @@ func (f *Fake) Due(within time.Duration) int {
 }
 
 // BlockUntilDue blocks until at least n pending waiters are due within the given duration of fake time.
+// Housekeeping timers are excluded.
 func (f *Fake) BlockUntilDue(n int, within time.Duration) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -167,7 +181,7 @@ func (f *Fake) BlockUntilDue(n int, within time.Duration) {
 }
 
 // WaitDue blocks until at least n pending waiters are due within the given duration of fake time or ctx ends.
-// It returns nil in the first case and ctx.Err() in the second.
+// Housekeeping timers are excluded. It returns nil in the first case and ctx.Err() in the second.
 func (f *Fake) WaitDue(ctx context.Context, n int, within time.Duration) error {
 	stop := context.AfterFunc(ctx, func() {
 		f.mu.Lock()
@@ -186,11 +200,35 @@ func (f *Fake) WaitDue(ctx context.Context, n int, within time.Duration) error {
 	return nil
 }
 
-// Waiters returns the number of pending After channels, active tickers and pending AfterFunc timers.
+// Waiters returns the number of pending After channels, active tickers and pending AfterFunc timers,
+// excluding housekeeping timers.
 func (f *Fake) Waiters() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return len(f.waiters)
+	return f.countLocked()
+}
+
+// HousekeepingWaiters returns the number of pending timers, tickers and After channels created through Housekeeping.
+func (f *Fake) HousekeepingWaiters() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	count := 0
+	for _, w := range f.waiters {
+		if w.housekeeping {
+			count++
+		}
+	}
+	return count
+}
+
+func (f *Fake) countLocked() int {
+	count := 0
+	for _, w := range f.waiters {
+		if !w.housekeeping {
+			count++
+		}
+	}
+	return count
 }
 
 func (f *Fake) addLocked(w *waiter) {
@@ -215,7 +253,7 @@ func (f *Fake) dueLocked(within time.Duration) int {
 	limit := f.now.Add(within)
 	count := 0
 	for _, w := range f.waiters {
-		if !w.deadline.After(limit) {
+		if !w.housekeeping && !w.deadline.After(limit) {
 			count++
 		}
 	}
@@ -234,6 +272,30 @@ func (f *Fake) nextDueLocked(target time.Time) *waiter {
 		}
 	}
 	return best
+}
+
+type fakeHousekeeping struct {
+	f *Fake
+}
+
+func (h fakeHousekeeping) Now() time.Time {
+	return h.f.Now()
+}
+
+func (h fakeHousekeeping) Since(t time.Time) time.Duration {
+	return h.f.Since(t)
+}
+
+func (h fakeHousekeeping) After(d time.Duration) <-chan time.Time {
+	return h.f.after(d, true)
+}
+
+func (h fakeHousekeeping) NewTicker(d time.Duration) Ticker {
+	return h.f.newTicker(d, true)
+}
+
+func (h fakeHousekeeping) AfterFunc(d time.Duration, fn func()) Timer {
+	return h.f.afterFunc(d, fn, true)
 }
 
 type fakeTicker struct {

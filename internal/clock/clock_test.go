@@ -258,3 +258,105 @@ func TestRealClock(t *testing.T) {
 	c.AfterFunc(time.Millisecond, func() { close(done) })
 	testwait.Done(t, "Real().AfterFunc to run", done, nil)
 }
+
+func TestFakeHousekeepingTimers(t *testing.T) {
+	f := NewFake(testStart)
+	hk := Housekeeping(f)
+
+	fired := 0
+	fn := func() { fired++ }
+
+	hk.AfterFunc(time.Second, fn)
+	if n := f.Waiters(); n != 0 {
+		t.Fatalf("Waiters() with a housekeeping timer = %d, want 0", n)
+	}
+	if n := f.Due(time.Hour); n != 0 {
+		t.Fatalf("Due(1h) with a housekeeping timer = %d, want 0", n)
+	}
+	if n := f.HousekeepingWaiters(); n != 1 {
+		t.Fatalf("HousekeepingWaiters() = %d, want 1", n)
+	}
+
+	regularFired := 0
+	f.AfterFunc(2*time.Second, func() { regularFired++ })
+	if n := f.Waiters(); n != 1 {
+		t.Fatalf("Waiters() with a regular timer = %d, want 1", n)
+	}
+	if n := f.Due(time.Hour); n != 1 {
+		t.Fatalf("Due(1h) with a regular timer = %d, want 1", n)
+	}
+
+	f.Advance(time.Second)
+	if fired != 1 {
+		t.Fatalf("housekeeping timer fired %d times, want 1", fired)
+	}
+	if n := f.HousekeepingWaiters(); n != 0 {
+		t.Fatalf("HousekeepingWaiters() after firing = %d, want 0", n)
+	}
+	if n := f.Waiters(); n != 1 {
+		t.Fatalf("Waiters() after housekeeping fired = %d, want 1", n)
+	}
+
+	tm := hk.AfterFunc(time.Second, fn)
+	if n := f.HousekeepingWaiters(); n != 1 {
+		t.Fatalf("HousekeepingWaiters() before Stop = %d, want 1", n)
+	}
+	if !tm.Stop() {
+		t.Fatal("Stop() on pending housekeeping timer = false, want true")
+	}
+	if n := f.HousekeepingWaiters(); n != 0 {
+		t.Fatalf("HousekeepingWaiters() after Stop = %d, want 0", n)
+	}
+
+	tm2 := hk.AfterFunc(time.Hour, fn)
+	tm2.Reset(2 * time.Hour)
+	if n := f.Waiters(); n != 1 {
+		t.Fatalf("Waiters() after Reset of housekeeping timer = %d, want 1", n)
+	}
+	if n := f.HousekeepingWaiters(); n != 1 {
+		t.Fatalf("HousekeepingWaiters() after Reset = %d, want 1", n)
+	}
+
+	ak := hk.After(time.Second)
+	tk := hk.NewTicker(time.Second)
+	if n := f.Waiters(); n != 1 {
+		t.Fatalf("Waiters() with housekeeping After and ticker = %d, want 1", n)
+	}
+	if n := f.HousekeepingWaiters(); n != 3 {
+		t.Fatalf("HousekeepingWaiters() with After and ticker = %d, want 3", n)
+	}
+
+	var order []string
+	hk.AfterFunc(time.Second, func() { order = append(order, "housekeeping") })
+	f.AfterFunc(time.Second, func() { order = append(order, "regular") })
+	f.Advance(time.Second)
+	if len(order) != 2 || order[0] != "housekeeping" || order[1] != "regular" {
+		t.Fatalf("callback order = %v, want [housekeeping regular]", order)
+	}
+	if _, ok := tryRecv(ak); !ok {
+		t.Fatal("housekeeping After did not fire")
+	}
+	if _, ok := tryRecv(tk.C()); !ok {
+		t.Fatal("housekeeping ticker did not tick")
+	}
+	if regularFired != 1 {
+		t.Fatalf("regular timer fired %d times, want 1", regularFired)
+	}
+
+	tk.Stop()
+	if n := f.HousekeepingWaiters(); n != 1 {
+		t.Fatalf("HousekeepingWaiters() after ticker Stop = %d, want 1", n)
+	}
+}
+
+func TestHousekeepingNonFake(t *testing.T) {
+	if !IsReal(Housekeeping(Real())) {
+		t.Fatal("Housekeeping(Real()) is not the real clock")
+	}
+	if Housekeeping(nil) != nil {
+		t.Fatal("Housekeeping(nil) != nil")
+	}
+	if IsReal(Housekeeping(NewFake(testStart))) {
+		t.Fatal("Housekeeping(fake) reports as the real clock")
+	}
+}

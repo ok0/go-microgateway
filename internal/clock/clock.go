@@ -41,6 +41,17 @@ func Real() Clock {
 	return realClock{}
 }
 
+// Housekeeping returns a view of c for timers that maintain resources rather than bound an operation
+// (for example idle-connection expiry). On a *Fake, the view's timers, tickers and After channels fire on
+// Advance and Set like any other, but Waiters, Due, BlockUntil, BlockUntilDue and WaitDue do not count them;
+// HousekeepingWaiters does. Any other clock (including nil) is returned unchanged.
+func Housekeeping(c Clock) Clock {
+	if f, ok := c.(*Fake); ok {
+		return fakeHousekeeping{f}
+	}
+	return c
+}
+
 type realClock struct{}
 
 func (realClock) Now() time.Time {
