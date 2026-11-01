@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 type Fetcher interface {
@@ -18,13 +20,24 @@ const MaxKeySetBytes = 1 << 20
 
 type httpFetcher struct {
 	client *http.Client
+	dialer *net.Dialer
 }
 
+// With a nil client the only bound is the caller's context (the key set's fetch
+// timeout on its clock).
 func NewHTTPFetcher(c *http.Client) Fetcher {
-	if c == nil {
-		c = &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
+	if c != nil {
+		return &httpFetcher{client: c}
 	}
-	return &httpFetcher{client: c}
+	d := &net.Dialer{KeepAlive: 30 * time.Second}
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.DialContext = d.DialContext
+	t.TLSHandshakeTimeout = 0
+	t.IdleConnTimeout = 0
+	t.ResponseHeaderTimeout = 0
+	t.ExpectContinueTimeout = 0
+	t.DisableKeepAlives = true
+	return &httpFetcher{client: &http.Client{Transport: t}, dialer: d}
 }
 
 func (f *httpFetcher) FetchKeySet(ctx context.Context, _, keySetURL string) ([]byte, error) {
