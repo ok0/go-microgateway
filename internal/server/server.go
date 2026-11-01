@@ -19,11 +19,16 @@ import (
 // ErrForcedClose reports that connections were closed because they were still open after the drain timeout.
 var ErrForcedClose = errors.New("server: connections were force-closed after the drain timeout")
 
+const (
+	adminHeaderLimit = 10 * time.Second
+	adminIdleLimit   = 120 * time.Second
+)
+
 type listener struct {
 	name    string
 	address string
 	srv     *http.Server
-	tls     bool
+	lim     connLimits
 	ln      net.Listener
 }
 
@@ -100,7 +105,8 @@ func WithCertificates(c *Certificates) Option {
 	return func(o *options) { o.certs = c }
 }
 
-// WithClock makes the server time its shutdown delay and drain timeout with c. Without it the server uses the real clock.
+// WithClock makes the server time its shutdown delay, drain timeout, and the listeners' read-header, read, write,
+// and idle limits with c. Without it the server uses the real clock.
 func WithClock(c clock.Clock) Option {
 	return func(o *options) { o.clk = c }
 }
@@ -153,26 +159,35 @@ func New(cfg *config.Config, h http.Handler, admin http.Handler, ready func(bool
 		p := new(http.Protocols)
 		p.SetHTTP1(true)
 		srv := &http.Server{
-			Handler:           s.track(h),
-			ReadHeaderTimeout: l.ReadHeaderTimeout.Std(),
-			ReadTimeout:       l.ReadTimeout.Std(),
-			WriteTimeout:      l.WriteTimeout.Std(),
-			IdleTimeout:       l.IdleTimeout.Std(),
-			MaxHeaderBytes:    l.MaxHeaderBytes,
-			BaseContext:       func(net.Listener) context.Context { return s.base },
-			ErrorLog:          errLog,
+			Handler:        s.track(h),
+			MaxHeaderBytes: l.MaxHeaderBytes,
+			BaseContext:    func(net.Listener) context.Context { return s.base },
+			ConnState:      trackConnState,
+			ErrorLog:       errLog,
 		}
 		ll := &listener{name: l.Name, address: l.Address, srv: srv}
+		ll.lim = connLimits{
+			header: l.ReadHeaderTimeout.Std(),
+			read:   l.ReadTimeout.Std(),
+			write:  l.WriteTimeout.Std(),
+			idle:   l.IdleTimeout.Std(),
+		}
 		if l.TLS != nil {
 			minVersion := uint16(tls.VersionTLS12)
 			if l.TLS.MinVersion == "1.3" {
 				minVersion = tls.VersionTLS13
 			}
-			srv.TLSConfig = &tls.Config{MinVersion: minVersion, GetCertificate: certs.getter(l.Name)}
-			p.SetHTTP2(l.HTTP2 == nil || *l.HTTP2)
-			ll.tls = true
+			h2 := l.HTTP2 == nil || *l.HTTP2
+			protos := []string{"http/1.1"}
+			if h2 {
+				protos = []string{"h2", "http/1.1"}
+			}
+			srv.TLSConfig = &tls.Config{MinVersion: minVersion, GetCertificate: certs.getter(l.Name), NextProtos: protos}
+			p.SetHTTP2(h2)
+			ll.lim.tls, ll.lim.h2 = true, h2
 		} else {
 			p.SetUnencryptedHTTP2(l.H2C)
+			ll.lim.h2c = l.H2C
 		}
 		srv.Protocols = p
 		s.data = append(s.data, ll)
@@ -184,13 +199,13 @@ func New(cfg *config.Config, h http.Handler, admin http.Handler, ready func(bool
 			name:    "admin",
 			address: cfg.Admin.Address,
 			srv: &http.Server{
-				Handler:           admin,
-				ReadHeaderTimeout: 10 * time.Second,
-				IdleTimeout:       120 * time.Second,
-				BaseContext:       func(net.Listener) context.Context { return context.Background() },
-				ErrorLog:          errLog,
-				Protocols:         p,
+				Handler:     admin,
+				BaseContext: func(net.Listener) context.Context { return context.Background() },
+				ConnState:   trackConnState,
+				ErrorLog:    errLog,
+				Protocols:   p,
 			},
+			lim: connLimits{header: adminHeaderLimit, idle: adminIdleLimit},
 		}
 	}
 	n := len(s.data)
@@ -235,7 +250,13 @@ func (s *Server) Start() error {
 	}
 	s.mu.Lock()
 	for i, l := range all {
-		l.ln = lns[i]
+		l.ln = &limitListener{
+			Listener:  lns[i],
+			lim:       l.lim,
+			clk:       s.clk,
+			idleClk:   clock.Housekeeping(s.clk),
+			tlsConfig: l.srv.TLSConfig,
+		}
 	}
 	for _, l := range s.data {
 		s.addrs[l.name] = l.ln.Addr()
@@ -246,12 +267,7 @@ func (s *Server) Start() error {
 	s.mu.Unlock()
 	for _, l := range all {
 		go func(l *listener) {
-			var err error
-			if l.tls {
-				err = l.srv.ServeTLS(l.ln, "", "")
-			} else {
-				err = l.srv.Serve(l.ln)
-			}
+			err := l.srv.Serve(l.ln)
 			if err != nil && !errors.Is(err, http.ErrServerClosed) {
 				s.errc <- fmt.Errorf("listener %q: %w", l.name, err)
 			}

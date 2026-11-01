@@ -163,17 +163,23 @@ func TestListenerSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	hs := srv.data[0].srv
-	if hs.ReadHeaderTimeout != 3*time.Second {
-		t.Errorf("ReadHeaderTimeout = %v, want 3s", hs.ReadHeaderTimeout)
+	if hs.ReadHeaderTimeout != 0 {
+		t.Errorf("ReadHeaderTimeout = %v, want 0", hs.ReadHeaderTimeout)
 	}
-	if hs.ReadTimeout != 4*time.Second {
-		t.Errorf("ReadTimeout = %v, want 4s", hs.ReadTimeout)
+	if hs.ReadTimeout != 0 {
+		t.Errorf("ReadTimeout = %v, want 0", hs.ReadTimeout)
 	}
-	if hs.WriteTimeout != 5*time.Second {
-		t.Errorf("WriteTimeout = %v, want 5s", hs.WriteTimeout)
+	if hs.WriteTimeout != 0 {
+		t.Errorf("WriteTimeout = %v, want 0", hs.WriteTimeout)
 	}
-	if hs.IdleTimeout != 6*time.Second {
-		t.Errorf("IdleTimeout = %v, want 6s", hs.IdleTimeout)
+	if hs.IdleTimeout != 0 {
+		t.Errorf("IdleTimeout = %v, want 0", hs.IdleTimeout)
+	}
+	if hs.ConnState == nil {
+		t.Error("ConnState = nil, want the limit tracker")
+	}
+	if want := (connLimits{header: 3 * time.Second, read: 4 * time.Second, write: 5 * time.Second, idle: 6 * time.Second}); srv.data[0].lim != want {
+		t.Errorf("limits = %+v, want %+v", srv.data[0].lim, want)
 	}
 	if hs.MaxHeaderBytes != 4096 {
 		t.Errorf("MaxHeaderBytes = %d, want 4096", hs.MaxHeaderBytes)
