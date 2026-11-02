@@ -14,6 +14,7 @@ import (
 
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/h2server"
 )
 
 // ErrForcedClose reports that connections were closed because they were still open after the drain timeout.
@@ -30,6 +31,8 @@ type listener struct {
 	srv     *http.Server
 	lim     connLimits
 	ln      net.Listener
+	h2      *h2server.Server
+	h2opts  h2server.Options
 }
 
 type inflight struct {
@@ -190,6 +193,14 @@ func New(cfg *config.Config, h http.Handler, admin http.Handler, ready func(bool
 			ll.lim.h2c = l.H2C
 		}
 		srv.Protocols = p
+		if ll.lim.h2 || ll.lim.h2c {
+			// The http.Server below only describes the configured limits for OptionsFor; it is never served.
+			ll.h2opts = h2server.OptionsFor(&http.Server{MaxHeaderBytes: l.MaxHeaderBytes, ReadTimeout: ll.lim.read, WriteTimeout: ll.lim.write, IdleTimeout: ll.lim.idle, ConnState: trackConnState, ErrorLog: errLog})
+			ll.h2 = h2server.New(clk, ll.h2opts)
+			if err := ll.h2.Attach(srv); err != nil {
+				return nil, fmt.Errorf("listener %q: %w", l.Name, err)
+			}
+		}
 		s.data = append(s.data, ll)
 	}
 	if admin != nil && (cfg.Admin.Enabled == nil || *cfg.Admin.Enabled) {

@@ -70,7 +70,9 @@ func (l *limitListener) Accept() (net.Conn, error) {
 	if l.tlsConfig == nil {
 		return c, nil
 	}
-	return &tlsLimitConn{Conn: tls.Server(c, l.tlsConfig), lc: c}, nil
+	tc := tls.Server(c, l.tlsConfig)
+	c.tc, c.hsDone = tc, make(chan struct{})
+	return tc, nil
 }
 
 type phase uint8
@@ -114,6 +116,8 @@ type limitConn struct {
 	rd, wr   limitTimer
 	preface  [len(h2Preface)]byte
 	npre     int
+	tc       *tls.Conn
+	hsDone   chan struct{}
 }
 
 func stopLocked(s *limitTimer) {
@@ -182,7 +186,26 @@ func (c *limitConn) fire(s *limitTimer, which dir, g uint64) {
 	c.expireLocked(s, which)
 }
 
+// awaitHandshake waits until the handshake goroutine has recorded the end of the TLS handshake. Events after
+// StateNew depend on that record, and crypto/tls never sets deadlines on this conn during a handshake.
+func (c *limitConn) awaitHandshake() {
+	if c.hsDone != nil {
+		<-c.hsDone
+	}
+}
+
+// handshake runs the server side of the TLS handshake and records its end. net/http's own HandshakeContext call
+// waits on crypto/tls's handshake lock and returns the same stored result.
+func (c *limitConn) handshake() {
+	err := c.tc.HandshakeContext(context.Background())
+	c.handshakeDone(err == nil, c.tc.ConnectionState().NegotiatedProtocol)
+	close(c.hsDone)
+}
+
 func (c *limitConn) state(st http.ConnState) {
+	if st != http.StateNew {
+		c.awaitHandshake()
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	lim := c.ln.lim
@@ -195,6 +218,9 @@ func (c *limitConn) state(st http.ConnState) {
 			c.phase = phaseHandshake
 			if d := lim.handshakeLimit(); d > 0 {
 				c.armLocked(&c.rd, c.ln.clk, d, dirBoth)
+			}
+			if c.tc != nil {
+				go c.handshake()
 			}
 		} else {
 			c.beginHeaderLocked()
@@ -238,6 +264,7 @@ func (c *limitConn) handshakeDone(ok bool, proto string) {
 }
 
 func (c *limitConn) SetDeadline(t time.Time) error {
+	c.awaitHandshake()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	err := c.Conn.SetDeadline(t)
@@ -250,6 +277,7 @@ func (c *limitConn) SetDeadline(t time.Time) error {
 }
 
 func (c *limitConn) SetReadDeadline(t time.Time) error {
+	c.awaitHandshake()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	err := c.Conn.SetReadDeadline(t)
@@ -285,6 +313,7 @@ func (c *limitConn) SetReadDeadline(t time.Time) error {
 }
 
 func (c *limitConn) SetWriteDeadline(t time.Time) error {
+	c.awaitHandshake()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	err := c.Conn.SetWriteDeadline(t)
@@ -328,23 +357,13 @@ func (c *limitConn) CloseWrite() error {
 	return nil
 }
 
-type tlsLimitConn struct {
-	*tls.Conn
-	lc *limitConn
-}
-
-func (c *tlsLimitConn) HandshakeContext(ctx context.Context) error {
-	err := c.Conn.HandshakeContext(ctx)
-	c.lc.handshakeDone(err == nil, c.Conn.ConnectionState().NegotiatedProtocol)
-	return err
-}
-
 func limitConnOf(c net.Conn) *limitConn {
 	switch c := c.(type) {
 	case *limitConn:
 		return c
-	case *tlsLimitConn:
-		return c.lc
+	case *tls.Conn:
+		lc, _ := c.NetConn().(*limitConn)
+		return lc
 	}
 	return nil
 }
