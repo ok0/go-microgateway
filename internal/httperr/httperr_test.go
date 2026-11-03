@@ -119,6 +119,7 @@ func TestMessages(t *testing.T) {
 		CodeNotFound,
 		CodeMethodNotAllowed,
 		CodeUnavailable,
+		CodeNotCached,
 	}
 	for _, code := range codes {
 		if msg := Message(code); msg == "" || msg == "error" {
