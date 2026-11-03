@@ -25,6 +25,8 @@ type loggedConn struct {
 	net.Conn
 	wrote  atomic.Int64
 	closed atomic.Bool
+	done   chan struct{}
+	once   sync.Once
 }
 
 func (c *loggedConn) Write(b []byte) (int, error) {
@@ -35,6 +37,7 @@ func (c *loggedConn) Write(b []byte) (int, error) {
 
 func (c *loggedConn) Close() error {
 	c.closed.Store(true)
+	c.once.Do(func() { close(c.done) })
 	return c.Conn.Close()
 }
 
@@ -48,7 +51,7 @@ func (l *connLog) dial(ctx context.Context, network, addr string) (net.Conn, err
 	if err != nil {
 		return nil, err
 	}
-	c := &loggedConn{Conn: raw}
+	c := &loggedConn{Conn: raw, done: make(chan struct{})}
 	l.mu.Lock()
 	l.conns = append(l.conns, c)
 	l.mu.Unlock()
@@ -468,9 +471,7 @@ func TestCloseStopsIdleTimers(t *testing.T) {
 	if got := readClose(t, ry.resp); got != "ok" {
 		t.Fatalf("body y = %q, want ok", got)
 	}
-	if !d.at(1).closed.Load() {
-		t.Fatal("connection open after its request ended on a closed transport")
-	}
+	testwait.Done(t, "in-use connection closed after its request ended on a closed transport", d.at(1).done, nil)
 	checkTimers(t, fake, 0, 0)
 
 	srv.CloseClientConnections()
