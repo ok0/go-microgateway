@@ -470,7 +470,7 @@ func driveTail(r *h2run) (h2outcome, error) {
 }
 
 // driveBlocked holds stream 1 inside a 16 MiB DATA write with a 4 KiB receive buffer, lets stream 3 time out behind
-// it, then releases the peer and sends a PING. The attempt settles when RST_STREAM on stream 3 precedes the PING ACK.
+// it, then releases the peer and sends a PING. The attempt settles when stream 1, whose write deadline the handler clears, ends without a reset and RST_STREAM on stream 3 precedes the PING ACK.
 func driveBlocked(r *h2run) (h2outcome, error) {
 	c, err := r.dial(4096)
 	if err != nil {
@@ -531,6 +531,11 @@ func driveBlocked(r *h2run) (h2outcome, error) {
 	}
 	if !(rst >= 0 && ack >= 0 && rst < ack) {
 		return h2outcome{}, unsettled("RST_STREAM on stream 3 did not precede the PING ACK")
+	}
+	// Stream 1 clears its write deadline through the serve loop. When the limit expired first, the stream was reset
+	// behind the blocked write, which says nothing about the sides' handling of a cleared deadline.
+	if i := slices.IndexFunc(fs, func(f h2frame) bool { return f.Stream == 1 && f.Type == h2server.FrameRSTStream }); i >= 0 {
+		return h2outcome{}, unsettled("stream 1 was reset before its write deadline was cleared")
 	}
 	if err := r.awaitHandler(c, "/a"); err != nil {
 		return h2outcome{}, err
