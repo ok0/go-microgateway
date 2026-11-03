@@ -25,6 +25,13 @@ func TestPublicStoreTypesHoldNoSecrets(t *testing.T) {
 			"Limit":        reflect.TypeFor[store.Limit](),
 			"Decision":     reflect.TypeFor[store.Decision](),
 			"RateLimiter":  reflect.TypeFor[store.RateLimiter](),
+			"Cache":        reflect.TypeFor[store.Cache](),
+			"Entry":        reflect.TypeFor[store.Entry](),
+			"FillToken":    reflect.TypeFor[store.FillToken](),
+			"Lookup":       reflect.TypeFor[store.Lookup](),
+			"PurgeKind":    reflect.TypeFor[store.PurgeKind](),
+			"Purge":        reflect.TypeFor[store.Purge](),
+			"PurgeResult":  reflect.TypeFor[store.PurgeResult](),
 		},
 		"storetest": {
 			"Harness": reflect.TypeFor[storetest.Harness[store.RateLimiter]](),

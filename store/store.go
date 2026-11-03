@@ -1,8 +1,9 @@
-// Package store defines the shared-state contract for rate limiting.
+// Package store defines the shared-state contracts for rate limiting and response caching.
 //
-// Every backend implements identical semantics. For the same sequence of Take
-// calls and the same backend clock readings, every backend must return the
-// same Decision, bit for bit, and must persist the same state. Backends that
+// Every backend implements identical semantics. For the same sequence of
+// rate-limit Take calls and the same backend clock readings, every backend
+// must return the same Decision, bit for bit, and must persist the same state.
+// Backends that
 // need to interoperate, or that are checked against each other, follow the
 // definitions in this package documentation exactly.
 //
@@ -108,6 +109,38 @@
 //
 // Backends that reproduce these definitions must follow the same floating-point
 // evaluation order, including the explicit float64 conversion of the product.
+//
+// # Response cache
+//
+// Cache stores HTTP responses. Every method runs in this order: a canceled
+// context is returned unwrapped with nothing changed; invalid arguments return
+// an error wrapping ErrInvalidEntry or ErrInvalidPurge; a closed handle returns
+// an error wrapping ErrUnavailable; then one atomic operation runs.
+//
+// The store clock is the only time source. Entry.StoredAt and Lookup.Now are
+// readings of that clock, and the caller computes age as InitialAge +
+// Now.Sub(StoredAt). An entry is present while now < StoredAt + ttl. A ttl of
+// zero or less stores nothing and reports stored=false without error. A ttl
+// greater than MaxTTL is an invalid entry. Reads and purges never extend a
+// deadline.
+//
+// Each primary key has one Vary record. A Put whose canonical Vary names differ
+// from the record discards the primary's variants. A primary holds at most
+// MaxVariants variants, and the variant with the oldest StoredAt is removed at
+// the cap.
+//
+// Hard purges make covered variants misses. Soft purges keep them readable with
+// Stale set. A later hard purge wins over a soft one. PurgeTags matches exact
+// tags per variant. Keys and tags purges report exact affected counts.
+//
+// A fill token is issued by Get. A Put is refused, with stored=false and no
+// error, when a covering purge began after its token was issued. A backend may
+// also refuse a fill whose token was issued within PurgeTolerance after a
+// covering purge. Each purge leaves a marker for its Retain, and callers pass
+// a Retain of at least their largest storage TTL.
+//
+// The memory backend is per instance: a purge reaches only the instance that
+// receives it. A shared backend gives one cluster-wide purge.
 package store
 
 import (
@@ -135,8 +168,12 @@ type Backend interface {
 // Capabilities is a bit set of optional features a backend provides.
 type Capabilities uint8
 
-// CapRateLimit indicates that a backend implements RateLimiter.
-const CapRateLimit Capabilities = 1 << iota
+const (
+	// CapRateLimit indicates that a backend implements RateLimiter.
+	CapRateLimit Capabilities = 1 << iota
+	// CapCache indicates that a backend implements Cache.
+	CapCache
+)
 
 // Algorithm selects the rate-limiting algorithm applied to a Limit.
 type Algorithm uint8
