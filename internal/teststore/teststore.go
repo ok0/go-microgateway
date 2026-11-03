@@ -1,4 +1,5 @@
-// Package teststore provides a shared in-memory store.RateLimiter for tests.
+// Package teststore provides shared in-memory stores for tests: a
+// store.RateLimiter and a store.Cache.
 //
 // A Shared value holds one rate-limit state and hands out distinct Handles
 // over it, so several handles observe the same decisions the way several
@@ -6,6 +7,11 @@
 // hang and panic injection, records its calls in the shared call log, and
 // counts how often it was closed. Time is read only from the injected clock,
 // so the store is hermetic.
+//
+// A SharedCache value does the same for a store.Cache: its handles share one
+// set of entries, purges and call log, and support the same injection. Its
+// entry deadlines are read from the clock given to NewSharedCache, which is
+// independent of any gateway clock.
 package teststore
 
 import (
