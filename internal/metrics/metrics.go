@@ -87,6 +87,14 @@ func (r *Registry) Counter(name, help string, labels ...string) (*CounterVec, er
 	return f.vec.(*CounterVec), nil
 }
 
+// Registered reports whether a family named name exists in the registry.
+func (r *Registry) Registered(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.fams[name]
+	return ok
+}
+
 // Gauge registers or retrieves a gauge family with the given label names.
 func (r *Registry) Gauge(name, help string, labels ...string) (*GaugeVec, error) {
 	f, err := r.register(kindGauge, name, help, labels, nil)

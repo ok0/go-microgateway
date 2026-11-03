@@ -619,3 +619,25 @@ func TestGaugeDeleteFuncConcurrent(t *testing.T) {
 		t.Fatalf("y series = %v, want 999", v)
 	}
 }
+
+func TestRegistered(t *testing.T) {
+	r := metrics.NewRegistry()
+	if r.Registered("rg_total") {
+		t.Fatal("Registered reports an absent family as present")
+	}
+	c, err := r.Counter("rg_total", "h")
+	must(t, err)
+	c.With().Inc()
+	if !r.Registered("rg_total") {
+		t.Fatal("Registered reports a registered family as absent")
+	}
+
+	var before, after bytes.Buffer
+	must(t, r.WriteText(&before))
+	_ = r.Registered("rg_total")
+	_ = r.Registered("rg_missing")
+	must(t, r.WriteText(&after))
+	if before.String() != after.String() {
+		t.Fatalf("WriteText changed after Registered\n--- before\n%s--- after\n%s", before.String(), after.String())
+	}
+}
