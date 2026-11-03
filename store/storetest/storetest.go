@@ -1,5 +1,6 @@
 // Package storetest provides an acceptance suite that every store backend must
-// pass unchanged.
+// pass unchanged. The suite covers rate limiting (RateLimiter) and response
+// caching (Cache).
 //
 // The suite models two gateway instances, a and b, that share one state. A
 // backend passes when both handles observe the same decisions, a denied
@@ -23,8 +24,18 @@ type Harness[S any] struct {
 	// New returns two handles, a and b, over one fresh shared state. The
 	// harness registers its own cleanup for the handles.
 	New func(t *testing.T) (a, b S)
-	// Advance moves the backend clock forward by exactly d.
+	// Advance moves the clock of the state most recently returned by New or
+	// NewAt forward by exactly d.
 	Advance func(t *testing.T, d time.Duration)
+	// NewAt returns two handles, a and b, over one fresh shared state whose
+	// clock reads start. Cache requires it.
+	NewAt func(t *testing.T, start time.Time) (a, b S)
+	// Resolution is the smallest clock step the backend distinguishes. Zero
+	// means one nanosecond.
+	Resolution time.Duration
+	// Horizon is the latest clock instant the backend supports. Cache requires
+	// it.
+	Horizon time.Time
 }
 
 // RateLimiter runs the conformance subtests against the backend described by h.
