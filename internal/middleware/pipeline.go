@@ -6,12 +6,13 @@ const (
 	StageTimeout        = "timeout"
 	StageAuth           = "auth"
 	StageRateLimit      = "rate_limit"
+	StageCache          = "cache"
 	StageCircuitBreaker = "circuit_breaker"
 	StageRetry          = "retry"
 )
 
 // DefaultStages is the built-in stage order used when a route sets no explicit pipeline.
-var DefaultStages = []string{StageTimeout, StageAuth, StageRateLimit, StageCircuitBreaker, StageRetry}
+var DefaultStages = []string{StageTimeout, StageAuth, StageRateLimit, StageCache, StageCircuitBreaker, StageRetry}
 
 // Order resolves the stage names of a route, outermost first. Without an explicit pipeline the route middlewares are followed by DefaultStages; with one, route middlewares not named in the pipeline precede it.
 func Order(routeMiddlewares, pipeline []string) []string {

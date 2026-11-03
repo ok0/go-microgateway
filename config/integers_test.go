@@ -55,7 +55,14 @@ func TestIntegerFieldsAudited(t *testing.T) {
 	slices.Sort(got)
 	want := []string{
 		"auth.jwt[].max_token_bytes",
+		"cache.coalescing.max_keys",
+		"cache.coalescing.max_waiters",
+		"cache.max_background",
+		"cache.max_body_bytes",
+		"cache.memory.max_bytes",
+		"cache.memory.shards",
 		"listeners[].max_header_bytes",
+		"routes[].cache.statuses[]",
 		"routes[].priority",
 		"routes[].rate_limit.burst",
 		"routes[].rate_limit.limit",
@@ -164,6 +171,13 @@ func TestIntegerFieldsRejectFloat(t *testing.T) {
 		{"routes[0].retry.attempts", "int"},
 		{"routes[0].retry.on_statuses[0]", "int"},
 		{"routes[0].retry.max_body_bytes", "int64"},
+		{"cache.memory.max_bytes", "int64"},
+		{"cache.memory.shards", "int"},
+		{"cache.max_body_bytes", "int64"},
+		{"cache.coalescing.max_keys", "int"},
+		{"cache.coalescing.max_waiters", "int"},
+		{"cache.max_background", "int"},
+		{"routes[0].cache.statuses[0]", "int"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.path, func(t *testing.T) {

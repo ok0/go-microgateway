@@ -63,6 +63,7 @@ func (c *Config) validate() []FieldError {
 	checkIdentityHeaders(ck, c)
 	checkMiddlewares(ck, c.Middlewares)
 	names := checkStores(ck, c.Stores)
+	checkCache(ck, &c.Cache, names)
 	checkRoutes(ck, c, kinds, names)
 	return ck.errs
 }
@@ -478,6 +479,9 @@ func checkRoutes(ck *checker, c *Config, kinds map[string]string, storeNames map
 			checkRateLimit(ck, p+".rate_limit", r)
 			checkRateLimitStore(ck, p+".rate_limit", r.RateLimit, storeNames)
 		}
+		if r.Cache != nil {
+			checkRouteCache(ck, p+".cache", r.Cache)
+		}
 		if r.Retry != nil {
 			checkRetry(ck, p+".retry", r.Retry)
 		}
@@ -704,6 +708,14 @@ func checkPipeline(ck *checker, p string, stages []string, mws map[string]bool) 
 		seen[s] = true
 		if s == "retry" && j != len(stages)-1 {
 			ck.add(sp, `"retry" must be the last stage`)
+		}
+	}
+	if ci := slices.Index(stages, "cache"); ci >= 0 {
+		for _, later := range []string{"circuit_breaker", "retry"} {
+			if i := slices.Index(stages, later); i >= 0 && i < ci {
+				ck.add(p, `"cache" must come before "circuit_breaker" and "retry"`)
+				break
+			}
 		}
 	}
 }

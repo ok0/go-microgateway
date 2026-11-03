@@ -125,6 +125,24 @@ stores:
         token: example-token
         tiers:
           - gold
+cache:
+  name: edge-cache
+  store: ""
+  memory:
+    max_bytes: 67108864
+    shards: 16
+  max_body_bytes: 1048576
+  store_timeout: 100ms
+  tag_header: Surrogate-Key
+  tag_delimiter: space
+  strip_tag_header: true
+  status_key: false
+  coalescing:
+    enabled: true
+    timeout: 5s
+    max_keys: 10000
+    max_waiters: 1024
+  max_background: 64
 auth:
   jwt:
     - name: jwt-hs
@@ -269,6 +287,16 @@ routes:
         source: header
         name: X-Tenant
       max_keys: 50000
+    cache:
+      enabled: true
+      default_ttl: 30s
+      max_ttl: 1h
+      keep: 10m
+      stale_while_revalidate: 30s
+      stale_if_error: 5m
+      statuses:
+        - 200
+        - 404
     circuit_breaker:
       enabled: true
     retry:
@@ -295,6 +323,7 @@ routes:
       - timeout
       - auth
       - rate_limit
+      - cache
       - circuit_breaker
       - cors
       - retry

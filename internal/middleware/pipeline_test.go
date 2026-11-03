@@ -41,7 +41,7 @@ func TestDefaultStagesMatchConfig(t *testing.T) {
 
 func TestOrderDefault(t *testing.T) {
 	order := Order([]string{"a", "b"}, nil)
-	want := []string{"a", "b", StageTimeout, StageAuth, StageRateLimit, StageCircuitBreaker, StageRetry}
+	want := []string{"a", "b", StageTimeout, StageAuth, StageRateLimit, StageCache, StageCircuitBreaker, StageRetry}
 	if !slices.Equal(order, want) {
 		t.Fatalf("order = %v, want %v", order, want)
 	}

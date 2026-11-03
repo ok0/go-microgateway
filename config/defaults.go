@@ -88,6 +88,7 @@ func (c *Config) applyDefaults() {
 	for i := range c.Stores {
 		c.Stores[i].applyDefaults()
 	}
+	c.Cache.applyDefaults()
 
 	for i := range c.Listeners {
 		l := &c.Listeners[i]
@@ -212,6 +213,9 @@ func (c *Config) applyDefaults() {
 				defStr(&rl.OnStoreError, "local")
 				defDurPtr(&rl.StoreTimeout, 50*time.Millisecond)
 			}
+		}
+		if rc := r.Cache; rc != nil {
+			rc.applyDefaults()
 		}
 		if rb := r.CircuitBreaker; rb != nil {
 			defBool(&rb.Enabled, true)

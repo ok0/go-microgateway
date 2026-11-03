@@ -13,8 +13,10 @@ type Config struct {
 	Admin Admin `yaml:"admin" json:"admin"`
 	// Upstreams are the backend pools that routes forward to.
 	Upstreams []Upstream `yaml:"upstreams" json:"upstreams"`
-	// Stores are the named backing stores that rate limits reference by name.
+	// Stores are the named backing stores that rate limits and the response cache reference by name.
 	Stores []Store `yaml:"stores" json:"stores"`
+	// Cache holds the response cache settings shared by every route that enables caching; defaults apply when the block is omitted.
+	Cache Cache `yaml:"cache" json:"cache"`
 	// Auth declares the authentication providers.
 	Auth Auth `yaml:"auth" json:"auth"`
 	// Middlewares are named middleware instances referenced by routes.
@@ -380,13 +382,15 @@ type Route struct {
 	Auth *RouteAuth `yaml:"auth" json:"auth"`
 	// RateLimit configures request rate limiting when set.
 	RateLimit *RateLimit `yaml:"rate_limit" json:"rate_limit"`
+	// Cache configures response caching for the route when set.
+	Cache *RouteCache `yaml:"cache" json:"cache"`
 	// CircuitBreaker enables the upstream circuit breaker for this route when set.
 	CircuitBreaker *RouteBreaker `yaml:"circuit_breaker" json:"circuit_breaker"`
 	// Retry configures retries of failed upstream exchanges when set.
 	Retry *Retry `yaml:"retry" json:"retry"`
 	// Middlewares lists top-level middleware names applied to the route.
 	Middlewares []string `yaml:"middlewares" json:"middlewares"`
-	// Pipeline orders the built-in stages and middlewares for the route; retry must be last when present.
+	// Pipeline orders the built-in stages and middlewares for the route; cache must come before circuit_breaker and retry; retry must be last when present.
 	Pipeline []string `yaml:"pipeline" json:"pipeline"`
 }
 
@@ -564,5 +568,45 @@ type RetryBudget struct {
 	Window Duration `yaml:"window" json:"window"`
 }
 
+// Cache configures the response cache. Pointer fields distinguish absent from explicit zero: an absent field takes its default, while an explicit zero or empty value is a validation error and is never replaced by a default.
+type Cache struct {
+	Name           *string         `yaml:"name" json:"name"`                         // Cache-Status identifier. Default "microgateway"; 1-128 printable ASCII.
+	Store          string          `yaml:"store" json:"store"`                       // stores[].name; empty = built-in memory per instance.
+	Memory         CacheMemory     `yaml:"memory" json:"memory"`                     // Built-in memory store settings; used when store is empty.
+	MaxBodyBytes   *int64          `yaml:"max_body_bytes" json:"max_body_bytes"`     // Default 1048576; 1..67108864.
+	StoreTimeout   *Duration       `yaml:"store_timeout" json:"store_timeout"`       // Default 100ms; > 0.
+	TagHeader      *string         `yaml:"tag_header" json:"tag_header"`             // Default "Surrogate-Key"; valid header name.
+	TagDelimiter   string          `yaml:"tag_delimiter" json:"tag_delimiter"`       // space | comma. Default space.
+	StripTagHeader *bool           `yaml:"strip_tag_header" json:"strip_tag_header"` // Default true.
+	StatusKey      bool            `yaml:"status_key" json:"status_key"`             // Default false.
+	Coalescing     CacheCoalescing `yaml:"coalescing" json:"coalescing"`             // Request coalescing settings for concurrent misses.
+	MaxBackground  *int            `yaml:"max_background" json:"max_background"`     // Default 64; >= 1.
+}
+
+// CacheMemory configures the built-in in-memory cache store. Pointer fields distinguish absent from explicit zero.
+type CacheMemory struct {
+	MaxBytes *int64 `yaml:"max_bytes" json:"max_bytes"` // Default 67108864; >= 1.
+	Shards   *int   `yaml:"shards" json:"shards"`       // Default 16; 1..1024.
+}
+
+// CacheCoalescing configures request coalescing for the response cache. Pointer fields distinguish absent from explicit zero.
+type CacheCoalescing struct {
+	Enabled    *bool     `yaml:"enabled" json:"enabled"`         // Default true.
+	Timeout    *Duration `yaml:"timeout" json:"timeout"`         // Default 5s; > 0.
+	MaxKeys    *int      `yaml:"max_keys" json:"max_keys"`       // Default 10000; >= 1.
+	MaxWaiters *int      `yaml:"max_waiters" json:"max_waiters"` // Default 1024; >= 1.
+}
+
+// RouteCache enables response caching for a route. Pointer fields distinguish absent from explicit zero. Every duration is at most 365 days.
+type RouteCache struct {
+	Enabled              bool      `yaml:"enabled" json:"enabled"`                               // Default false.
+	DefaultTTL           Duration  `yaml:"default_ttl" json:"default_ttl"`                       // Default 0; 0..max_ttl.
+	MaxTTL               *Duration `yaml:"max_ttl" json:"max_ttl"`                               // Default 24h; > 0.
+	Keep                 Duration  `yaml:"keep" json:"keep"`                                     // Default 0; >= 0.
+	StaleWhileRevalidate Duration  `yaml:"stale_while_revalidate" json:"stale_while_revalidate"` // Default 0; >= 0.
+	StaleIfError         Duration  `yaml:"stale_if_error" json:"stale_if_error"`                 // Default 0; >= 0.
+	Statuses             []int     `yaml:"statuses" json:"statuses"`                             // Default [200 203 204 300 301 308 404 405 410 414 501]; non-empty when set.
+}
+
 // BuiltinStages lists the stage names a route pipeline may use without a middleware definition.
-var BuiltinStages = []string{"timeout", "auth", "rate_limit", "circuit_breaker", "retry"}
+var BuiltinStages = []string{"timeout", "auth", "rate_limit", "cache", "circuit_breaker", "retry"}
