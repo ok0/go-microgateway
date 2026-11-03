@@ -105,3 +105,49 @@ func RegisterSeries(r *metrics.Registry) (*Series, error) {
 	}
 	return &Series{Requests: requests, Duration: duration, Attempts: attempts, Upstream: um, Retries: retries, RetryBudgetExhausted: exhausted, AuthFailures: authFailures, JWKSRefreshes: jwksRefreshes, RateLimited: rateLimited, RateLimitKeys: rateLimitKeys, StoreAvailable: storeAvailable, StoreErrors: storeErrors, StoreFallback: storeFallback}, nil
 }
+
+// CacheSeries are the response cache metric families. They are registered only for gateways that cache, or when
+// the registry already holds them.
+type CacheSeries struct {
+	// Requests counts cache-stage requests by route and result.
+	Requests *metrics.CounterVec
+	// Stores counts storage outcomes by route and result.
+	Stores *metrics.CounterVec
+	// StoreErrors counts failed cache store calls by operation.
+	StoreErrors *metrics.CounterVec
+	// Evictions counts entries evicted from the built-in memory cache to make room.
+	Evictions *metrics.CounterVec
+	// Bytes is the size of the built-in memory cache in bytes.
+	Bytes *metrics.GaugeVec
+	// Entries is the number of entries in the built-in memory cache.
+	Entries *metrics.GaugeVec
+}
+
+// RegisterCacheSeries registers (or, for an identical earlier registration, reuses) the cache series in r.
+func RegisterCacheSeries(r *metrics.Registry) (*CacheSeries, error) {
+	requests, err := r.Counter("microgateway_cache_requests_total", "Requests seen by the response cache stage, by route and result.", "route", "result")
+	if err != nil {
+		return nil, err
+	}
+	stores, err := r.Counter("microgateway_cache_stores_total", "Response storage outcomes of the response cache stage, by route and result.", "route", "result")
+	if err != nil {
+		return nil, err
+	}
+	storeErrors, err := r.Counter("microgateway_cache_store_errors_total", "Cache store calls that failed or timed out, by operation.", "op")
+	if err != nil {
+		return nil, err
+	}
+	evictions, err := r.Counter("microgateway_cache_evictions_total", "Entries evicted from the built-in memory cache to make room.")
+	if err != nil {
+		return nil, err
+	}
+	bytes, err := r.Gauge("microgateway_cache_bytes", "Bytes held by the built-in memory cache.")
+	if err != nil {
+		return nil, err
+	}
+	entries, err := r.Gauge("microgateway_cache_entries", "Entries held by the built-in memory cache.")
+	if err != nil {
+		return nil, err
+	}
+	return &CacheSeries{Requests: requests, Stores: stores, StoreErrors: storeErrors, Evictions: evictions, Bytes: bytes, Entries: entries}, nil
+}
