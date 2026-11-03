@@ -65,6 +65,7 @@ func (c *Config) validate() []FieldError {
 	names := checkStores(ck, c.Stores)
 	checkCache(ck, &c.Cache, names)
 	checkRoutes(ck, c, kinds, names)
+	checkCacheCollisions(ck, c)
 	return ck.errs
 }
 
