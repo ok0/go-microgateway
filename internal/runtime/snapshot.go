@@ -13,6 +13,7 @@ import (
 	"github.com/ok0/go-microgateway/internal/auth"
 	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/httperr"
+	"github.com/ok0/go-microgateway/internal/memstore"
 	"github.com/ok0/go-microgateway/internal/metrics"
 	"github.com/ok0/go-microgateway/internal/middleware"
 	"github.com/ok0/go-microgateway/internal/proxy"
@@ -48,6 +49,9 @@ type Snapshot struct {
 	rateLimits  []rateLimitRoute
 	stores      *StoreSet
 	built       []*builtStore
+	cacheSeries *CacheSeries
+	cacheRoutes []string
+	memCache    *memstore.Cache
 }
 
 type routeEntry struct {
@@ -88,6 +92,13 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	var cs *CacheSeries
+	if cacheEnabled(cfg) || mreg.Registered("microgateway_cache_requests_total") {
+		cs, err = RegisterCacheSeries(mreg)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	stores := d.Stores
 	if stores == nil {
@@ -124,6 +135,14 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 		return nil, err
 	}
 
+	var cw *cacheWiring
+	if cacheEnabled(cfg) {
+		cw, err = buildCacheWiring(cfg, tx, clk, logger, cs, series, built)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	ups := make(map[string]*upstream.Upstream, len(cfg.Upstreams))
 	for i := range cfg.Upstreams {
 		u, err := upstream.Build(cfg.Upstreams[i], upstream.Deps{
@@ -146,6 +165,7 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 	entries := make([]router.Entry, 0, len(cfg.Routes))
 	var retryRoutes []string
 	var rateLimits []rateLimitRoute
+	var cacheRoutes []string
 	storePolicies := make(map[string][]string)
 	for i := range cfg.Routes {
 		r := &cfg.Routes[i]
@@ -203,6 +223,14 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 				storePolicies[rl.storeName] = append(storePolicies[rl.storeName], rl.name+"="+rl.policy)
 			}
 		}
+		if r.Cache != nil && r.Cache.Enabled {
+			mw, err := buildCacheStage(r, cfg, cw, providers, clk, logger)
+			if err != nil {
+				return nil, err
+			}
+			stages[middleware.StageCache] = mw
+			cacheRoutes = append(cacheRoutes, r.Name)
+		}
 		if r.Retry != nil && slices.Contains(order, middleware.StageRetry) {
 			b, err := retryBudget(tx, r.Name, *r.Retry, clk)
 			if err != nil {
@@ -258,6 +286,10 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 		builtList = append(builtList, b)
 	}
 
+	var memCache *memstore.Cache
+	if cw != nil {
+		memCache = cw.mem
+	}
 	s := &Snapshot{
 		Config:      cfg,
 		Fingerprint: cfg.Fingerprint(),
@@ -269,6 +301,9 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 		rateLimits:  rateLimits,
 		stores:      stores,
 		built:       builtList,
+		cacheSeries: cs,
+		cacheRoutes: cacheRoutes,
+		memCache:    memCache,
 	}
 	root := []middleware.Middleware{
 		middleware.RequestID(cfg.Global.RequestIDHeader),
@@ -334,8 +369,15 @@ func (s *Snapshot) Activate() {
 		s.series.RetryBudgetExhausted.With(n)
 	}
 	for _, b := range s.built {
-		s.stores.own(b.guard, b.policies)
-		s.series.StoreErrors.With(b.name, "take")
+		s.stores.own(b.guard, b.policies, b.uses())
+		if b.rateLimit {
+			s.series.StoreErrors.With(b.name, "take")
+		}
+		if b.cache {
+			for _, op := range []string{"get", "put", "purge"} {
+				s.series.StoreErrors.With(b.name, op)
+			}
+		}
 	}
 	for _, rl := range s.rateLimits {
 		s.series.RateLimited.With(rl.name)
@@ -346,6 +388,32 @@ func (s *Snapshot) Activate() {
 			s.series.StoreFallback.With(rl.name, rl.policy)
 		}
 	}
+	if s.cacheSeries != nil {
+		for _, n := range s.cacheRoutes {
+			for _, res := range []string{"hit", "stale", "revalidated", "miss", "bypass"} {
+				s.cacheSeries.Requests.With(n, res)
+			}
+			for _, res := range []string{"stored", "not_storable", "too_large", "aborted", "refused", "error"} {
+				s.cacheSeries.Stores.With(n, res)
+			}
+		}
+		if len(s.cacheRoutes) > 0 {
+			for _, op := range []string{"get", "put", "purge"} {
+				s.cacheSeries.StoreErrors.With(op)
+			}
+		}
+	}
+	s.RefreshCacheGauges()
+}
+
+// RefreshCacheGauges sets the size gauges of the built-in memory cache. It does nothing when the snapshot has none.
+func (s *Snapshot) RefreshCacheGauges() {
+	if s.memCache == nil {
+		return
+	}
+	st := s.memCache.Stats()
+	s.cacheSeries.Bytes.With().Set(float64(st.Bytes))
+	s.cacheSeries.Entries.With().Set(float64(st.Entries))
 }
 
 // RefreshRateLimitKeys sets the key-count gauge of every rate-limited route that has an in-memory store.
@@ -368,6 +436,8 @@ func PruneGauges(live []*Snapshot) {
 	routes := make(map[string]bool)
 	upstreams := make(map[string]bool)
 	stores := make(map[string]bool)
+	var cs *CacheSeries
+	memLive := false
 	for _, s := range live {
 		for _, rl := range s.rateLimits {
 			if rl.store != nil {
@@ -380,6 +450,12 @@ func PruneGauges(live []*Snapshot) {
 		for _, b := range s.built {
 			stores[b.name] = true
 		}
+		if s.cacheSeries != nil && cs == nil {
+			cs = s.cacheSeries
+		}
+		if s.memCache != nil {
+			memLive = true
+		}
 	}
 	head := live[0]
 	sr := head.series
@@ -388,6 +464,10 @@ func PruneGauges(live []*Snapshot) {
 	sr.Upstream.PanicMode.DeleteFunc(func(v []string) bool { return !upstreams[v[0]] })
 	sr.Upstream.BreakerState.DeleteFunc(func(v []string) bool { return !upstreams[v[0]] })
 	head.stores.prune(stores, sr.StoreAvailable)
+	if cs != nil && !memLive {
+		cs.Bytes.DeleteFunc(func([]string) bool { return true })
+		cs.Entries.DeleteFunc(func([]string) bool { return true })
+	}
 }
 
 func (s *Snapshot) ServeHTTP(w http.ResponseWriter, r *http.Request) {

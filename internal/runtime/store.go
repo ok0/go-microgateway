@@ -87,6 +87,14 @@ func (s *StoreSet) Resolve(cfg *config.Config) []config.FieldError {
 		path := fmt.Sprintf("routes[%d].rate_limit.store", j)
 		errs = append(errs, config.FieldError{Path: path, Line: cfg.Line(path), Msg: fmt.Sprintf("store %q (type %q) does not support rate limiting", rl.Store, e.Type)})
 	}
+	if cfg.Cache.Store != "" {
+		if e, ok := first[cfg.Cache.Store]; ok {
+			if t, ok := s.lookup(e.Type); ok && t.Caps&store.CapCache == 0 {
+				path := "cache.store"
+				errs = append(errs, config.FieldError{Path: path, Line: cfg.Line(path), Msg: fmt.Sprintf("store %q (type %q) does not support caching", cfg.Cache.Store, e.Type)})
+			}
+		}
+	}
 	return errs
 }
 
@@ -100,7 +108,7 @@ func (e *storeError) Error() string { return e.msg }
 
 func (e *storeError) Unwrap() error { return e.kind }
 
-var storeErrorKinds = []error{store.ErrInvalidLimit, store.ErrUnavailable, context.Canceled, context.DeadlineExceeded}
+var storeErrorKinds = []error{store.ErrInvalidLimit, store.ErrInvalidEntry, store.ErrInvalidPurge, store.ErrUnavailable, context.Canceled, context.DeadlineExceeded}
 
 func classify(err error) error {
 	for _, k := range storeErrorKinds {
@@ -116,6 +124,7 @@ type storeBackend struct {
 	name string
 	b    store.Backend
 	rl   store.RateLimiter
+	c    store.Cache
 	sc   *scrubber
 }
 
@@ -131,6 +140,52 @@ func (s *storeBackend) Take(ctx context.Context, key string, l store.Limit) (d s
 		return store.Decision{}, s.wrap("take", err)
 	}
 	return d, nil
+}
+
+func (s *storeBackend) Get(ctx context.Context, primary string, sel func(varyNames []string) (string, bool)) (lk store.Lookup, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			lk = store.Lookup{}
+			err = s.panicError("get", p)
+		}
+	}()
+	lk, err = s.c.Get(ctx, primary, sel)
+	if err != nil {
+		return store.Lookup{}, s.wrap("get", err)
+	}
+	return lk, nil
+}
+
+func (s *storeBackend) Put(ctx context.Context, tok store.FillToken, primary, secondary string, varyNames []string, e *store.Entry, ttl time.Duration) (stored bool, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			stored = false
+			err = s.panicError("put", p)
+		}
+	}()
+	stored, err = s.c.Put(ctx, tok, primary, secondary, varyNames, e, ttl)
+	if err != nil {
+		return false, s.wrap("put", err)
+	}
+	return stored, nil
+}
+
+func (s *storeBackend) Purge(ctx context.Context, p store.Purge) (res store.PurgeResult, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = store.PurgeResult{}
+			err = s.panicError("purge", r)
+		}
+	}()
+	res, err = s.c.Purge(ctx, p)
+	if err != nil {
+		return store.PurgeResult{}, s.wrap("purge", err)
+	}
+	return res, nil
+}
+
+func (s *storeBackend) panicError(op string, p any) error {
+	return &storeError{msg: fmt.Sprintf("store %q: %s panicked: %s", s.name, op, s.sc.text(fmt.Sprint(p))), kind: store.ErrUnavailable}
 }
 
 func (s *storeBackend) Close() error {
@@ -167,6 +222,14 @@ func newStoreBackend(e *config.Store, t StoreType, logger *slog.Logger) (*storeB
 		}
 		sb.rl = rl
 	}
+	if t.Caps&store.CapCache != 0 {
+		c, ok := b.(store.Cache)
+		if !ok {
+			_ = b.Close()
+			return nil, &storeError{msg: fmt.Sprintf("store type %q declares caching but the backend (%T) does not implement store.Cache", e.Type, b)}
+		}
+		sb.c = c
+	}
 	return sb, nil
 }
 
@@ -192,6 +255,12 @@ func isNilBackend(b store.Backend) bool {
 	return v.Kind() == reflect.Pointer && v.IsNil()
 }
 
+// Store uses recorded on a guard entry: useRateLimit for rate-limit routes and useCache for the response cache.
+const (
+	useRateLimit uint32 = 1 << iota
+	useCache
+)
+
 // guardEntry is the guard of one store name together with the state it reports to.
 type guardEntry struct {
 	name     string
@@ -200,6 +269,7 @@ type guardEntry struct {
 	avail    *metrics.GaugeVec
 	logger   *slog.Logger
 	policies atomic.Pointer[string]
+	uses     atomic.Uint32
 }
 
 func newGuardEntry(e *config.Store, set *StoreSet, clk clock.Clock, logger *slog.Logger, avail *metrics.GaugeVec) (*guardEntry, error) {
@@ -227,11 +297,22 @@ func (ge *guardEntry) changed(avail bool) {
 		v = 1
 	}
 	ge.avail.With(ge.name).Set(v)
+	uses := ge.uses.Load()
 	if avail {
-		ge.logger.Info("rate limit store recovered; shared limits resumed", "store", ge.name, "policies", ge.policyList())
+		if uses&useRateLimit != 0 {
+			ge.logger.Info("rate limit store recovered; shared limits resumed", "store", ge.name, "policies", ge.policyList())
+		}
+		if uses&useCache != 0 {
+			ge.logger.Info("cache store recovered; cache resumed", "store", ge.name)
+		}
 		return
 	}
-	ge.logger.Warn("rate limit store unavailable; failure policies active", "store", ge.name, "policies", ge.policyList())
+	if uses&useRateLimit != 0 {
+		ge.logger.Warn("rate limit store unavailable; failure policies active", "store", ge.name, "policies", ge.policyList())
+	}
+	if uses&useCache != 0 {
+		ge.logger.Warn("cache store unavailable; requests bypass the cache", "store", ge.name)
+	}
 }
 
 func (ge *guardEntry) policyList() string {
@@ -241,12 +322,14 @@ func (ge *guardEntry) policyList() string {
 	return ""
 }
 
-// own makes ge the owner of its store name and sets the availability gauge from its current state.
-func (s *StoreSet) own(ge *guardEntry, policies string) {
+// own makes ge the owner of its store name and sets the availability gauge from its current state. uses is the
+// combination of useRateLimit and useCache for the features built on the store.
+func (s *StoreSet) own(ge *guardEntry, policies string, uses uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.owners[ge.name] = ge
 	ge.policies.Store(&policies)
+	ge.uses.Store(uses)
 	v := 0.0
 	if ge.g.Available() {
 		v = 1
@@ -273,10 +356,24 @@ type builtStore struct {
 	guard       *guardEntry
 	openTimeout time.Duration
 	policies    string
+	rateLimit   bool
+	cache       bool
+}
+
+func (b *builtStore) uses() uint32 {
+	var u uint32
+	if b.rateLimit {
+		u |= useRateLimit
+	}
+	if b.cache {
+		u |= useCache
+	}
+	return u
 }
 
 // buildStores builds the backend and guard of every store that a rate-limit route references and whose
-// type supports rate limiting. Each entry is built at most once and is reused by state when unchanged.
+// type supports rate limiting, and of the cache store when caching is enabled and its type supports caching.
+// Each entry is built at most once and is reused by state when unchanged.
 func buildStores(cfg *config.Config, set *StoreSet, tx *state.Tx, clk clock.Clock, logger *slog.Logger, series *Series) (map[string]*builtStore, []config.FieldError) {
 	referenced := make(map[string]bool)
 	for i := range cfg.Routes {
@@ -284,6 +381,7 @@ func buildStores(cfg *config.Config, set *StoreSet, tx *state.Tx, clk clock.Cloc
 			referenced[rl.Store] = true
 		}
 	}
+	cacheRef := cacheEnabled(cfg) && cfg.Cache.Store != ""
 	built := make(map[string]*builtStore)
 	seen := make(map[string]bool)
 	var errs []config.FieldError
@@ -293,11 +391,18 @@ func buildStores(cfg *config.Config, set *StoreSet, tx *state.Tx, clk clock.Cloc
 			continue
 		}
 		seen[e.Name] = true
-		if !referenced[e.Name] {
+		rateLimit := referenced[e.Name]
+		cache := cacheRef && e.Name == cfg.Cache.Store
+		if !rateLimit && !cache {
 			continue
 		}
 		t, ok := set.lookup(e.Type)
-		if !ok || t.Caps&store.CapRateLimit == 0 {
+		if !ok {
+			continue
+		}
+		rateLimit = rateLimit && t.Caps&store.CapRateLimit != 0
+		cache = cache && t.Caps&store.CapCache != 0
+		if !rateLimit && !cache {
 			continue
 		}
 		path := fmt.Sprintf("stores[%d]", i)
@@ -320,7 +425,7 @@ func buildStores(cfg *config.Config, set *StoreSet, tx *state.Tx, clk clock.Cloc
 			errs = append(errs, config.FieldError{Path: path, Line: cfg.Line(path), Msg: err.Error()})
 			continue
 		}
-		built[e.Name] = &builtStore{name: e.Name, backend: sb, guard: ge, openTimeout: e.Guard.OpenTimeout.Std()}
+		built[e.Name] = &builtStore{name: e.Name, backend: sb, guard: ge, openTimeout: e.Guard.OpenTimeout.Std(), rateLimit: rateLimit, cache: cache}
 	}
 	return built, errs
 }
