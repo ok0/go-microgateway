@@ -398,3 +398,57 @@ func TestForwardValue(t *testing.T) {
 		})
 	}
 }
+
+func TestPresented(t *testing.T) {
+	apiKey := &fakeAuth{name: "k", challenge: "ApiKey", header: "X-API-Key", query: "k"}
+	providers := []Authenticator{apiKey}
+	tests := []struct {
+		name string
+		req  func() *http.Request
+		want bool
+	}{
+		{"authorization header", func() *http.Request {
+			r := httptest.NewRequest(http.MethodGet, "/", nil)
+			r.Header.Set("Authorization", "Bearer x")
+			return r
+		}, true},
+		{"api key header", func() *http.Request {
+			r := httptest.NewRequest(http.MethodGet, "/", nil)
+			r.Header.Set("X-API-Key", "K")
+			return r
+		}, true},
+		{"api key query", func() *http.Request {
+			return httptest.NewRequest(http.MethodGet, "/?k=", nil)
+		}, true},
+		{"identity only", func() *http.Request {
+			r := httptest.NewRequest(http.MethodGet, "/", nil)
+			return r.WithContext(reqctx.WithIdentity(r.Context(), reqctx.Identity{Provider: "k"}))
+		}, true},
+		{"none", func() *http.Request {
+			return httptest.NewRequest(http.MethodGet, "/?other=1", nil)
+		}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Presented(tc.req(), providers); got != tc.want {
+				t.Errorf("Presented = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("stripped jwt after middleware", func(t *testing.T) {
+		jwt := &fakeAuth{name: "jwt", challenge: "Bearer", header: "Authorization", res: okResult("jwt")}
+		jwtProviders := []Authenticator{jwt}
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.Header.Set("Authorization", "Bearer x")
+		var presented bool
+		next := http.HandlerFunc(func(w http.ResponseWriter, rr *http.Request) {
+			presented = Presented(rr, jwtProviders)
+			w.WriteHeader(http.StatusOK)
+		})
+		Middleware(RouteConfig{Providers: jwtProviders})(next).ServeHTTP(httptest.NewRecorder(), r)
+		if !presented {
+			t.Error("Presented = false after the credential was stripped, want true")
+		}
+	})
+}

@@ -200,6 +200,34 @@ func withoutQueryParam(u *url.URL, name string) *url.URL {
 	return &c
 }
 
+// Presented reports whether r carries a credential that one of providers reads, or whether an outer
+// stage already authenticated it (the credential may have been removed since).
+func Presented(r *http.Request, providers []Authenticator) bool {
+	if len(r.Header.Values("Authorization")) > 0 {
+		return true
+	}
+	for _, p := range providers {
+		h, q := p.Credentials()
+		if h != "" && len(r.Header.Values(h)) > 0 {
+			return true
+		}
+		if q != "" && queryPresent(r.URL.RawQuery, q) {
+			return true
+		}
+	}
+	_, ok := reqctx.IdentityFrom(r.Context())
+	return ok
+}
+
+func queryPresent(raw, name string) bool {
+	for _, part := range strings.Split(raw, "&") {
+		if k, _ := queryPart(part); k == name {
+			return true
+		}
+	}
+	return false
+}
+
 func Strip(headers []string) func(http.Handler) http.Handler {
 	names := make([]string, 0, len(headers))
 	seen := make(map[string]bool, len(headers))
