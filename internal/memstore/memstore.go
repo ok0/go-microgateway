@@ -1,8 +1,12 @@
-// Package memstore implements an in-memory store.RateLimiter.
+// Package memstore implements the in-memory store.RateLimiter and store.Cache.
 //
 // Each RateLimiter is independent of every other one. Two instances share no
 // state, so N gateway instances that each hold a RateLimiter enforce N times
 // the configured limit. Time is read only from the injected clock.
+//
+// The response cache is byte-bounded and per instance. A purge reaches only
+// the cache that receives it, so cluster-wide purge needs a shared backend
+// such as the Redis store. Time comes only from the injected clock.
 //
 // The number of keys held by an instance is capped. Each shard keeps its keys
 // in least-recently-used order and evicts the least recently used key when it
