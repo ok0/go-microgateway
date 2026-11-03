@@ -37,7 +37,7 @@ type Options struct {
 	ReadTimeout           time.Duration // stream read limit
 	WriteTimeout          time.Duration // stream write limit
 	IdleTimeout           time.Duration // connection idle limit
-	SendPingTimeout       time.Duration // idle read interval before a PING
+	SendPingTimeout       time.Duration // what ServerConfig.SendPingTimeout reports (net/http: the read limit); the server never reads it
 	DisableClientPriority bool
 	HTTP2                 *http.HTTP2Config
 	ConnState             func(net.Conn, http.ConnState)

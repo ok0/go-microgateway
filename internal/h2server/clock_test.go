@@ -277,3 +277,120 @@ func TestServeStopsEveryTimer(t *testing.T) {
 		})
 	})
 }
+
+func TestPingAckTimerOnClock(t *testing.T) {
+	for _, name := range []string{"unacked", "acked"} {
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				fake := clock.NewFake(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+				st := newServerTester(t, func(w http.ResponseWriter, req *http.Request) {}, fake, func(h2 *http.HTTP2Config) {
+					h2.SendPingTimeout = 4 * time.Second
+				})
+				adv := func(d time.Duration) {
+					fake.Advance(d)
+					synctest.Wait()
+				}
+
+				st.greet()
+				synctest.Wait()
+				if n := fake.Waiters(); n != 1 {
+					t.Fatalf("armed timers = %d, want 1", n)
+				}
+				if n := fake.Due(4 * time.Second); n != 1 {
+					t.Fatalf("Due(4s) = %d, want 1", n)
+				}
+				time.Sleep(time.Hour)
+				synctest.Wait()
+				st.wantIdle()
+				adv(4*time.Second - time.Nanosecond)
+				st.wantIdle()
+				if n := fake.Due(time.Nanosecond); n != 1 {
+					t.Fatalf("Due(1ns) = %d, want 1", n)
+				}
+				adv(time.Nanosecond)
+				pf := readFrame[*PingFrame](t, st)
+				if pf.Flags.Has(FlagPingAck) {
+					t.Fatalf("got PING ACK, want a non-ACK PING")
+				}
+				if n := fake.Waiters(); n != 1 {
+					t.Fatalf("after PING: armed timers = %d, want 1 (ack timer)", n)
+				}
+				if n := fake.Due(15*time.Second - time.Nanosecond); n != 0 {
+					t.Fatalf("Due(15s-1ns) = %d, want 0", n)
+				}
+				if n := fake.Due(15 * time.Second); n != 1 {
+					t.Fatalf("after PING: Due(15s) = %d, want 1", n)
+				}
+
+				if name == "unacked" {
+					time.Sleep(time.Hour)
+					synctest.Wait()
+					st.wantIdle()
+					adv(15*time.Second - time.Nanosecond)
+					st.wantIdle()
+					if n := fake.Due(time.Nanosecond); n != 1 {
+						t.Fatalf("Due(1ns) = %d, want 1", n)
+					}
+					adv(time.Nanosecond)
+					st.wantClosed()
+					synctest.Wait()
+					if w, hw := fake.Waiters(), fake.HousekeepingWaiters(); w != 0 || hw != 0 {
+						t.Fatalf("after close: %d waiters and %d housekeeping waiters, want 0 and 0", w, hw)
+					}
+					return
+				}
+
+				adv(14 * time.Second)
+				st.wantIdle()
+				if n := fake.Due(time.Second); n != 1 {
+					t.Fatalf("Due(1s) = %d, want 1", n)
+				}
+				st.writePing(true, pf.Data)
+				synctest.Wait()
+				if n := fake.Due(time.Second); n != 0 {
+					t.Fatalf("after ACK: Due(1s) = %d, want 0", n)
+				}
+				if n := fake.Waiters(); n != 1 {
+					t.Fatalf("after ACK: armed timers = %d, want 1", n)
+				}
+				if n := fake.Due(4*time.Second - time.Nanosecond); n != 0 {
+					t.Fatalf("after ACK: Due(4s-1ns) = %d, want 0", n)
+				}
+				if n := fake.Due(4 * time.Second); n != 1 {
+					t.Fatalf("after ACK: Due(4s) = %d, want 1", n)
+				}
+				adv(time.Second)
+				st.wantIdle()
+				adv(3*time.Second - time.Nanosecond)
+				st.wantIdle()
+				adv(time.Nanosecond)
+				pf = readFrame[*PingFrame](t, st)
+				if pf.Flags.Has(FlagPingAck) {
+					t.Fatalf("got PING ACK after resume, want a non-ACK PING")
+				}
+			})
+		})
+	}
+}
+
+func TestReadTimeoutSendsNoPing(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fake := clock.NewFake(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+		st := newServerTester(t, func(w http.ResponseWriter, req *http.Request) {}, fake, func(s *http.Server) {
+			s.ReadTimeout = 4 * time.Second
+			s.IdleTimeout = time.Hour
+		})
+
+		st.greet()
+		synctest.Wait()
+		if n := fake.Waiters(); n != 0 {
+			t.Fatalf("armed timers = %d, want 0 (no send-ping timer)", n)
+		}
+		if n := fake.HousekeepingWaiters(); n != 1 {
+			t.Fatalf("housekeeping timers = %d, want 1 (idle)", n)
+		}
+		fake.Advance(30 * time.Minute)
+		synctest.Wait()
+		st.wantIdle()
+	})
+}
