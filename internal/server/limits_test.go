@@ -396,6 +396,13 @@ func TestHTTP1HeaderLimit(t *testing.T) {
 			srv := startServer(t, limitCfg(t, muts...), okHandler(), nil, nil, WithClock(fake))
 			conn := dialConn(t, srv.Addrs()["public"].String(), p)
 			c := capturing(conn)
+			if kind.tls {
+				// The handshake limit equals the header limit, so the pending handshake timer cannot be told
+				// from the header timer by its due time. Step the clock once so that it is due sooner than
+				// the header timer armed after it, then wait until it has been released.
+				fake.Advance(time.Nanosecond)
+				waitHandshakeReleased(t, fake, 3*time.Second-time.Nanosecond)
+			}
 			writeString(t, conn, "GET / HTTP/1.1\r\nHost: x\r\n")
 			awaitDue(t, fake, 1, 3*time.Second, "header limit timer")
 			advanceBelow(t, fake, 3*time.Second, c)
