@@ -20,7 +20,7 @@ type StoreFactory func(p StoreParams) (store.Backend, error)
 // StoreParams describes one configured store entry. Use Decode to read the entry's custom parameters. Its String,
 // Format, LogValue and JSON forms show only the name and type, so it is safe to log.
 type StoreParams struct {
-	// Name is the name of the store entry, as referenced by rate_limit.store.
+	// Name is the name of the store entry, as referenced by rate_limit.store or cache.store.
 	Name string
 	// Type is the store type, as registered with WithStoreType.
 	Type string
@@ -65,10 +65,11 @@ func (p StoreParams) MarshalJSON() ([]byte, error) {
 }
 
 // WithStoreType registers a store type that configuration can reference by stores[].type. caps lists the optional
-// features the backends of the type provide; CapRateLimit allows a rate-limit route to use the store.
+// features the backends of the type provide; CapRateLimit allows a rate-limit route to use the store, and CapCache
+// allows cache.store to use it.
 //
-// The factory runs only for store entries that a rate-limit route references, when the gateway is built, and again
-// only when the entry's type, redis block or params change. The gateway closes exactly the backend returned by the
+// The factory runs only for store entries that a rate-limit route or the response cache references, when the
+// gateway is built, and again only when the entry's type, redis block or params change. The gateway closes exactly the backend returned by the
 // factory, once, after requests that use it have drained. Embedders that share state between gateways return a
 // distinct handle from each call. StoreParams.Redis is a clone, and secret fields are config.Secret values.
 func WithStoreType(typeName string, caps store.Capabilities, f StoreFactory) Option {
@@ -96,7 +97,7 @@ func checkStoreRegistrations(regs []storeRegistration) error {
 		if r.caps == 0 {
 			errs = append(errs, fmt.Errorf("microgateway: WithStoreType(%q): capabilities must not be zero", r.typeName))
 		}
-		if unknown := r.caps &^ store.CapRateLimit; unknown != 0 {
+		if unknown := r.caps &^ (store.CapRateLimit | store.CapCache); unknown != 0 {
 			errs = append(errs, fmt.Errorf("microgateway: WithStoreType(%q): unknown capability bits %#x", r.typeName, unknown))
 		}
 		if seen[r.typeName] {

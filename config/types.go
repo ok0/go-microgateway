@@ -571,8 +571,8 @@ type RetryBudget struct {
 // Cache configures the response cache. Pointer fields distinguish absent from explicit zero: an absent field takes its default, while an explicit zero or empty value is a validation error and is never replaced by a default.
 type Cache struct {
 	Name           *string         `yaml:"name" json:"name"`                         // Cache-Status identifier. Default "microgateway"; 1-128 printable ASCII.
-	Store          string          `yaml:"store" json:"store"`                       // stores[].name; empty = built-in memory per instance.
-	Memory         CacheMemory     `yaml:"memory" json:"memory"`                     // Built-in memory store settings; used when store is empty.
+	Store          string          `yaml:"store" json:"store"`                       // stores[].name; empty = built-in memory per instance (not shared between instances); a named store must support caching.
+	Memory         CacheMemory     `yaml:"memory" json:"memory"`                     // Built-in memory store settings; used when store is empty, per instance.
 	MaxBodyBytes   *int64          `yaml:"max_body_bytes" json:"max_body_bytes"`     // Default 1048576; 1..67108864.
 	StoreTimeout   *Duration       `yaml:"store_timeout" json:"store_timeout"`       // Default 100ms; > 0.
 	TagHeader      *string         `yaml:"tag_header" json:"tag_header"`             // Default "Surrogate-Key"; valid header name.

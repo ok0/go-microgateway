@@ -35,5 +35,6 @@ func (s adminSource) Metrics() *metrics.Registry {
 		snap.Upstreams[u.Name].RefreshHealth()
 	}
 	snap.RefreshRateLimitKeys()
+	snap.RefreshCacheGauges()
 	return s.g.metrics
 }

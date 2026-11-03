@@ -10,7 +10,8 @@ import (
 
 // Validate reports whether cfg is a valid configuration for a gateway built with opts. Besides the schema rules of
 // the configuration, it reports store and middleware types that are not registered, rate-limit routes that reference
-// a store that is missing or whose type cannot rate limit, and any problem found in the registered store options.
+// a store that is missing or whose type cannot rate limit, cache.store entries whose type cannot cache, and any
+// problem found in the registered store options.
 // Validate never calls a store factory, opens a connection or mutates cfg. A nil cfg is an error.
 func Validate(cfg *config.Config, opts ...Option) error {
 	if cfg == nil {
