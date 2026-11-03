@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
+	"sync/atomic"
 )
 
 type ctxKey int
@@ -19,6 +20,7 @@ const (
 	keyClientIP
 	keyIdentity
 	keyInfo
+	keyExchange
 )
 
 // Param is a single named path parameter captured by a route pattern.
@@ -62,6 +64,37 @@ func WithInfo(ctx context.Context, in *Info) context.Context {
 func InfoFrom(ctx context.Context) *Info {
 	v, _ := ctx.Value(keyInfo).(*Info)
 	return v
+}
+
+// Exchange records whether the last upstream response body forwarded for the request was read to its end.
+type Exchange struct {
+	done atomic.Bool
+}
+
+// WithExchange returns a context carrying the upstream exchange record e.
+func WithExchange(ctx context.Context, e *Exchange) context.Context {
+	return context.WithValue(ctx, keyExchange, e)
+}
+
+// ExchangeFrom returns the upstream exchange record stored in ctx, or nil if absent.
+func ExchangeFrom(ctx context.Context) *Exchange {
+	v, _ := ctx.Value(keyExchange).(*Exchange)
+	return v
+}
+
+// Begin clears the completion flag before an upstream response body is forwarded.
+func (e *Exchange) Begin() {
+	e.done.Store(false)
+}
+
+// Finish marks the forwarded upstream response body as read to its end.
+func (e *Exchange) Finish() {
+	e.done.Store(true)
+}
+
+// Complete reports whether the last forwarded upstream response body was read to its end.
+func (e *Exchange) Complete() bool {
+	return e.done.Load()
 }
 
 // WithRequestID returns a context carrying the request ID id.

@@ -4,6 +4,7 @@ package proxy
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -162,8 +163,33 @@ func modifyResponse(spec RouteSpec) func(resp *http.Response) error {
 	return func(resp *http.Response) error {
 		resp.Header.Del(spec.RequestIDHeader)
 		applyHeaderOps(resp.Header, spec.ResponseHeaders)
+		if ex := reqctx.ExchangeFrom(resp.Request.Context()); ex != nil && resp.StatusCode != http.StatusSwitchingProtocols {
+			ex.Begin()
+			if resp.Body == nil || resp.Body == http.NoBody {
+				ex.Finish()
+			} else {
+				resp.Body = &watchedBody{rc: resp.Body, ex: ex}
+			}
+		}
 		return nil
 	}
+}
+
+type watchedBody struct {
+	rc io.ReadCloser
+	ex *reqctx.Exchange
+}
+
+func (b *watchedBody) Read(p []byte) (int, error) {
+	n, err := b.rc.Read(p)
+	if err == io.EOF {
+		b.ex.Finish()
+	}
+	return n, err
+}
+
+func (b *watchedBody) Close() error {
+	return b.rc.Close()
 }
 
 func errorHandler(logger *slog.Logger, upstreamName string) func(w http.ResponseWriter, r *http.Request, err error) {
