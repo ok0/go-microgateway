@@ -53,12 +53,17 @@ func (s *stage) put(ctx context.Context, tok store.FillToken, primary, secondary
 }
 
 func (s *stage) purge(ctx context.Context, p store.Purge) (store.PurgeResult, error) {
-	if s.guard == nil {
-		return s.store.Purge(ctx, p)
+	return callPurge(ctx, s.store, s.guard, s.timeout, p)
+}
+
+// callPurge runs one purge call on c, bounded by g when it is set.
+func callPurge(ctx context.Context, c store.Cache, g *storeguard.Guard, timeout time.Duration, p store.Purge) (store.PurgeResult, error) {
+	if g == nil {
+		return c.Purge(ctx, p)
 	}
 	var res store.PurgeResult
-	err := s.guard.Do(ctx, s.timeout, func(cctx context.Context) error {
-		r, err := s.store.Purge(cctx, p)
+	err := g.Do(ctx, timeout, func(cctx context.Context) error {
+		r, err := c.Purge(cctx, p)
 		if err != nil {
 			return err
 		}
