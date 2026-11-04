@@ -1,6 +1,9 @@
 package redis
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,14 +11,19 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	goredis "github.com/redis/go-redis/v9"
 
 	microgateway "github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/hooks"
+	"github.com/ok0/go-microgateway/internal/httpcache"
 	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
@@ -218,4 +226,270 @@ func checkExposition(t *testing.T, body string) {
 			t.Errorf("exposition value is not a float: %q", line)
 		}
 	}
+}
+
+const gcClientAddr = "192.0.2.30:4000"
+
+const gcToken = "gc-admin-7Hq2Lw"
+
+const gcLastModified = "Fri, 02 Jan 2026 03:04:05 GMT"
+
+type gcOrigin struct {
+	url     string
+	arrived chan struct{}
+
+	mu     sync.Mutex
+	status int
+	header http.Header
+	body   string
+	tags   map[string]string
+	calls  int
+	cond   int
+	last   http.Header
+	gate   chan struct{}
+}
+
+func newGCOrigin(t *testing.T) *gcOrigin {
+	t.Helper()
+	o := &gcOrigin{status: http.StatusOK, body: "v1", tags: make(map[string]string), arrived: make(chan struct{}, 256)}
+	srv := httptest.NewServer(o)
+	t.Cleanup(srv.Close)
+	o.url = srv.URL
+	return o
+}
+
+func (o *gcOrigin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	o.mu.Lock()
+	o.calls++
+	if r.Header.Get("If-None-Match") != "" || r.Header.Get("If-Modified-Since") != "" {
+		o.cond++
+	}
+	o.last = r.Header.Clone()
+	gate := o.gate
+	o.mu.Unlock()
+	if gate != nil {
+		select {
+		case o.arrived <- struct{}{}:
+		default:
+		}
+		<-gate
+	}
+	o.mu.Lock()
+	status, header, body, tags := o.status, o.header.Clone(), o.body, o.tags[r.URL.Path]
+	o.mu.Unlock()
+	for k, v := range header {
+		w.Header()[k] = v
+	}
+	if tags != "" {
+		w.Header().Set("Surrogate-Key", tags)
+	}
+	w.WriteHeader(status)
+	if status != http.StatusNotModified {
+		_, _ = io.WriteString(w, body+"|"+r.Header.Get("Accept-Language"))
+	}
+}
+
+func (o *gcOrigin) set(status int, header http.Header, body string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.status, o.header, o.body = status, header.Clone(), body
+}
+
+func (o *gcOrigin) tag(path, tags string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.tags[path] = tags
+}
+
+func (o *gcOrigin) hold() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.gate = make(chan struct{})
+}
+
+func (o *gcOrigin) release() {
+	o.mu.Lock()
+	gate := o.gate
+	o.gate = nil
+	o.mu.Unlock()
+	if gate != nil {
+		close(gate)
+	}
+}
+
+func (o *gcOrigin) counts() (calls, cond int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.calls, o.cond
+}
+
+func (o *gcOrigin) lastHeader() http.Header {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.last.Clone()
+}
+
+type gcEntry struct {
+	method string
+	path   string
+	lang   string
+}
+
+func (e gcEntry) url() string {
+	return "http://example.com" + e.path
+}
+
+func (e gcEntry) header() http.Header {
+	if e.lang == "" {
+		return nil
+	}
+	return http.Header{"Accept-Language": {e.lang}}
+}
+
+func gcRoute(name string, extra ...string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "  - name: %s\n    match:\n      path: /\n    upstream: up\n    cache:\n      enabled: true\n", name)
+	for _, line := range extra {
+		if line != "" {
+			b.WriteString("      " + line + "\n")
+		}
+	}
+	return b.String()
+}
+
+func gcDoc(stores, cacheTop, admin, routes, backendURL string) string {
+	var b strings.Builder
+	b.WriteString("version: 1\n")
+	if stores != "" {
+		b.WriteString("stores:\n" + stores)
+	}
+	if cacheTop != "" {
+		b.WriteString("cache:\n" + cacheTop)
+	}
+	b.WriteString(admin)
+	b.WriteString("listeners:\n  - name: public\n    address: \"127.0.0.1:0\"\n")
+	fmt.Fprintf(&b, "upstreams:\n  - name: up\n    hosts:\n      - url: %q\n", backendURL)
+	b.WriteString("routes:\n" + routes)
+	return b.String()
+}
+
+func gcAdminYAML(tokens ...string) string {
+	if len(tokens) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("admin:\n  auth:\n    keys:\n")
+	for i, tok := range tokens {
+		sum := sha256.Sum256([]byte(tok))
+		fmt.Fprintf(&b, "      - id: key-%d\n        hash: \"sha256:%s\"\n", i, hex.EncodeToString(sum[:]))
+	}
+	return b.String()
+}
+
+func gcPurge(t *testing.T, g *microgateway.Gateway, token, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/cache/purge", strings.NewReader(body))
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	g.AdminHandler().ServeHTTP(rec, req)
+	return rec
+}
+
+type gcReply struct {
+	Type     string `json:"type"`
+	Soft     bool   `json:"soft"`
+	Accepted int    `json:"accepted"`
+	Affected *int   `json:"affected,omitempty"`
+	Scope    string `json:"scope"`
+}
+
+func (r gcReply) String() string {
+	affected := "omitted"
+	if r.Affected != nil {
+		affected = strconv.Itoa(*r.Affected)
+	}
+	return fmt.Sprintf("{type=%s soft=%t accepted=%d affected=%s scope=%s}", r.Type, r.Soft, r.Accepted, affected, r.Scope)
+}
+
+func gcPurgeOK(t *testing.T, rec *httptest.ResponseRecorder) gcReply {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("purge status %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	dec := json.NewDecoder(strings.NewReader(rec.Body.String()))
+	dec.DisallowUnknownFields()
+	var out gcReply
+	if err := dec.Decode(&out); err != nil {
+		t.Fatalf("purge reply %q: %v", rec.Body.String(), err)
+	}
+	return out
+}
+
+func gcStatus(t *testing.T, rec *httptest.ResponseRecorder) httpcache.Status {
+	t.Helper()
+	sts, err := httpcache.ParseStatus(strings.Join(rec.Header().Values("Cache-Status"), ", "))
+	if err != nil {
+		t.Fatalf("Cache-Status %q: %v", rec.Header().Values("Cache-Status"), err)
+	}
+	if len(sts) == 0 {
+		t.Fatal("response has no Cache-Status")
+	}
+	return sts[len(sts)-1]
+}
+
+func gcRequest(h http.Handler, method, rawURL string, hdr http.Header) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, rawURL, nil)
+	req.RemoteAddr = gcClientAddr
+	for k, v := range hdr {
+		req.Header[k] = v
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func gcFetch(t *testing.T, h http.Handler, e gcEntry) (*httptest.ResponseRecorder, httpcache.Status) {
+	t.Helper()
+	rec := gcRequest(h, e.method, e.url(), e.header())
+	return rec, gcStatus(t, rec)
+}
+
+func gcSnapshot(t *testing.T, c goredis.UniversalClient, prefix string) map[string]string {
+	t.Helper()
+	ctx := context.Background()
+	out := make(map[string]string)
+	for _, k := range ckKeys(t, c, prefix) {
+		typ, err := c.Type(ctx, k).Result()
+		if err != nil {
+			t.Fatalf("TYPE %s: %v", k, err)
+		}
+		var val string
+		switch typ {
+		case "hash":
+			fields, err := c.HGetAll(ctx, k).Result()
+			if err != nil {
+				t.Fatalf("HGETALL %s: %v", k, err)
+			}
+			names := make([]string, 0, len(fields))
+			for f := range fields {
+				names = append(names, f)
+			}
+			sort.Strings(names)
+			var b strings.Builder
+			for _, f := range names {
+				fmt.Fprintf(&b, "%s=%s\n", f, fields[f])
+			}
+			val = b.String()
+		case "string":
+			v, err := c.Get(ctx, k).Result()
+			if err != nil {
+				t.Fatalf("GET %s: %v", k, err)
+			}
+			val = v
+		}
+		out[k] = fmt.Sprintf("%s pexpireat=%d\n%s", typ, ckExpiryMs(t, c, k), val)
+	}
+	return out
 }

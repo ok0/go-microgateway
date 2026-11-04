@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/httpcache"
 )
 
 const outageClientAddr = "192.0.2.20:4000"
@@ -167,6 +168,101 @@ func runOutage(t *testing.T, policy string) {
 	body = metricsText(t, g)
 	checkExposition(t, body)
 	requireSeries(t, body, "microgateway_store_available", map[string]string{"store": "shared"}, 1)
+}
+
+func gcCheckBypass(t *testing.T, label string, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	st := gcStatus(t, rec)
+	if rec.Code != http.StatusOK || rec.Body.String() != "v1|" || st.Fwd != httpcache.FwdBypass || st.Detail != "store-error" {
+		t.Fatalf("%s: status %d %q %+v, want 200 from the origin with fwd=bypass detail=store-error", label, rec.Code, rec.Body.String(), st)
+	}
+}
+
+func TestCacheOutage(t *testing.T) {
+	m := newMini(t)
+	p := newRespProxy(t, m.Addr())
+	fake := clock.NewFake(miniStart)
+	o := newGCOrigin(t)
+	o.set(http.StatusOK, http.Header{"Cache-Control": {"max-age=60"}}, "v1")
+	stores := redisStoreYAML("shared", []string{p.Addr()}, "db: 0\nkey_prefix: "+uniquePrefix(t)+"\n", "consecutive_failures: 3\nopen_timeout: 2s\n")
+	doc := gcDoc(stores, "  store: shared\n  store_timeout: 200ms\n", gcAdminYAML(gcToken), gcRoute("r"), o.url)
+	g := mustGateway(t, doc, fake, nil)
+	t.Cleanup(func() {
+		if v := p.Violations(); len(v) > 0 {
+			t.Errorf("slot co-location violations: %q", v)
+		}
+	})
+
+	cached := gcEntry{method: http.MethodGet, path: "/c"}
+	if rec, st := gcFetch(t, g, cached); rec.Code != http.StatusOK || !st.Stored {
+		t.Fatalf("healthy fill: status %d %+v, want 200 stored", rec.Code, st)
+	}
+	if _, st := gcFetch(t, g, cached); !st.Hit {
+		t.Fatalf("healthy repeat: status %+v, want hit", st)
+	}
+
+	p.Down()
+	m.Close()
+	for i := 1; i <= 3; i++ {
+		rec, d := getAdvancing(t, g, fake, 50*time.Millisecond, cached.url(), gcClientAddr)
+		if d > 300*time.Millisecond {
+			t.Errorf("outage request %d took %s, want at most 300ms", i, d)
+		}
+		gcCheckBypass(t, "outage request "+strconv.Itoa(i), rec)
+	}
+	body := metricsText(t, g)
+	checkExposition(t, body)
+	requireSeries(t, body, "microgateway_cache_store_errors_total", map[string]string{"op": "get"}, 3)
+	requireSeries(t, body, "microgateway_store_errors_total", map[string]string{"store": "shared", "op": "get"}, 3)
+	requireSeries(t, body, "microgateway_store_available", map[string]string{"store": "shared"}, 0)
+
+	rec := gcPurge(t, g, gcToken, `{"urls":["http://example.com/c"]}`)
+	if rec.Code != http.StatusServiceUnavailable || responseErrorCode(t, rec) != "store_unavailable" {
+		t.Fatalf("purge during the outage: status %d %s, want 503 store_unavailable", rec.Code, rec.Body.String())
+	}
+	requireSeries(t, metricsText(t, g), "microgateway_cache_purges_total", map[string]string{"type": "url", "mode": "hard"}, 0)
+
+	if err := m.Restart(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Up(); err != nil {
+		t.Fatal(err)
+	}
+	p.Reset()
+	for i := 1; i <= 2; i++ {
+		gcCheckBypass(t, "open-guard request "+strconv.Itoa(i), gcRequest(g, cached.method, cached.url(), nil))
+	}
+	if got := p.Commands(); len(got) != 0 {
+		t.Errorf("open guard reached the server: data-plane commands %v, want none", got)
+	}
+	checkSetupOnlyHello(t, p, "open guard")
+
+	fake.Advance(2 * time.Second)
+	rec = gcRequest(g, cached.method, cached.url(), nil)
+	if st := gcStatus(t, rec); rec.Code != http.StatusOK || !st.Hit || rec.Body.String() != "v1|" {
+		t.Fatalf("probe request: status %d %+v body %q, want the cached entry as a hit", rec.Code, st, rec.Body.String())
+	}
+	if len(p.Commands()) == 0 {
+		t.Error("probe request did not reach the server")
+	}
+	requireSeries(t, metricsText(t, g), "microgateway_store_available", map[string]string{"store": "shared"}, 1)
+}
+
+func TestCacheOutageBlackholeRealTimers(t *testing.T) {
+	addr, _ := blackhole(t)
+	o := newGCOrigin(t)
+	o.set(http.StatusOK, http.Header{"Cache-Control": {"max-age=60"}}, "v1")
+	stores := redisStoreYAML("shared", []string{addr}, "db: 0\nkey_prefix: "+uniquePrefix(t)+"\n", "consecutive_failures: 3\nopen_timeout: 2s\n")
+	doc := gcDoc(stores, "  store: shared\n  store_timeout: 50ms\n", "", gcRoute("r"), o.url)
+	g := mustGateway(t, doc, clock.Real(), nil)
+	e := gcEntry{method: http.MethodGet, path: "/b"}
+	for i := 1; i <= 6; i++ {
+		rec := getGuarded(t, g, e.url(), gcClientAddr)
+		gcCheckBypass(t, "blackhole request "+strconv.Itoa(i), rec)
+		if i == 3 {
+			requireSeries(t, metricsText(t, g), "microgateway_store_available", map[string]string{"store": "shared"}, 0)
+		}
+	}
 }
 
 func TestOutageBlackholeRealTimers(t *testing.T) {
