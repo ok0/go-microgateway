@@ -21,6 +21,7 @@ import (
 	microgateway "github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/hooks"
 	"github.com/ok0/go-microgateway/internal/httpcache"
 	"github.com/ok0/go-microgateway/internal/testwait"
 	"github.com/ok0/go-microgateway/store"
@@ -1012,6 +1013,10 @@ func igSoftCoalesced(t *testing.T, addr string, n int) {
 		}()
 	}
 	testwait.Recv(t, "leader at origin", f.origin.arrived, nil)
+	testwait.Until(t, "every other concurrent request parked on the leader's call", func() bool {
+		st := hooks.Inspect(b).Coalesce
+		return st != nil && st.Waiters == waiters-1
+	}, nil)
 	f.origin.release()
 	for range waiters {
 		rec, _ := testwait.Recv(t, "concurrent response", out, nil)
