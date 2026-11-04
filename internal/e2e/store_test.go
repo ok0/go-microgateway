@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -29,9 +31,11 @@ import (
 	"github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/httpcache"
 	"github.com/ok0/go-microgateway/internal/httperr"
 	"github.com/ok0/go-microgateway/internal/ratelimit"
 	"github.com/ok0/go-microgateway/internal/teststore"
+	"github.com/ok0/go-microgateway/internal/testwait"
 	"github.com/ok0/go-microgateway/store"
 )
 
@@ -2116,6 +2120,561 @@ func TestStoreGaugePrunedAfterDrain(t *testing.T) {
 	srlExpectAbsent(t, g, `microgateway_ratelimit_keys{route="mem"}`)
 	srlExpectAbsent(t, g, `microgateway_upstream_panic_mode{upstream="up2"}`)
 	srlExpectSample(t, g, `microgateway_upstream_panic_mode{upstream="up"}`, 0)
+}
+
+func TestInstancesShareRateLimitState(t *testing.T) {
+	n := newMemNetwork()
+	be, _ := rlBackend(t, n)
+	storeClk := rlFake()
+	shared := stShared(t, storeClk)
+	spy := teststore.NewSpy()
+	var factoryCalls atomic.Int64
+	opt := miSpyOption(spy, store.CapRateLimit, shared, nil, &factoryCalls)
+	doc := stDoc(be.URL, stStore("spy", ""), stRoute("rl", smRate("spy", 1, 3)))
+	gws, fakes := miInstances(t, n, 3, doc, time.Unix(rlStart, 0), time.Hour, opt)
+	gA, gB, gC := gws[0], gws[1], gws[2]
+	if got := factoryCalls.Load(); got != 3 {
+		t.Fatalf("store factory calls = %d, want 3", got)
+	}
+
+	rlExpectRemaining(t, stDo(t, gA, "/rl", smClient), "2")
+	rlExpectRemaining(t, stDo(t, gB, "/rl", smClient), "1")
+	rlExpectRemaining(t, stDo(t, gC, "/rl", smClient), "0")
+	rlExpectLimited(t, stDo(t, gA, "/rl", smClient), "1")
+
+	fakes[0].Advance(5 * time.Hour)
+	rlExpectLimited(t, stDo(t, gA, "/rl", smClient), "1")
+
+	storeClk.Advance(time.Second - time.Nanosecond)
+	rlExpectLimited(t, stDo(t, gB, "/rl", smClient), "1")
+	storeClk.Advance(time.Nanosecond)
+	rlExpectRemaining(t, stDo(t, gC, "/rl", smClient), "0")
+	rlExpectLimited(t, stDo(t, gA, "/rl", smClient), "1")
+
+	storeClk.Advance(time.Second + time.Nanosecond)
+	rlExpectRemaining(t, stDo(t, gB, "/rl", smClient), "0")
+	rlExpectLimited(t, stDo(t, gC, "/rl", smClient), "1")
+
+	if got := spy.Count("take"); got != 10 {
+		t.Fatalf("take calls = %d, want 10", got)
+	}
+
+	memDoc := stDoc(be.URL, "", stRoute("rl", smRate("", 1, 3)))
+	memGws, _ := miInstances(t, n, 3, memDoc, time.Unix(rlStart, 0), time.Hour, opt)
+	for _, g := range memGws {
+		rlExpectRemaining(t, stDo(t, g, "/rl", smClient), "2")
+		rlExpectRemaining(t, stDo(t, g, "/rl", smClient), "1")
+		rlExpectRemaining(t, stDo(t, g, "/rl", smClient), "0")
+		rlExpectLimited(t, stDo(t, g, "/rl", smClient), "1")
+	}
+	if got := spy.Count("take"); got != 10 {
+		t.Fatalf("take calls after memory gateways = %d, want 10", got)
+	}
+	if got := factoryCalls.Load(); got != 3 {
+		t.Fatalf("store factory calls after memory gateways = %d, want 3", got)
+	}
+}
+
+func TestCustomStoreTypeAcrossInstances(t *testing.T) {
+	n := newMemNetwork()
+	origin := newFlightOrigin()
+	origin.set(http.StatusOK, http.Header{"Cache-Control": {"max-age=60"}}, "body")
+	be := n.serve(t, origin)
+	storeClk := rlFake()
+	shared := stShared(t, storeClk)
+	sc := teststore.NewSharedCache(storeClk, 1<<20)
+	t.Cleanup(func() { _ = sc.Close() })
+	spy := teststore.NewSpy()
+	var mu sync.Mutex
+	made := map[string][]*teststore.SpyHandle{}
+	var factoryCalls atomic.Int64
+	opt := microgateway.WithStoreType("custom", store.CapRateLimit|store.CapCache, func(p microgateway.StoreParams) (store.Backend, error) {
+		factoryCalls.Add(1)
+		h := spy.Wrap(shared.Handle(), sc.Handle())
+		mu.Lock()
+		defer mu.Unlock()
+		made[p.Name] = append(made[p.Name], h)
+		return h, nil
+	})
+
+	const stores = "stores:\n  - name: s1\n    type: custom\n  - name: s2\n    type: custom\ncache:\n  store: s2\n"
+	routes := rlRoute("rl", "    rate_limit:\n      rate: 1\n      per: 1h\n      burst: 2\n      store: s1\n") +
+		rlRoute("c", "    cache:\n      enabled: true\n")
+	doc := cacheGatewayDoc(be.URL, stores, routes)
+	gA := n.gateway(t, doc, withClock(clock.NewFake(time.Unix(rlStart, 0))), opt)
+	gB := n.gateway(t, doc, withClock(clock.NewFake(time.Unix(rlStart, 0))), opt)
+	if got := factoryCalls.Load(); got != 4 {
+		t.Fatalf("store factory calls = %d, want 4", got)
+	}
+	if len(made) != 2 || len(made["s1"]) != 2 || len(made["s2"]) != 2 {
+		t.Fatalf("handles by store = %d names, s1 %d, s2 %d; want 2 names with 2 handles each",
+			len(made), len(made["s1"]), len(made["s2"]))
+	}
+
+	rlExpectRemaining(t, stDo(t, gA, "/rl", smClient), "1")
+	rlExpectRemaining(t, stDo(t, gB, "/rl", smClient), "0")
+	rlExpectLimited(t, stDo(t, gA, "/rl", smClient), "3600")
+
+	const target = "http://h/c"
+	if st := purgeLast(t, purgeGet(t, gA, target, nil)); st.Hit {
+		t.Fatalf("A first /c %+v, want miss", st)
+	}
+	if st := purgeLast(t, purgeGet(t, gB, target, nil)); !st.Hit {
+		t.Fatalf("B /c %+v, want hit", st)
+	}
+
+	rlOnly := microgateway.WithStoreType("rlonly", store.CapRateLimit, func(microgateway.StoreParams) (store.Backend, error) {
+		return nil, errors.New("rlonly store must not be built")
+	})
+	badDoc := cacheGatewayDoc(be.URL, "stores:\n  - name: rlonly\n    type: rlonly\ncache:\n  store: rlonly\n",
+		rlRoute("c", "    cache:\n      enabled: true\n"))
+	wantLine := 0
+	for i, line := range strings.Split(badDoc, "\n") {
+		if strings.TrimSpace(line) == "store: rlonly" {
+			wantLine = i + 1
+		}
+	}
+	_, err := microgateway.NewFromYAML([]byte(badDoc), rlOnly)
+	var ve *config.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("NewFromYAML error = %T (%v), want *config.ValidationError", err, err)
+	}
+	found := false
+	for _, fe := range ve.Errors {
+		if fe.Path == "cache.store" {
+			found = true
+			if fe.Line != wantLine {
+				t.Fatalf("cache.store error line = %d, want %d", fe.Line, wantLine)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no cache.store error in %v", ve.Errors)
+	}
+
+	s1A, s1B := made["s1"][0], made["s1"][1]
+	s2A, s2B := made["s2"][0], made["s2"][1]
+	noCache := cacheGatewayDoc(be.URL, "stores:\n  - name: s1\n    type: custom\n",
+		rlRoute("rl", "    rate_limit:\n      rate: 1\n      per: 1h\n      burst: 2\n      store: s1\n"))
+	if err := gA.ReloadYAML([]byte(noCache)); err != nil {
+		t.Fatal(err)
+	}
+	if got := s2A.Closes(); got != 1 {
+		t.Fatalf("A s2 handle closed %d times after removal, want 1", got)
+	}
+	if got := s2B.Closes(); got != 0 {
+		t.Fatalf("B s2 handle closed %d times after A removal, want 0", got)
+	}
+	if err := gA.ReloadYAML([]byte(noCache)); err != nil {
+		t.Fatal(err)
+	}
+	if got := s2A.Closes(); got != 1 {
+		t.Fatalf("A s2 handle closed %d times after repeated reload, want 1", got)
+	}
+	if err := gA.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := s1A.Closes(); got != 1 {
+		t.Fatalf("A s1 handle closed %d times after Close, want 1", got)
+	}
+	if got := s1B.Closes(); got != 0 {
+		t.Fatalf("B s1 handle closed %d times after A Close, want 0", got)
+	}
+	if got := factoryCalls.Load(); got != 4 {
+		t.Fatalf("store factory calls after reloads and Close = %d, want 4", got)
+	}
+}
+
+func TestInstancesMixedSharedStore(t *testing.T) {
+	pre := snapGoroutines()
+	n := newMemNetwork()
+	storeClk := rlFake()
+	shared := stShared(t, storeClk)
+	sc := teststore.NewSharedCache(storeClk, 1<<20)
+	t.Cleanup(func() { _ = sc.Close() })
+	spy := teststore.NewSpy()
+	var factoryCalls atomic.Int64
+	opt := miSpyOption(spy, store.CapRateLimit|store.CapCache, shared, sc, &factoryCalls)
+	origin := newFlightOrigin()
+	origin.set(http.StatusOK, http.Header{"Cache-Control": {"max-age=60"}, "Surrogate-Key": {"tg"}}, "body")
+	be := n.serve(t, origin)
+	top := "stores:\n" + stStore("s", "") + "cache:\n  store: s\n" + purgeAdminYAML(purgeTokA)
+	routes := rlRoute("rl", "    rate_limit:\n      rate: 1\n      per: 1h\n      burst: 6\n      store: s\n") +
+		rlRoute("c", "    cache:\n      enabled: true\n") +
+		rlRoute("crl", "    rate_limit:\n      rate: 1\n      per: 1h\n      burst: 1\n      store: s\n    cache:\n      enabled: true\n")
+	gs, _ := miInstances(t, n, 3, cacheGatewayDoc(be.URL, top, routes), time.Unix(rlStart, 0), time.Hour, opt)
+	gA, gB, gC := gs[0], gs[1], gs[2]
+	if got := factoryCalls.Load(); got != 3 {
+		t.Fatalf("store factory calls = %d, want 3", got)
+	}
+	base := snapGoroutines()
+	const target = "http://h/c"
+
+	if st := purgeLast(t, purgeGet(t, gA, target, nil)); st.Hit {
+		t.Fatalf("A first /c %+v, want miss", st)
+	}
+	for _, g := range []*microgateway.Gateway{gB, gC} {
+		if st := purgeLast(t, purgeGet(t, g, target, nil)); !st.Hit {
+			t.Fatalf("/c %+v, want hit", st)
+		}
+	}
+	if calls, _, _ := origin.counts(); calls != 1 {
+		t.Fatalf("origin calls after fill = %d, want 1", calls)
+	}
+
+	var pending []<-chan *httptest.ResponseRecorder
+	for _, g := range gs {
+		for range 6 {
+			pending = append(pending, stAsync(t, g, "/rl", smClient))
+		}
+	}
+	admitted := 0
+	for _, ch := range pending {
+		rec, _ := testwait.Recv(t, "rate-limited response", ch, nil)
+		if rec.Code == http.StatusOK {
+			admitted++
+			continue
+		}
+		rlExpectLimited(t, rec, "3600")
+	}
+	if admitted != 6 {
+		t.Fatalf("admitted /rl requests = %d, want 6", admitted)
+	}
+	if got := spy.Count("take"); got != 18 {
+		t.Fatalf("take calls = %d, want 18", got)
+	}
+	rlCalls := len(shared.Calls())
+
+	drain := func() {
+		for range len(origin.arrived) {
+			<-origin.arrived
+		}
+	}
+	fetchHeld := func(what string, held ...*microgateway.Gateway) {
+		t.Helper()
+		before, _, _ := origin.counts()
+		drain()
+		origin.hold()
+		chans := make([]<-chan *http.Response, 0, len(held))
+		for _, g := range held {
+			ch := make(chan *http.Response, 1)
+			go func() { ch <- purgeGet(t, g, target, nil) }()
+			chans = append(chans, ch)
+		}
+		for range held {
+			awaitSignal(t, origin.arrived, what+": origin request")
+		}
+		origin.release()
+		for _, ch := range chans {
+			resp, _ := testwait.Recv(t, what+": response", ch, nil)
+			if st := purgeLast(t, resp); st.Hit {
+				t.Fatalf("%s: response %+v, want no hit", what, st)
+			}
+		}
+		if after, _, _ := origin.counts(); after-before != len(held) {
+			t.Fatalf("%s: origin calls = %d, want %d", what, after-before, len(held))
+		}
+	}
+
+	purgeOK(t, purgeDo(t, gA, purgeTokA, `{"urls":["`+target+`"]}`))
+	fetchHeld("after URL purge", gB, gC)
+
+	if _, err := gC.Purge(context.Background(), microgateway.PurgeRequest{Tags: []string{"tg"}}); err != nil {
+		t.Fatal(err)
+	}
+	fetchHeld("after tag purge", gA, gB)
+
+	if _, err := gB.Purge(context.Background(), microgateway.PurgeRequest{All: true}); err != nil {
+		t.Fatal(err)
+	}
+	fetchHeld("after purge all", gA, gC)
+
+	if got := len(shared.Calls()); got != rlCalls {
+		t.Fatalf("rate-limit store calls after purges = %d, want %d", got, rlCalls)
+	}
+	for _, g := range gs {
+		rlExpectLimited(t, stDo(t, g, "/rl", smClient), "3600")
+	}
+
+	const crl = "http://h/crl"
+	first := purgeGet(t, gA, crl, nil)
+	if first.StatusCode != http.StatusOK || !purgeLast(t, first).Stored {
+		t.Fatalf("A /crl status = %d, want 200 stored", first.StatusCode)
+	}
+	purgeOK(t, purgeDo(t, gA, purgeTokA, `{"all":true}`))
+	mark := len(spy.Calls())
+	if denied := purgeGet(t, gB, crl, nil); denied.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("B /crl status = %d, want 429", denied.StatusCode)
+	}
+	for _, c := range miSpyDelta(spy, mark) {
+		if c.Op == "get" || c.Op == "put" {
+			t.Fatalf("B denied request made a %s call, want none", c.Op)
+		}
+	}
+	storeClk.Advance(time.Hour)
+	third := purgeGet(t, gC, crl, nil)
+	if third.StatusCode != http.StatusOK || purgeLast(t, third).Hit {
+		t.Fatalf("C /crl status = %d, want 200 and no hit", third.StatusCode)
+	}
+
+	for _, g := range gs {
+		if err := g.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	awaitGoroutinesSettled(t, "mixed run", pre, base)
+}
+
+func TestInstancesStoreFailureIndependent(t *testing.T) {
+	n := newMemNetwork()
+	be, hits := rlBackend(t, n)
+	storeClk := rlFake()
+	shared := stShared(t, storeClk)
+	sc := teststore.NewSharedCache(storeClk, 1<<20)
+	t.Cleanup(func() { _ = sc.Close() })
+	spy := teststore.NewSpy()
+	opt := miSpyOption(spy, store.CapRateLimit|store.CapCache, shared, sc, nil)
+	top := "stores:\n" + stStore("s", "    guard:\n      consecutive_failures: 2\n      open_timeout: 30s\n") + "cache:\n  store: s\n"
+	cacheRoute := rlRoute("c", "    cache:\n      enabled: true\n")
+	docFor := func(policy string) string {
+		return cacheGatewayDoc(be.URL, top, rlRoute("rl", fmt.Sprintf(
+			"    rate_limit:\n      rate: 1\n      per: 1h\n      burst: 5\n      store: s\n      on_store_error: %s\n", policy))+cacheRoute)
+	}
+	fA, fB, fC := rlFake(), rlFake(), rlFake()
+	gA := n.gateway(t, docFor("local"), withClock(fA), opt)
+	gB := n.gateway(t, docFor("allow"), withClock(fB), opt)
+	gC := n.gateway(t, docFor("deny"), withClock(fC), opt)
+	handles := spy.Handles()
+	if len(handles) != 3 {
+		t.Fatalf("store handles = %d, want 3", len(handles))
+	}
+	idA, idB, idC := handles[0].ID(), handles[1].ID(), handles[2].ID()
+	avail := func(g *microgateway.Gateway) float64 {
+		return stGauge(t, g, "microgateway_store_available", "store", "s")
+	}
+	expectAvail := func(what string, g *microgateway.Gateway, want float64) {
+		t.Helper()
+		if got := avail(g); got != want {
+			t.Fatalf("%s store_available = %v, want %v", what, got, want)
+		}
+	}
+
+	rlExpectRemaining(t, stDo(t, gA, "/rl", smClient), "4")
+	rlExpectRemaining(t, stDo(t, gB, "/rl", smClient), "3")
+	rlExpectRemaining(t, stDo(t, gC, "/rl", smClient), "2")
+
+	spy.SetMode("", teststore.Fail, spDown)
+
+	takesA := spy.CountHandle(idA, "take")
+	rlExpectRemaining(t, stDo(t, gA, "/rl", smClient), "4")
+	expectAvail("A after one failure", gA, 1)
+	rlExpectRemaining(t, stDo(t, gA, "/rl", smClient), "3")
+	expectAvail("A after two failures", gA, 0)
+	if got := spy.CountHandle(idA, "take") - takesA; got != 2 {
+		t.Fatalf("A store calls = %d, want 2", got)
+	}
+	rlExpectRemaining(t, stDo(t, gA, "/rl", smClient), "2")
+	if got := spy.CountHandle(idA, "take") - takesA; got != 2 {
+		t.Fatalf("A store calls with guard open = %d, want 2", got)
+	}
+
+	takesB := spy.CountHandle(idB, "take")
+	spExpectDegraded(t, stDo(t, gB, "/rl", smClient))
+	expectAvail("B after one failure", gB, 1)
+	spExpectDegraded(t, stDo(t, gB, "/rl", smClient))
+	expectAvail("B after two failures", gB, 0)
+	if got := spy.CountHandle(idB, "take") - takesB; got != 2 {
+		t.Fatalf("B store calls = %d, want 2", got)
+	}
+	spExpectDegraded(t, stDo(t, gB, "/rl", smClient))
+	if got := spy.CountHandle(idB, "take") - takesB; got != 2 {
+		t.Fatalf("B store calls with guard open = %d, want 2", got)
+	}
+
+	takesC := spy.CountHandle(idC, "take")
+	spExpectUnavailable(t, stDo(t, gC, "/rl", smClient), "30")
+	expectAvail("C after one failure", gC, 1)
+	spExpectUnavailable(t, stDo(t, gC, "/rl", smClient), "30")
+	expectAvail("C after two failures", gC, 0)
+	if got := spy.CountHandle(idC, "take") - takesC; got != 2 {
+		t.Fatalf("C store calls = %d, want 2", got)
+	}
+	spExpectUnavailable(t, stDo(t, gC, "/rl", smClient), "30")
+	if got := spy.CountHandle(idC, "take") - takesC; got != 2 {
+		t.Fatalf("C store calls with guard open = %d, want 2", got)
+	}
+
+	owned := []struct {
+		g      *microgateway.Gateway
+		policy string
+	}{{gA, "local"}, {gB, "allow"}, {gC, "deny"}}
+	for _, o := range owned {
+		for _, p := range []string{"local", "allow", "deny"} {
+			want := 0.0
+			if p == o.policy {
+				want = 3
+			}
+			if got := stCounter(t, o.g, "microgateway_ratelimit_store_fallback_total", "route", "rl", "policy", p); got != want {
+				t.Fatalf("fallback total policy %s = %v, want %v", p, got, want)
+			}
+		}
+	}
+
+	spyCalls := len(spy.Calls())
+	originHits := hits.Load()
+	cacheResp := purgeGet(t, gA, "http://h/c", nil)
+	if cacheResp.StatusCode != http.StatusOK {
+		t.Fatalf("A /c status = %d, want 200", cacheResp.StatusCode)
+	}
+	if st := purgeLast(t, cacheResp); st.Fwd != httpcache.FwdBypass {
+		t.Fatalf("A /c %+v, want bypass", st)
+	}
+	if got := hits.Load() - originHits; got != 1 {
+		t.Fatalf("origin requests for A /c = %d, want 1", got)
+	}
+	if got := len(spy.Calls()); got != spyCalls {
+		t.Fatalf("spy calls for A /c = %d, want none", got-spyCalls)
+	}
+
+	spy.SetMode("", teststore.Inherit, nil)
+
+	fA.Advance(30*time.Second - time.Nanosecond)
+	takesA = spy.CountHandle(idA, "")
+	if rec := stDo(t, gA, "/rl", smClient); rec.Code != http.StatusOK {
+		t.Fatalf("A status before open timeout = %d, want 200", rec.Code)
+	}
+	if got := spy.CountHandle(idA, ""); got != takesA {
+		t.Fatalf("A store calls before open timeout = %d, want none", got-takesA)
+	}
+	fA.Advance(time.Nanosecond)
+	rlExpectRemaining(t, stDo(t, gA, "/rl", smClient), "1")
+	if got := spy.CountHandle(idA, "") - takesA; got != 1 {
+		t.Fatalf("A store calls at probe = %d, want 1", got)
+	}
+	expectAvail("A after probe", gA, 1)
+	expectAvail("B before probe", gB, 0)
+	expectAvail("C before probe", gC, 0)
+
+	takesB = spy.CountHandle(idB, "")
+	spExpectDegraded(t, stDo(t, gB, "/rl", smClient))
+	if got := spy.CountHandle(idB, ""); got != takesB {
+		t.Fatalf("B store calls before open timeout = %d, want none", got-takesB)
+	}
+	takesC = spy.CountHandle(idC, "")
+	spExpectUnavailable(t, stDo(t, gC, "/rl", smClient), "30")
+	if got := spy.CountHandle(idC, ""); got != takesC {
+		t.Fatalf("C store calls before open timeout = %d, want none", got-takesC)
+	}
+
+	fB.Advance(30*time.Second + time.Nanosecond)
+	rlExpectRemaining(t, stDo(t, gB, "/rl", smClient), "0")
+	if got := spy.CountHandle(idB, "") - takesB; got != 1 {
+		t.Fatalf("B store calls at probe = %d, want 1", got)
+	}
+	expectAvail("B after probe", gB, 1)
+	rlExpectLimited(t, stDo(t, gB, "/rl", smClient), "3600")
+	spExpectUnavailable(t, stDo(t, gC, "/rl", smClient), "30")
+	if got := spy.CountHandle(idC, ""); got != takesC {
+		t.Fatalf("C store calls after B probe = %d, want none", got-takesC)
+	}
+}
+
+func TestInstancesMixedLoad(t *testing.T) {
+	if os.Getenv("MICROGATEWAY_LOAD") == "" {
+		t.Skip("load check: set MICROGATEWAY_LOAD=1 to run")
+	}
+	const (
+		instances = 10
+		perLoop   = 10000
+		burst     = 500
+		seed      = 19
+	)
+	pre := snapGoroutines()
+	n := newMemNetwork()
+	storeClk := rlFake()
+	shared := stShared(t, storeClk)
+	sc := teststore.NewSharedCache(storeClk, 1<<20)
+	t.Cleanup(func() { _ = sc.Close() })
+	spy := teststore.NewSpy()
+	opt := miSpyOption(spy, store.CapRateLimit|store.CapCache, shared, sc, nil)
+
+	var version, floor atomic.Int64
+	be := n.serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "max-age=60")
+		fmt.Fprint(w, version.Load())
+	}))
+	top := "stores:\n" + stStore("s", "") + "cache:\n  store: s\n"
+	routes := rlRoute("rl", fmt.Sprintf("    rate_limit:\n      rate: 1\n      per: 1h\n      burst: %d\n      store: s\n", burst)) +
+		rlRoute("c", "    cache:\n      enabled: true\n")
+	gs, _ := miInstances(t, n, instances, cacheGatewayDoc(be.URL, top, routes), time.Unix(rlStart, 0), time.Hour, opt)
+	base := snapGoroutines()
+
+	raise := func(v int64) {
+		for {
+			cur := floor.Load()
+			if v <= cur || floor.CompareAndSwap(cur, v) {
+				return
+			}
+		}
+	}
+	var admitted, stale atomic.Int64
+	var wg sync.WaitGroup
+	for i, g := range gs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rng := rand.New(rand.NewPCG(seed, uint64(i)))
+			for range perLoop {
+				switch roll := rng.IntN(100); {
+				case roll < 70:
+					rec := stDo(t, g, "/rl", smClient)
+					switch rec.Code {
+					case http.StatusOK:
+						admitted.Add(1)
+					case http.StatusTooManyRequests:
+					default:
+						t.Errorf("/rl status = %d, want 200 or 429", rec.Code)
+					}
+				case roll < 95:
+					seen := floor.Load()
+					resp := purgeGet(t, g, "http://h/c", nil)
+					body, err := io.ReadAll(resp.Body)
+					if err != nil {
+						t.Error(err)
+						break
+					}
+					ver, err := strconv.ParseInt(string(body), 10, 64)
+					if err != nil {
+						t.Error(err)
+						break
+					}
+					if ver < seen {
+						stale.Add(1)
+					}
+				default:
+					v := version.Add(1)
+					if _, err := gs[rng.IntN(instances)].Purge(context.Background(), microgateway.PurgeRequest{All: true}); err != nil {
+						t.Error(err)
+					}
+					raise(v)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := admitted.Load(); got != burst {
+		t.Fatalf("admitted /rl requests = %d, want %d", got, burst)
+	}
+	if got := stale.Load(); got != 0 {
+		t.Fatalf("/c responses older than a completed purge = %d, want 0", got)
+	}
+	for _, g := range gs {
+		if err := g.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	awaitGoroutinesSettled(t, "mixed load run", pre, base)
 }
 
 func TestStoreClosedAfterInFlightDrain(t *testing.T) {
