@@ -16,6 +16,7 @@ import (
 
 	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/httpcache"
+	"github.com/ok0/go-microgateway/internal/leakcheck"
 	"github.com/ok0/go-microgateway/internal/memstore"
 	"github.com/ok0/go-microgateway/internal/metrics"
 	"github.com/ok0/go-microgateway/internal/storeguard"
@@ -810,4 +811,81 @@ func TestPurgeNoGoroutine(t *testing.T) {
 	testwait.Until(t, "goroutines back to baseline", func() bool {
 		return runtime.NumGoroutine() <= baseline
 	}, func() string { return fmt.Sprintf("goroutines %d, baseline %d", runtime.NumGoroutine(), baseline) })
+}
+
+func TestPurgeNeverEchoesSelectors(t *testing.T) {
+	const qs, tg, ps, ui = "qs-LEAK-7d1", "tg-LEAK-3e8", "ps-LEAK-5a2", "ui-LEAK-9c4"
+	secrets := []string{qs, tg, ps, ui}
+	u := "http://h/" + ps + "?k=" + qs
+	storeErr := errors.New("backend refused " + u + " " + tg)
+
+	seeded := func(url string, tags ...string) func(*testing.T) *purgeRig {
+		return func(t *testing.T) *purgeRig {
+			r := newPurgeRig(t, purgeOpts{})
+			putEntry(t, r.sp, url, tags...)
+			return r
+		}
+	}
+	fresh := func(t *testing.T) *purgeRig {
+		return newPurgeRig(t, purgeOpts{})
+	}
+	failing := func(guard bool) func(*testing.T) *purgeRig {
+		return func(t *testing.T) *purgeRig {
+			clk := clock.NewFake(start)
+			sp := newSpy(t, clk)
+			st := &nthStore{Cache: sp, failAt: 1, err: storeErr}
+			return newPurgeRig(t, purgeOpts{clk: clk, sp: sp, st: st, guard: guard})
+		}
+	}
+
+	cases := []struct {
+		name    string
+		setup   func(*testing.T) *purgeRig
+		req     PurgeRequest
+		wantErr error
+		wantLog bool
+	}{
+		{"success url hard", seeded(u), PurgeRequest{URLs: []string{u}}, nil, true},
+		{"success url soft", seeded(u), PurgeRequest{URLs: []string{u}, Soft: true}, nil, true},
+		{"success tag hard", seeded("http://h/t", tg), PurgeRequest{Tags: []string{tg}}, nil, true},
+		{"success tag soft", seeded("http://h/t", tg), PurgeRequest{Tags: []string{tg}, Soft: true}, nil, true},
+		{"rejected userinfo", fresh, PurgeRequest{URLs: []string{"http://" + ui + ":x@h/" + ps + "?k=" + qs}}, ErrInvalidRequest, false},
+		{"rejected ftp scheme", fresh, PurgeRequest{URLs: []string{"ftp://h/" + ps + "?k=" + qs}}, ErrInvalidRequest, false},
+		{"rejected long key", fresh, PurgeRequest{URLs: []string{"http://h/" + ps + strings.Repeat("a", 8<<10) + "?k=" + qs}}, ErrInvalidRequest, false},
+		{"rejected url and tag", fresh, PurgeRequest{URLs: []string{u}, Tags: []string{tg}}, ErrInvalidRequest, false},
+		{"rejected control byte tag", fresh, PurgeRequest{Tags: []string{tg + "\x01"}}, ErrInvalidRequest, false},
+		{"rejected long tag", fresh, PurgeRequest{Tags: []string{tg + strings.Repeat("x", 1024)}}, ErrInvalidRequest, false},
+		{"store failure url", failing(false), PurgeRequest{URLs: []string{u}}, store.ErrUnavailable, true},
+		{"store failure tag", failing(false), PurgeRequest{Tags: []string{tg}}, store.ErrUnavailable, true},
+		{"store failure url guarded", failing(true), PurgeRequest{URLs: []string{u}}, store.ErrUnavailable, true},
+		{"store failure tag guarded", failing(true), PurgeRequest{Tags: []string{tg}}, store.ErrUnavailable, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := tc.setup(t)
+			res, err := r.p.Purge(context.Background(), tc.req, "")
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("error %v, want success", err)
+				}
+			} else if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("error %v, want %v", err, tc.wantErr)
+			}
+			leakcheck.Check(t, "result", res, secrets...)
+			if err != nil {
+				leakcheck.Check(t, "error", err, secrets...)
+			}
+			logs := r.logs.String()
+			if tc.wantLog && logs == "" {
+				t.Fatal("no log line written, the log scan would be vacuous")
+			}
+			for _, s := range secrets {
+				for _, f := range leakcheck.Forms(s) {
+					if strings.Contains(logs, f) {
+						t.Errorf("log echoes %q", f)
+					}
+				}
+			}
+		})
+	}
 }
