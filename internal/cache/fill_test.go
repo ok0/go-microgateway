@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -145,8 +144,14 @@ func TestBufferBound(t *testing.T) {
 			fw, _ := w.(*fillWriter)
 			for i := 0; i < chunks; i++ {
 				_, _ = w.Write(chunk)
-				if fw != nil && cap(fw.buf) > fw.maxBody {
+				if fw == nil {
+					continue
+				}
+				if cap(fw.buf) > fw.maxBody {
 					t.Errorf("buffer capacity %d exceeds max_body_bytes %d", cap(fw.buf), fw.maxBody)
+				}
+				if (i+1)*len(chunk) > fw.maxBody && !(fw.buf == nil && !fw.buffering && fw.tooLarge) {
+					t.Errorf("after %d bytes the copy is not abandoned: buf=%v buffering=%v tooLarge=%v", (i+1)*len(chunk), fw.buf != nil, fw.buffering, fw.tooLarge)
 				}
 			}
 			ex.Finish()
@@ -154,16 +159,17 @@ func TestBufferBound(t *testing.T) {
 		return rg
 	}
 	t.Run("within limit is stored", func(t *testing.T) {
-		setup(t, 7).serveSink(t)
+		rg := setup(t, 7)
+		rg.serveSink(t)
+		if rg.stores(storeStored) != 1 || len(rg.spy.callsOf(opPut)) != 1 {
+			t.Fatalf("stored=%v puts=%d", rg.stores(storeStored), len(rg.spy.callsOf(opPut)))
+		}
 	})
 	t.Run("over limit is too large with bounded memory", func(t *testing.T) {
 		rg := setup(t, 64)
-		var before, after runtime.MemStats
-		runtime.ReadMemStats(&before)
 		rg.serveSink(t)
-		runtime.ReadMemStats(&after)
-		if delta := after.TotalAlloc - before.TotalAlloc; delta >= 2*maxBody {
-			t.Fatalf("allocated %d bytes, want below %d", delta, 2*maxBody)
+		if rg.stores(storeTooLarge) != 1 || len(rg.spy.callsOf(opPut)) != 0 {
+			t.Fatalf("too_large=%v puts=%d", rg.stores(storeTooLarge), len(rg.spy.callsOf(opPut)))
 		}
 	})
 }
