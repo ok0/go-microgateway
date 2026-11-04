@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -80,6 +81,13 @@ type docOpts struct {
 	Password   bool
 	UseStore   bool
 	ExtraRoute bool
+	Cache      bool
+	AdminToken string
+}
+
+func adminKeyHash(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func instanceDoc(o docOpts) string {
@@ -87,6 +95,9 @@ func instanceDoc(o docOpts) string {
 	fmt.Fprintf(&b, "version: 1\n")
 	fmt.Fprintf(&b, "listeners:\n  - name: public\n    address: \"127.0.0.1:0\"\n")
 	fmt.Fprintf(&b, "admin:\n  address: \"127.0.0.1:0\"\n")
+	if o.Cache {
+		fmt.Fprintf(&b, "  auth:\n    keys:\n      - id: ops\n        hash: \"%s\"\n", adminKeyHash(o.AdminToken))
+	}
 	fmt.Fprintf(&b, "upstreams:\n  - name: up\n    hosts:\n      - url: \"%s\"\n", o.Backend)
 	fmt.Fprintf(&b, "stores:\n  - name: shared\n    type: redis\n    redis:\n")
 	fmt.Fprintf(&b, "      addresses: [\"%s\"]\n", o.RedisAddr)
@@ -95,10 +106,16 @@ func instanceDoc(o docOpts) string {
 	}
 	fmt.Fprintf(&b, "      db: %d\n", o.DB)
 	fmt.Fprintf(&b, "      key_prefix: \"%s\"\n", o.Prefix)
+	if o.Cache {
+		fmt.Fprintf(&b, "cache:\n  store: shared\n")
+	}
 	fmt.Fprintf(&b, "routes:\n  - name: rl\n    match:\n      path: /rl\n    upstream: up\n")
 	fmt.Fprintf(&b, "    rate_limit:\n      rate: 1\n      per: 1h\n      burst: 5\n      key:\n        source: route\n")
 	if o.UseStore {
 		fmt.Fprintf(&b, "      store: shared\n      on_store_error: deny\n      store_timeout: 2s\n")
+	}
+	if o.Cache {
+		fmt.Fprintf(&b, "  - name: c\n    match:\n      path: /c\n    upstream: up\n    cache:\n      enabled: true\n")
 	}
 	if o.ExtraRoute {
 		fmt.Fprintf(&b, "  - name: extra\n    match:\n      path: /extra\n    upstream: up\n")
