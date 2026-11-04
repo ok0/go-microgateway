@@ -31,7 +31,7 @@ func (c *Config) Line(path string) int {
 	return c.lines.lineFor(path)
 }
 
-// Redacted returns a deep copy of c in which every non-empty JWT key secret, every inline API key hash, every
+// Redacted returns a deep copy of c in which every non-empty JWT key secret, the hash of every API key and admin key, every
 // non-empty store password and sentinel password, every store parameter leaf, every non-empty route header value
 // (match, request and response add/set) and every middleware parameter leaf is replaced by "REDACTED".
 // The PEM content loaded from public key files and the keys loaded from API key files are dropped. The userinfo
@@ -56,6 +56,11 @@ func (c *Config) Redacted() *Config {
 			if !r.Auth.APIKeys[i].Keys[k].Hash.IsZero() {
 				r.Auth.APIKeys[i].Keys[k].Hash = NewSecret(Redacted)
 			}
+		}
+	}
+	for i := range r.Admin.Auth.Keys {
+		if !r.Admin.Auth.Keys[i].Hash.IsZero() {
+			r.Admin.Auth.Keys[i].Hash = NewSecret(Redacted)
 		}
 	}
 	for i := range r.Upstreams {

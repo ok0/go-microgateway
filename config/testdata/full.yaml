@@ -33,6 +33,10 @@ listeners:
 admin:
   enabled: true
   address: "127.0.0.1:9901"
+  auth:
+    keys:
+      - id: ops
+        hash: "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 upstreams:
   - name: users
     hosts:

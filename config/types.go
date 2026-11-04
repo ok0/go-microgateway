@@ -102,6 +102,22 @@ type Admin struct {
 	Enabled *bool `yaml:"enabled" json:"enabled"`
 	// Address is the host:port the endpoint listens on. Default "127.0.0.1:9901".
 	Address string `yaml:"address" json:"address"`
+	// Auth holds the bearer tokens accepted by mutating admin endpoints. Empty disables them.
+	Auth AdminAuth `yaml:"auth" json:"auth"`
+}
+
+// AdminAuth lists the credentials of the mutating admin endpoints (cache purge). With no keys those endpoints are absent.
+type AdminAuth struct {
+	// Keys lists the accepted bearer tokens, stored as hashes.
+	Keys []AdminKey `yaml:"keys" json:"keys"`
+}
+
+// AdminKey is one accepted admin bearer token, stored as a hash.
+type AdminKey struct {
+	// ID identifies the key in logs and must be unique.
+	ID string `yaml:"id" json:"id"`
+	// Hash is the sha256 digest of the token in the form sha256:<64 hex digits>, unique among the keys. Reveal returns the value; every formatting and encoding path redacts it.
+	Hash Secret `yaml:"hash" json:"hash"`
 }
 
 // Upstream is a backend pool. Exactly one of Hosts or DNS must be set. Fields left at their zero value take the defaults noted on each field.

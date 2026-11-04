@@ -71,6 +71,7 @@ func (c *Config) validate() []FieldError {
 	}
 	checkGlobal(ck, &c.Global)
 	checkListeners(ck, c)
+	checkAdminAuth(ck, &c.Admin.Auth)
 	checkUpstreams(ck, c.Upstreams)
 	kinds := checkAuth(ck, &c.Auth)
 	checkIdentityHeaders(ck, c)
