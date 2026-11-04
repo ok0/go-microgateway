@@ -416,6 +416,13 @@ func (s *Snapshot) RefreshCacheGauges() {
 	s.cacheSeries.Entries.With().Set(float64(st.Entries))
 }
 
+func (s *Snapshot) MemCacheStats() (memstore.CacheStats, bool) {
+	if s.memCache == nil {
+		return memstore.CacheStats{}, false
+	}
+	return s.memCache.Stats(), true
+}
+
 // RefreshRateLimitKeys sets the key-count gauge of every rate-limited route that has an in-memory store.
 func (s *Snapshot) RefreshRateLimitKeys() {
 	for _, rl := range s.rateLimits {
