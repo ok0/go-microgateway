@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ok0/go-microgateway/internal/metrics"
@@ -639,5 +640,59 @@ func TestRegistered(t *testing.T) {
 	must(t, r.WriteText(&after))
 	if before.String() != after.String() {
 		t.Fatalf("WriteText changed after Registered\n--- before\n%s--- after\n%s", before.String(), after.String())
+	}
+}
+
+func TestAttach(t *testing.T) {
+	type keyA struct{}
+	type keyB struct{}
+	r := metrics.NewRegistry()
+	calls := 0
+	mk := func() *int { calls++; v := calls; return &v }
+
+	p1 := metrics.Attach(r, keyA{}, mk)
+	p2 := metrics.Attach(r, keyA{}, mk)
+	if p1 != p2 || calls != 1 {
+		t.Fatalf("same key: same=%v calls=%d, want true and 1", p1 == p2, calls)
+	}
+	q := metrics.Attach(r, keyB{}, mk)
+	if q == p1 || calls != 2 {
+		t.Fatalf("other key: distinct=%v calls=%d, want true and 2", q != p1, calls)
+	}
+	o := metrics.Attach(metrics.NewRegistry(), keyA{}, mk)
+	if o == p1 || calls != 3 {
+		t.Fatalf("other registry: distinct=%v calls=%d, want true and 3", o != p1, calls)
+	}
+	var out bytes.Buffer
+	must(t, r.WriteText(&out))
+	if out.Len() != 0 {
+		t.Fatalf("WriteText exposed attached values:\n%s", out.String())
+	}
+}
+
+func TestAttachConcurrent(t *testing.T) {
+	type keyA struct{}
+	r := metrics.NewRegistry()
+	var n atomic.Int64
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	got := make([]*int, 8)
+	for i := range got {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			got[i] = metrics.Attach(r, keyA{}, func() *int { n.Add(1); return new(int) })
+		}()
+	}
+	close(start)
+	wg.Wait()
+	for i := range got {
+		if got[i] != got[0] {
+			t.Fatalf("goroutine %d got a different value", i)
+		}
+	}
+	if n.Load() != 1 {
+		t.Fatalf("create ran %d times, want 1", n.Load())
 	}
 }

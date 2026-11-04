@@ -509,6 +509,7 @@ func upstreamMetrics(t *testing.T) *upstream.Metrics {
 	if m.BreakerRejected, err = reg.Counter("t_circuit_breaker_rejected_total", "h", "upstream", "host"); err != nil {
 		t.Fatal(err)
 	}
+	m.Hosts = upstream.RegistryHosts(reg)
 	return &m
 }
 

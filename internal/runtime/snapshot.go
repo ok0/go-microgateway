@@ -525,7 +525,8 @@ func (s *Snapshot) RefreshRateLimitKeys() {
 
 // PruneGauges deletes the gauge series of rate-limited routes, upstreams and stores that no snapshot in live
 // owns. Counters and histograms are never deleted: deleting a counter would lose increments not yet scraped,
-// so cumulative series of removed names are kept.
+// so cumulative series of removed names are kept. It also deletes the per-host gauge series of hosts that no live
+// generation's upstream holds.
 func PruneGauges(live []*Snapshot) {
 	if len(live) == 0 {
 		return
@@ -533,6 +534,7 @@ func PruneGauges(live []*Snapshot) {
 	routes := make(map[string]bool)
 	upstreams := make(map[string]bool)
 	stores := make(map[string]bool)
+	var ups []*upstream.Upstream
 	var cs *CacheSeries
 	memLive := false
 	for _, s := range live {
@@ -541,8 +543,9 @@ func PruneGauges(live []*Snapshot) {
 				routes[rl.name] = true
 			}
 		}
-		for name := range s.Upstreams {
+		for name, u := range s.Upstreams {
 			upstreams[name] = true
+			ups = append(ups, u)
 		}
 		for _, b := range s.built {
 			stores[b.name] = true
@@ -556,6 +559,7 @@ func PruneGauges(live []*Snapshot) {
 	}
 	head := live[0]
 	sr := head.series
+	sr.Upstream.RetainHosts(ups)
 	sr.RateLimitKeys.DeleteFunc(func(v []string) bool { return !routes[v[0]] })
 	sr.Upstream.HostHealthy.DeleteFunc(func(v []string) bool { return !upstreams[v[0]] })
 	sr.Upstream.PanicMode.DeleteFunc(func(v []string) bool { return !upstreams[v[0]] })

@@ -50,6 +50,7 @@ var histogramSuffixes = []string{"_bucket", "_sum", "_count"}
 type Registry struct {
 	mu   sync.Mutex
 	fams map[string]*family
+	vals map[any]any // values attached with Attach; guarded by mu
 }
 
 // NewRegistry returns an empty Registry.
@@ -93,6 +94,23 @@ func (r *Registry) Registered(name string) bool {
 	defer r.mu.Unlock()
 	_, ok := r.fams[name]
 	return ok
+}
+
+// Attach returns the value attached to r under key, calling create to make it on first use. An attached value
+// lives as long as r, so every user of one registry shares it. key should be a value of an unexported type of the
+// calling package; create runs with r locked and must not use r.
+func Attach[T any](r *Registry, key any, create func() T) T {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if v, ok := r.vals[key]; ok {
+		return v.(T)
+	}
+	if r.vals == nil {
+		r.vals = make(map[any]any)
+	}
+	v := create()
+	r.vals[key] = v
+	return v
 }
 
 // Gauge registers or retrieves a gauge family with the given label names.

@@ -63,6 +63,7 @@ type Metrics struct {
 	BreakerState       *metrics.GaugeVec
 	BreakerTransitions *metrics.CounterVec
 	BreakerRejected    *metrics.CounterVec
+	Hosts              *HostGauges // per-host gauge reference table of the registry the gauges live in; set it to RegistryHosts of that registry
 }
 
 func newMetrics(r *metrics.Registry) (*Metrics, error) {
@@ -100,6 +101,7 @@ func newMetrics(r *metrics.Registry) (*Metrics, error) {
 	if m.BreakerRejected, err = r.Counter("microgateway_circuit_breaker_rejected_total", "Requests or attempts rejected by an open circuit breaker.", "upstream", "host"); err != nil {
 		return nil, err
 	}
+	m.Hosts = RegistryHosts(r)
 	return &m, nil
 }
 
@@ -202,6 +204,8 @@ type Upstream struct {
 	set     atomic.Pointer[hostSet]
 	Breaker *breaker.Breaker
 	brk     *hostBreakers
+
+	gaugesRetired bool // guarded by Metrics.Hosts.mu; set once the generation of u has drained
 }
 
 func TransportFingerprint(cfg config.Upstream) string {
@@ -235,6 +239,9 @@ func maxEjectionPercent(cfg config.PassiveHealth) int {
 
 func Build(cfg config.Upstream, d Deps) (*Upstream, error) {
 	d = d.withDefaults()
+	if d.Metrics.Hosts == nil {
+		return nil, errors.New("upstream: Metrics.Hosts is nil; set it to RegistryHosts of the registry holding the gauges")
+	}
 	static := make([]hostSpec, 0, len(cfg.Hosts))
 	for i, hc := range cfg.Hosts {
 		raw := hc.URL.Reveal()
@@ -477,6 +484,7 @@ func (u *Upstream) applyLocked(specs []hostSpec, dns bool) {
 	prev := p.current.Load()
 	u.set.Store(next)
 	p.current.Store(next)
+	p.metrics.holdHosts(u, hosts)
 	if dns {
 		added, removed := changedKeys(prev, next)
 		if added+removed > 0 {
@@ -700,7 +708,7 @@ func (u *Upstream) Record(h *Host, tok breaker.Token, o health.Outcome) {
 // RefreshHealth evaluates ejection expiry for every current host and updates the health gauges.
 func (u *Upstream) RefreshHealth() {
 	if u.Breaker != nil {
-		u.pool.metrics.BreakerState.With(u.Name, "").Set(float64(u.Breaker.State()))
+		u.pool.metrics.setBreakerState(u.Name, "", float64(u.Breaker.State()))
 	}
 	s := u.set.Load()
 	if s == nil {
@@ -709,7 +717,7 @@ func (u *Upstream) RefreshHealth() {
 	for _, h := range s.hosts {
 		u.pool.setHealthGauge(h)
 		if h.Breaker != nil {
-			u.pool.metrics.BreakerState.With(u.Name, h.URL.Host).Set(float64(h.Breaker.State()))
+			u.pool.metrics.setBreakerState(u.Name, h.URL.Host, float64(h.Breaker.State()))
 		}
 	}
 }

@@ -39,7 +39,7 @@ func RegisterSeries(r *metrics.Registry) (*Series, error) {
 	if err != nil {
 		return nil, err
 	}
-	um := &upstream.Metrics{Attempts: attempts}
+	um := &upstream.Metrics{Attempts: attempts, Hosts: upstream.RegistryHosts(r)}
 	if um.Ejections, err = r.Counter("microgateway_upstream_ejections_total", "Upstream host ejections.", "upstream", "host"); err != nil {
 		return nil, err
 	}

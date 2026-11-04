@@ -76,7 +76,7 @@ func (p *pool) setHealthGauge(h *Host) {
 	if !h.Ejected() && h.ActiveHealthy() {
 		v = 1
 	}
-	p.metrics.HostHealthy.With(p.name, h.URL.Host).Set(v)
+	p.metrics.setHostHealthy(p.name, h.URL.Host, v)
 }
 
 func (p *pool) prefill(u *Upstream, s *hostSet) {
@@ -120,7 +120,7 @@ var breakerTransitionPairs = [...][2]breaker.State{
 }
 
 func (p *pool) prefillBreaker(host string, b *breaker.Breaker) {
-	p.metrics.BreakerState.With(p.name, host).Set(float64(b.State()))
+	p.metrics.setBreakerState(p.name, host, float64(b.State()))
 	for _, pair := range breakerTransitionPairs {
 		p.metrics.BreakerTransitions.With(p.name, host, pair[0].String(), pair[1].String())
 	}
@@ -144,7 +144,7 @@ func (p *pool) onAggregateBreaker(b *breaker.Breaker, from, to breaker.State, re
 
 func (p *pool) recordBreakerTransition(host string, from, to breaker.State) {
 	p.metrics.BreakerTransitions.With(p.name, host, from.String(), to.String()).Inc()
-	p.metrics.BreakerState.With(p.name, host).Set(float64(to))
+	p.metrics.setBreakerState(p.name, host, float64(to))
 }
 
 func (p *pool) logBreaker(host, scope string, from, to breaker.State, reason breaker.Reason) {
@@ -161,7 +161,7 @@ func (p *pool) onEjected(key string, d time.Duration, count int) {
 	p.metrics.Ejections.With(p.name, host).Inc()
 	p.logger.Warn("upstream host ejected", "upstream", p.name, "host", host, "duration", d, "ejection_count", count)
 	if p.currentHost(key) != nil {
-		p.metrics.HostHealthy.With(p.name, host).Set(0)
+		p.metrics.setHostHealthy(p.name, host, 0)
 	}
 }
 
