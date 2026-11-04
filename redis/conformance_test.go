@@ -56,3 +56,14 @@ func TestConformanceInjected(t *testing.T) {
 		return m.Addr(), 0
 	}))
 }
+
+func TestCacheConformance(t *testing.T) {
+	storetest.Cache(t, miniCacheHarness())
+}
+
+func TestCacheConformanceInjected(t *testing.T) {
+	storetest.Cache(t, injectedCacheHarness(func(t *testing.T) (string, int) {
+		m := newMini(t)
+		return m.Addr(), 0
+	}))
+}

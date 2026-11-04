@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,14 +24,20 @@ import (
 	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/memstore"
 	"github.com/ok0/go-microgateway/store"
+	"github.com/ok0/go-microgateway/store/storetest"
 )
 
 var miniStart = time.Unix(1_700_000_000, 0).UTC()
 
 func newMini(t *testing.T) *miniredis.Miniredis {
 	t.Helper()
+	return newMiniAt(t, miniStart)
+}
+
+func newMiniAt(t *testing.T, start time.Time) *miniredis.Miniredis {
+	t.Helper()
 	m := miniredis.RunT(t)
-	m.SetTime(miniStart)
+	m.SetTime(start)
 	return m
 }
 
@@ -43,6 +50,12 @@ func (c *miniClock) Advance(d time.Duration) {
 	c.now = c.now.Add(d)
 	c.m.SetTime(c.now)
 	c.m.FastForward(d)
+}
+
+// Back steps the server clock back by d. Remaining TTLs are kept, so absolute expiries move back too (D13).
+func (c *miniClock) Back(d time.Duration) {
+	c.now = c.now.Add(-d)
+	c.m.SetTime(c.now)
 }
 
 func (c *miniClock) Set(at time.Time) {
@@ -108,8 +121,16 @@ redis.pcall = function(...) guard(...); return rawpcall(...) end
 
 const luaClockInjected = "local SEC = tonumber(ARGV[#ARGV - 1])\nlocal USEC = tonumber(ARGV[#ARGV])\n"
 
+// cacheStore builds a store whose scripts run the key guard (D12a) on the server clock.
+func cacheStore(t *testing.T, addr string, db int, prefix string) *Store {
+	t.Helper()
+	s := newTestStore(t, addr, db, prefix)
+	s.sc = newScriptSet(luaKeyGuard + luaClockServer)
+	return s
+}
+
 func withInjectedClock(s *Store, now func() time.Time) *Store {
-	s.sc = newScriptSet(luaClockInjected)
+	s.sc = newScriptSet(luaKeyGuard + luaClockInjected)
 	s.clockArgs = func() []any {
 		n := now()
 		return []any{strconv.FormatInt(n.Unix(), 10), strconv.FormatInt(int64(n.Nanosecond()/1000), 10)}
@@ -797,4 +818,142 @@ func keySlot(key string) int {
 		}
 	}
 	return int(crc16([]byte(key))) % 16384
+}
+
+var cacheHorizon = time.Date(2250, 1, 1, 0, 0, 0, 0, time.UTC)
+
+func miniCacheHarness() storetest.Harness[store.Cache] {
+	var mc *miniClock
+	newAt := func(t *testing.T, start time.Time) (store.Cache, store.Cache) {
+		t.Helper()
+		m := newMiniAt(t, start)
+		mc = &miniClock{m: m, now: start}
+		return cacheStore(t, m.Addr(), 0, "mgtest"), cacheStore(t, m.Addr(), 0, "mgtest")
+	}
+	return storetest.Harness[store.Cache]{
+		New: func(t *testing.T) (store.Cache, store.Cache) {
+			t.Helper()
+			return newAt(t, miniStart)
+		},
+		NewAt: newAt,
+		Advance: func(t *testing.T, d time.Duration) {
+			t.Helper()
+			mc.Advance(d)
+		},
+		Resolution: time.Microsecond,
+		Horizon:    cacheHorizon,
+	}
+}
+
+func injectedCacheHarness(addr func(t *testing.T) (string, int)) storetest.Harness[store.Cache] {
+	var fake *clock.Fake
+	build := func(t *testing.T, start time.Time) (store.Cache, store.Cache) {
+		t.Helper()
+		a, db := addr(t)
+		prefix := uniquePrefix(t)
+		raw := newTestClient(t, a, db)
+		fake = clock.NewFake(start)
+		sa := withInjectedClock(cacheStore(t, a, db, prefix), fake.Now)
+		sb := withInjectedClock(cacheStore(t, a, db, prefix), fake.Now)
+		t.Cleanup(func() { deletePrefix(t, raw, prefix) })
+		return sa, sb
+	}
+	return storetest.Harness[store.Cache]{
+		New: func(t *testing.T) (store.Cache, store.Cache) {
+			t.Helper()
+			return build(t, injectedStart())
+		},
+		NewAt: func(t *testing.T, start time.Time) (store.Cache, store.Cache) {
+			t.Helper()
+			if start.Before(injectedStart()) {
+				t.Fatalf("injected cache clock starts at %v, before %v", start, injectedStart())
+			}
+			return build(t, start)
+		},
+		Advance: func(t *testing.T, d time.Duration) {
+			t.Helper()
+			fake.Advance(d)
+		},
+		Resolution: time.Microsecond,
+		Horizon:    cacheHorizon,
+	}
+}
+
+func ckEntry(body string, tags ...string) *store.Entry {
+	return &store.Entry{
+		Status: 200,
+		Header: http.Header{"Content-Type": {"text/plain"}, "X-Body": {body}},
+		Body:   []byte(body),
+		Tags:   tags,
+	}
+}
+
+func ckGet(t *testing.T, s store.Cache, primary, sec string) store.Lookup {
+	t.Helper()
+	l, err := s.Get(context.Background(), primary, func([]string) (string, bool) { return sec, true })
+	if err != nil {
+		t.Fatalf("Get(%q): %v", primary, err)
+	}
+	return l
+}
+
+func ckFill(t *testing.T, s store.Cache, primary, sec string, names []string, e *store.Entry, ttl time.Duration) bool {
+	t.Helper()
+	l := ckGet(t, s, primary, sec)
+	stored, err := s.Put(context.Background(), l.Token, primary, sec, names, e, ttl)
+	if err != nil {
+		t.Fatalf("Put(%q, %q): %v", primary, sec, err)
+	}
+	return stored
+}
+
+// ckKeys returns the sorted keys under prefix+":*".
+func ckKeys(t *testing.T, c goredis.UniversalClient, prefix string) []string {
+	t.Helper()
+	ctx := context.Background()
+	seen := make(map[string]bool)
+	var cursor uint64
+	for {
+		keys, next, err := c.Scan(ctx, cursor, prefix+":*", 1000).Result()
+		if err != nil {
+			t.Fatalf("scanning keys: %v", err)
+		}
+		for _, k := range keys {
+			seen[k] = true
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ckExpiryMs returns the absolute expiry of key in unix milliseconds (PEXPIRETIME), or -1 with no expiry.
+func ckExpiryMs(t *testing.T, c goredis.UniversalClient, key string) int64 {
+	t.Helper()
+	ms, err := c.Do(context.Background(), "PEXPIRETIME", key).Int64()
+	if err != nil {
+		t.Fatalf("PEXPIRETIME %s: %v", key, err)
+	}
+	return ms
+}
+
+// ckProxied builds a store on m through a respProxy. Slot co-location violations recorded by the proxy fail the test
+// at cleanup (D12b).
+func ckProxied(t *testing.T, m *miniredis.Miniredis, prefix string) (*Store, *respProxy) {
+	t.Helper()
+	p := newRespProxy(t, m.Addr())
+	s := cacheStore(t, p.Addr(), 0, prefix)
+	t.Cleanup(func() {
+		if v := p.Violations(); len(v) > 0 {
+			t.Errorf("slot co-location violations: %q", v)
+		}
+	})
+	return s, p
 }
