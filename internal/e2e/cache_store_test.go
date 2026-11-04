@@ -458,3 +458,174 @@ func TestCacheNoGoroutineLeak(t *testing.T) {
 
 	awaitGoroutinesSettled(t, "goroutines started by cache requests to exit", pre, base)
 }
+
+func TestInstancesShareCacheEntries(t *testing.T) {
+	t.Parallel()
+	n := newMemNetwork()
+	scr := &cacheScript{}
+	scr.set(http.StatusOK, http.Header{"Cache-Control": {"max-age=60"}}, "x")
+	be := n.serve(t, scr)
+	storeClk := clock.NewFake(cacheStart)
+	sc := teststore.NewSharedCache(storeClk, 1<<20)
+	t.Cleanup(func() { _ = sc.Close() })
+	spy := teststore.NewSpy()
+	doc := cacheGatewayDoc(be.URL, "stores:\n  - name: sc\n    type: test\ncache:\n  store: sc\n", cacheRouteYAML("r"))
+	gws, fakes := miInstances(t, n, 2, doc, cacheStart, 5*time.Hour, miSpyOption(spy, store.CapCache, nil, sc, nil))
+	a, b := gws[0], gws[1]
+
+	get := func(g *microgateway.Gateway, path string) *httptest.ResponseRecorder {
+		return cacheDo(g, http.MethodGet, "http://example.com"+path, nil)
+	}
+	expectHit := func(g *microgateway.Gateway, path, age string) {
+		t.Helper()
+		rec := get(g, path)
+		if st := cacheLast(t, rec); !st.Hit {
+			t.Fatalf("GET %s %+v, want hit", path, st)
+		}
+		if got := rec.Header().Get("Age"); got != age {
+			t.Fatalf("GET %s Age = %q, want %q", path, got, age)
+		}
+	}
+	expectMiss := func(g *microgateway.Gateway, path string) {
+		t.Helper()
+		if st := cacheLast(t, get(g, path)); st.Hit {
+			t.Fatalf("GET %s %+v, want miss", path, st)
+		}
+	}
+
+	for _, p := range []string{"/k1", "/k2"} {
+		if st := cacheLast(t, get(a, p)); !st.Stored {
+			t.Fatalf("fill %s %+v, want stored", p, st)
+		}
+	}
+	if scr.count() != 2 {
+		t.Fatalf("origin requests after fills = %d, want 2", scr.count())
+	}
+	if spy.Count("put") != 2 {
+		t.Fatalf("store puts after fills = %d, want 2", spy.Count("put"))
+	}
+
+	storeClk.Advance(10 * time.Second)
+	expectHit(a, "/k1", "10")
+	expectHit(b, "/k1", "10")
+
+	fakes[0].Advance(7 * time.Hour)
+	fakes[1].Advance(3 * time.Hour)
+	expectHit(a, "/k1", "10")
+	expectHit(b, "/k1", "10")
+
+	storeClk.Advance(50*time.Second - time.Nanosecond)
+	if st := cacheLast(t, get(b, "/k1")); !st.Hit {
+		t.Fatalf("GET /k1 at expiry minus 1ns %+v, want hit", st)
+	}
+	if scr.count() != 2 {
+		t.Fatalf("origin requests before expiry = %d, want 2", scr.count())
+	}
+
+	storeClk.Advance(time.Nanosecond)
+	expectMiss(a, "/k1")
+	if scr.count() != 3 {
+		t.Fatalf("origin requests at expiry = %d, want 3", scr.count())
+	}
+
+	storeClk.Advance(time.Nanosecond)
+	expectMiss(b, "/k2")
+	if scr.count() != 4 {
+		t.Fatalf("origin requests after expiry = %d, want 4", scr.count())
+	}
+}
+
+func TestInstancesSharePurgeState(t *testing.T) {
+	t.Parallel()
+	for _, typ := range psSelectors {
+		for _, soft := range []bool{false, true} {
+			t.Run(typ+"/"+ttlMode(soft), func(t *testing.T) {
+				t.Parallel()
+				n := newMemNetwork()
+				origin := newFlightOrigin()
+				origin.set(http.StatusOK, psOrigin(psETag), "old")
+				be := n.serve(t, origin)
+				sc := teststore.NewSharedCache(clock.NewFake(cacheStart), 1<<20)
+				t.Cleanup(func() { _ = sc.Close() })
+				doc := cacheSharedDoc(be.URL, purgeAdminYAML(purgeTokA), cacheRouteYAML("r"))
+				opt := cacheSharedOption("shared", sc)
+				gws, _ := miInstances(t, n, 3, doc, cacheStart, time.Hour, opt)
+				a, b, c := gws[0], gws[1], gws[2]
+
+				psFill(t, a, origin)
+				for _, g := range []*microgateway.Gateway{b, c} {
+					if st := purgeLast(t, purgeGet(t, g, psURL, nil)); !st.Hit {
+						t.Fatalf("instance before purge %+v, want hit", st)
+					}
+				}
+				rep := purgeOK(t, purgeDo(t, a, purgeTokA, psPurgeJSON(typ, soft)))
+				if rep.Type != typ || rep.Soft != soft || rep.Accepted != 1 || rep.Scope != "store" || rep.Affected == nil || *rep.Affected != 1 {
+					t.Fatalf("purge reply = %+v", rep)
+				}
+
+				late, _ := miInstances(t, n, 1, doc, cacheStart, time.Hour, opt)
+				d := late[0]
+
+				origin.set(http.StatusOK, psOrigin(psETag), "new")
+				_, c0, u0 := origin.counts()
+				origin.hold()
+				done := make(chan *http.Response, 3)
+				for _, g := range []*microgateway.Gateway{b, c, d} {
+					go func() { done <- purgeGet(t, g, psURL, nil) }()
+				}
+				for range 3 {
+					awaitSignal(t, origin.arrived, "purged entry request to reach the origin")
+				}
+				origin.release()
+				for range 3 {
+					resp, _ := testwait.Recv(t, "response after purge", done, nil)
+					st := purgeLast(t, resp)
+					body := psRead(t, resp)
+					if resp.StatusCode != http.StatusOK || body != "new" {
+						t.Fatalf("client response %d %q, want 200 new", resp.StatusCode, body)
+					}
+					if st.Hit {
+						t.Fatalf("status %+v after purge, want no hit", st)
+					}
+					psNotStale(t, st)
+					if soft && st.Fwd != httpcache.FwdStale {
+						t.Fatalf("status %+v after soft purge, want fwd=stale", st)
+					}
+				}
+				_, c1, u1 := origin.counts()
+				if soft {
+					if c1-c0 != 3 || u1-u0 != 0 {
+						t.Fatalf("origin after soft purge conditional=%d unconditional=%d, want 3 and 0", c1-c0, u1-u0)
+					}
+				} else if c1-c0 != 0 || u1-u0 != 3 {
+					t.Fatalf("origin after hard purge conditional=%d unconditional=%d, want 0 and 3", c1-c0, u1-u0)
+				}
+			})
+		}
+	}
+
+	t.Run("memory caches are per instance", func(t *testing.T) {
+		t.Parallel()
+		n := newMemNetwork()
+		origin := newFlightOrigin()
+		origin.set(http.StatusOK, ttlOriginHeader("max-age=60"), "body")
+		be := n.serve(t, origin)
+		doc := cacheGatewayDoc(be.URL, purgeAdminYAML(purgeTokA), cacheRouteYAML("r"))
+		gws, _ := miInstances(t, n, 2, doc, cacheStart, time.Hour)
+		a, b := gws[0], gws[1]
+		for _, g := range gws {
+			if st := purgeLast(t, purgeGet(t, g, psURL, nil)); !st.Stored {
+				t.Fatalf("fill %+v, want stored", st)
+			}
+		}
+		if got := purgeOK(t, purgeDo(t, a, purgeTokA, psPurgeJSON("url", false))); got.Scope != "instance" {
+			t.Fatalf("purge scope %q, want instance", got.Scope)
+		}
+		if st := purgeLast(t, purgeGet(t, a, psURL, nil)); st.Hit {
+			t.Fatalf("A after purge %+v, want miss", st)
+		}
+		if st := purgeLast(t, purgeGet(t, b, psURL, nil)); !st.Hit {
+			t.Fatalf("B after purge to A %+v, want hit", st)
+		}
+	})
+}
