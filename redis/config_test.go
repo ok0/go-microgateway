@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -20,6 +22,7 @@ import (
 	microgateway "github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/httpcache"
 	"github.com/ok0/go-microgateway/internal/leakcheck"
 	"github.com/ok0/go-microgateway/internal/testcert"
 	"github.com/ok0/go-microgateway/store"
@@ -573,7 +576,7 @@ func TestAuthAndDB(t *testing.T) {
 }
 
 func TestOptionCapabilities(t *testing.T) {
-	checkEq(t, "capabilities", capabilities, store.CapRateLimit)
+	checkEq(t, "capabilities", capabilities, store.CapRateLimit|store.CapCache)
 }
 
 func TestOptionYAML(t *testing.T) {
@@ -676,4 +679,158 @@ func TestReloadReuseAndRecreate(t *testing.T) {
 	}
 	checkEq(t, "second store closes once", built[1].closed.Load(), int32(1))
 	checkEq(t, "first store closes once", built[0].closed.Load(), int32(1))
+}
+
+func TestCacheStoreWiring(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "max-age=60")
+		_, _ = io.WriteString(w, "cached")
+	}))
+	t.Cleanup(origin.Close)
+	clk := clock.NewFake(miniStart)
+	remote := "192.0.2.10:4000"
+	const bothRoute = "  - name: both\n    match:\n      path: /both\n    upstream: up\n" +
+		"    rate_limit:\n      rate: 100\n      per: 1h\n      burst: 100\n      store: shared\n      store_timeout: 2s\n" +
+		"    cache:\n      enabled: true\n"
+	const cachedRoute = "  - name: cached\n    match:\n      path: /cached\n    upstream: up\n    cache:\n      enabled: true\n"
+	const extraRoute = "  - name: extra\n    match:\n      path: /extra\n    upstream: up\n"
+	wiring := func(addr, prefix, routes string) string {
+		doc := gwDoc(redisStoreYAML("shared", []string{addr}, "key_prefix: "+prefix+"\n", ""), routes, origin.URL)
+		return strings.Replace(doc, "listeners:\n", "cache:\n  store: shared\nlisteners:\n", 1)
+	}
+	lastStatus := func(t *testing.T, rec *httptest.ResponseRecorder) httpcache.Status {
+		t.Helper()
+		sts, err := httpcache.ParseStatus(strings.Join(rec.Header().Values("Cache-Status"), ", "))
+		if err != nil || len(sts) == 0 {
+			t.Fatalf("Cache-Status %q: %v", rec.Header().Values("Cache-Status"), err)
+		}
+		return sts[len(sts)-1]
+	}
+
+	t.Run("one store serves rate limit and cache", func(t *testing.T) {
+		m := newMini(t)
+		built := 0
+		counting := func(p microgateway.StoreParams) (store.Backend, error) {
+			built++
+			return factory(p)
+		}
+		g, err := newGateway(t, wiring(m.Addr(), "mgtest", bothRoute), false, clk, nil,
+			microgateway.WithStoreType("redis", capabilities, counting))
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkEq(t, "factory calls after build", built, 1)
+
+		miss := doGet(g, "/both", remote)
+		checkEq(t, "miss status", miss.Code, http.StatusOK)
+		if st := lastStatus(t, miss); st.Hit || !st.Stored {
+			t.Fatalf("first Cache-Status %+v, want a stored miss", st)
+		}
+		hit := doGet(g, "/both", remote)
+		checkEq(t, "hit status", hit.Code, http.StatusOK)
+		if st := lastStatus(t, hit); !st.Hit {
+			t.Fatalf("second Cache-Status %+v, want a hit", st)
+		}
+		checkEq(t, "hit body", hit.Body.String(), "cached")
+		checkEq(t, "factory calls after requests", built, 1)
+
+		var rl, c int
+		for _, k := range m.Keys() {
+			switch {
+			case strings.HasPrefix(k, "mgtest:rl:{"):
+				rl++
+			case strings.HasPrefix(k, "mgtest:c:"):
+				c++
+			default:
+				t.Errorf("key %q is under neither :rl: nor :c:", k)
+			}
+		}
+		checkEq(t, "rate-limit keys written", rl > 0, true)
+		checkEq(t, "cache keys written", c > 0, true)
+	})
+
+	t.Run("rate-limit-only type rejected as cache store", func(t *testing.T) {
+		plain := func(microgateway.StoreParams) (store.Backend, error) {
+			return nil, errors.New("unexpected build")
+		}
+		doc := gwDoc("  - name: other\n    type: plain\n", cachedRoute, origin.URL)
+		doc = strings.Replace(doc, "listeners:\n", "cache:\n  store: other\nlisteners:\n", 1)
+		_, err := newGateway(t, doc, false, clk, nil, microgateway.WithStoreType("plain", store.CapRateLimit, plain))
+		var ve *config.ValidationError
+		if !errors.As(err, &ve) {
+			t.Fatalf("error %v, want a *config.ValidationError", err)
+		}
+		line := 1 + strings.Count(doc[:strings.Index(doc, "  store: other")], "\n")
+		want := config.FieldError{Path: "cache.store", Line: line, Msg: `store "other" (type "plain") does not support caching`}
+		checkEq(t, "errors", slices.Equal(ve.Errors, []config.FieldError{want}), true)
+	})
+
+	t.Run("validate and load do not connect", func(t *testing.T) {
+		addr, accepted := blackhole(t)
+		doc := wiring(addr, "mgtest", bothRoute)
+		cfg, err := config.Parse([]byte(doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := microgateway.Validate(cfg, Option()); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if _, err := newGateway(t, doc, true, clk, nil); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-accepted:
+			t.Fatal("a connection was opened before the first request")
+		default:
+		}
+	})
+
+	t.Run("reload reuses an unchanged store and recreates a changed one", func(t *testing.T) {
+		m := newMini(t)
+		var built []*countingStore
+		counting := func(p microgateway.StoreParams) (store.Backend, error) {
+			b, err := factory(p)
+			if err != nil {
+				return nil, err
+			}
+			c := &countingStore{Store: b.(*Store)}
+			built = append(built, c)
+			return c, nil
+		}
+		routes := bothRoute + cachedRoute
+		g, err := newGateway(t, wiring(m.Addr(), "first", routes), false, clk, nil,
+			microgateway.WithStoreType("redis", capabilities, counting))
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkEq(t, "factory calls after build", len(built), 1)
+
+		if err := g.ReloadYAML([]byte(wiring(m.Addr(), "first", routes+extraRoute))); err != nil {
+			t.Fatal(err)
+		}
+		checkEq(t, "factory calls after unrelated reload", len(built), 1)
+		checkEq(t, "first store closes after unrelated reload", built[0].closed.Load(), int32(0))
+
+		if err := g.ReloadYAML([]byte(wiring(m.Addr(), "second", routes+extraRoute))); err != nil {
+			t.Fatal(err)
+		}
+		checkEq(t, "factory calls after prefix change", len(built), 2)
+		checkEq(t, "first store closes after prefix change", built[0].closed.Load(), int32(1))
+		checkEq(t, "second store closes before Close", built[1].closed.Load(), int32(0))
+		rec := doGet(g, "/both", remote)
+		checkEq(t, "status under new prefix", rec.Code, http.StatusOK)
+		found := false
+		for _, k := range m.Keys() {
+			if strings.HasPrefix(k, "second:c:") {
+				found = true
+			}
+		}
+		checkEq(t, "cache key under new prefix", found, true)
+
+		if err := g.Close(); err != nil {
+			t.Fatal(err)
+		}
+		checkEq(t, "second store closes once", built[1].closed.Load(), int32(1))
+		checkEq(t, "first store closes once", built[0].closed.Load(), int32(1))
+	})
 }

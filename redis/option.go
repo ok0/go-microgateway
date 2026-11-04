@@ -8,7 +8,7 @@ import (
 	"github.com/ok0/go-microgateway/store"
 )
 
-const capabilities = store.CapRateLimit
+const capabilities = store.CapRateLimit | store.CapCache
 
 func factory(p microgateway.StoreParams) (store.Backend, error) {
 	if p.Redis == nil {
@@ -21,9 +21,9 @@ func factory(p microgateway.StoreParams) (store.Backend, error) {
 	return s, nil
 }
 
-// Option returns a microgateway.Option that registers the store type redis for rate limiting. The gateway builds one
-// Store per referenced store entry and closes it when the entry is no longer used. The dial, read and write limits of
-// each Store run on the gateway's clock.
+// Option returns a microgateway.Option that registers the store type redis for rate limiting and the response cache.
+// The gateway builds one Store per referenced store entry and closes it when the entry is no longer used. The dial,
+// read and write limits of each Store run on the gateway's clock.
 func Option() microgateway.Option {
 	return microgateway.WithStoreType("redis", capabilities, factory)
 }
