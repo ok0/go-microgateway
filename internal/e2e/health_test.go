@@ -7,6 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -1238,4 +1241,271 @@ func TestHundredReloadsNoGoroutineLeak(t *testing.T) {
 		t.Fatalf("pending timers after reloads = %d, want %d live probers", got, len(hosts))
 	}
 	r.tick(2, 0)
+}
+
+const (
+	hgHealthy = "microgateway_upstream_host_healthy"
+	hgBreaker = "microgateway_circuit_breaker_state"
+)
+
+func hgDoc(upstreamName string, hosts ...string) string {
+	var b strings.Builder
+	b.WriteString("version: 1\n")
+	b.WriteString(listenersYAML)
+	fmt.Fprintf(&b, "upstreams:\n  - name: %s\n", upstreamName)
+	b.WriteString(miTimeouts + miRR + "    circuit_breaker:\n" + rsBreaker)
+	b.WriteString("    hosts:\n")
+	for _, h := range hosts {
+		fmt.Fprintf(&b, "      - url: %q\n", h)
+	}
+	fmt.Fprintf(&b, "routes:\n  - name: all\n    upstream: %s\n", upstreamName)
+	return b.String()
+}
+
+func hgSeries(t *testing.T, g *microgateway.Gateway, upstreamName string) []string {
+	t.Helper()
+	var out []string
+	for _, line := range strings.Split(metricsText(t, g), "\n") {
+		for _, family := range []string{hgHealthy, hgBreaker} {
+			rest, ok := strings.CutPrefix(line, family+`{upstream="`+upstreamName+`",host="`)
+			if ok && !strings.HasPrefix(rest, `"`) {
+				out = append(out, line)
+			}
+		}
+	}
+	return out
+}
+
+func hgHas(t *testing.T, g *microgateway.Gateway, family, host string) bool {
+	t.Helper()
+	return metricsHasPrefix(metricsText(t, g), series(family, "upstream", "up", "host", host)+" ")
+}
+
+func metricsHasPrefix(body, prefix string) bool {
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func hostLabel(t *testing.T, raw string) string {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u.Host
+}
+
+func hgReload(t *testing.T, g *microgateway.Gateway, doc string) {
+	t.Helper()
+	if err := g.ReloadYAML([]byte(doc)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func hgLiveOne(t *testing.T, g *microgateway.Gateway) {
+	t.Helper()
+	eventually(t, "one live generation", func() bool { return inspect(g).LiveGenerations == 1 }, func() string {
+		return fmt.Sprintf("LiveGenerations=%d", inspect(g).LiveGenerations)
+	})
+}
+
+func TestHostGaugesPrunedAfterDrain(t *testing.T) {
+	n := newMemNetwork()
+	a := countedBackendFor(t, n, "a")
+	b := countedBackendFor(t, n, "b")
+	aHost := hostLabel(t, a.URL)
+	bHost := hostLabel(t, b.URL)
+	docAB := hgDoc("up", a.URL, b.URL)
+	docA := hgDoc("up", a.URL)
+	fake := clock.NewFake(healthEpoch)
+	g := n.gateway(t, docAB, withClock(fake))
+	ts := n.serve(t, g)
+	client := n.client(t, nil)
+
+	if got := statusOf(client, ts.URL+"/one"); got != http.StatusOK {
+		t.Fatalf("/one status = %d, want 200", got)
+	}
+	held := startGet(client, ts.URL+"/hold")
+	awaitSignal(t, b.arrived, "held request to reach b")
+
+	hgReload(t, g, docA)
+	if live := inspect(g).LiveGenerations; live != 2 {
+		t.Fatalf("LiveGenerations = %d, want 2 while the held request runs", live)
+	}
+	for _, family := range []string{hgHealthy, hgBreaker} {
+		if !hgHas(t, g, family, bHost) {
+			t.Fatalf("%s for b is missing while its held request runs", family)
+		}
+	}
+	if !hgHas(t, g, hgHealthy, bHost) || !hgHas(t, g, hgBreaker, bHost) {
+		t.Fatal("b series are missing on the second scrape while its held request runs")
+	}
+
+	b.releaseHold()
+	if got := awaitGet(t, held).status; got != http.StatusOK {
+		t.Fatalf("held status = %d, want 200", got)
+	}
+	hgLiveOne(t, g)
+	for _, family := range []string{hgHealthy, hgBreaker} {
+		if hgHas(t, g, family, bHost) {
+			t.Fatalf("%s for b survives the drain", family)
+		}
+		if !hgHas(t, g, family, aHost) {
+			t.Fatalf("%s for a is missing after the drain", family)
+		}
+	}
+	for _, line := range hgSeries(t, g, "up") {
+		if strings.Contains(line, `host="`+bHost+`"`) {
+			t.Fatalf("series for b survives on another scrape: %s", line)
+		}
+	}
+	if v := metricValue(t, metricsText(t, g), series("microgateway_upstream_attempts_total", "upstream", "up", "host", bHost, "outcome", "success")); v != 1 {
+		t.Fatalf("attempts success for b = %v, want 1", v)
+	}
+
+	hgReload(t, g, docAB)
+	body := metricsText(t, g)
+	if !metricsHasLine(body, series(hgHealthy, "upstream", "up", "host", bHost)+" 1") {
+		t.Fatal("re-added b host_healthy is not 1")
+	}
+	if !metricsHasLine(body, series(hgBreaker, "upstream", "up", "host", bHost)+" 0") {
+		t.Fatal("re-added b breaker_state is not 0")
+	}
+
+	hgReload(t, g, hgDoc("up2", a.URL))
+	hgLiveOne(t, g)
+	body = metricsText(t, g)
+	for _, prefix := range []string{hgHealthy + `{upstream="up",`, hgBreaker + `{upstream="up",`, `microgateway_upstream_panic_mode{upstream="up"}`} {
+		if metricsHasPrefix(body, prefix) {
+			t.Fatalf("series %s survive the removal of upstream up", prefix)
+		}
+	}
+	if !metricsHasPrefix(body, `microgateway_upstream_attempts_total{upstream="up",`) {
+		t.Fatal("attempts counters of upstream up are gone")
+	}
+}
+
+func TestHostGaugesPrunedOnDNSRefresh(t *testing.T) {
+	n := newMemNetwork()
+	for _, addr := range []string{"10.0.0.1:8080", "10.0.0.2:8080"} {
+		n.serveAt(t, addr, echoHandler(addr))
+	}
+	fr := &fakeResolver{}
+	fr.set([]string{"10.0.0.1", "10.0.0.2"})
+	doc := "version: 1\n" + listenersYAML + "upstreams:\n  - name: up\n" + miTimeouts +
+		"    circuit_breaker:\n" + rsBreaker +
+		"    dns:\n      hostname: svc.internal\n      port: 8080\n      scheme: http\n      refresh_interval: 5s\n" +
+		"routes:\n  - name: all\n    upstream: up\n"
+
+	fake := clock.NewFake(time.Unix(0, 0))
+	g := n.gateway(t, doc, withClock(fake), withResolver(fr))
+
+	initial := []string{"http://10.0.0.1:8080", "http://10.0.0.2:8080"}
+	if got := miHostURLs(t, g); !slices.Equal(got, initial) {
+		t.Fatalf("initial hosts = %v, want %v", got, initial)
+	}
+	for _, host := range []string{"10.0.0.1:8080", "10.0.0.2:8080"} {
+		for _, family := range []string{hgHealthy, hgBreaker} {
+			if !hgHas(t, g, family, host) {
+				t.Fatalf("%s for %s is missing before the refresh", family, host)
+			}
+		}
+	}
+
+	fake.BlockUntil(1)
+	fr.set([]string{"10.0.0.1"})
+	fake.Advance(5 * time.Second)
+	one := []string{"http://10.0.0.1:8080"}
+	eventually(t, "the gateway to adopt the one-host DNS set", func() bool { return slices.Equal(miHostURLs(t, g), one) }, func() string { return fmt.Sprint(miHostURLs(t, g)) })
+	eventually(t, "the series of the removed DNS host to be pruned", func() bool {
+		return !hgHas(t, g, hgHealthy, "10.0.0.2:8080") && !hgHas(t, g, hgBreaker, "10.0.0.2:8080")
+	}, func() string { return "series of 10.0.0.2:8080 still present" })
+	for _, family := range []string{hgHealthy, hgBreaker} {
+		if !hgHas(t, g, family, "10.0.0.1:8080") {
+			t.Fatalf("%s for the remaining host 10.0.0.1:8080 is missing", family)
+		}
+	}
+	if !metricsHasPrefix(metricsText(t, g), series("microgateway_upstream_attempts_total", "upstream", "up", "host", "10.0.0.2:8080", "outcome", "success")+" ") {
+		t.Fatal("attempts counter of the removed host 10.0.0.2:8080 is gone")
+	}
+
+	fr.set([]string{"10.0.0.1", "10.0.0.2"})
+	fake.BlockUntil(1)
+	fake.Advance(5 * time.Second)
+	eventually(t, "the gateway to adopt the two-host DNS set", func() bool { return slices.Equal(miHostURLs(t, g), initial) }, func() string { return fmt.Sprint(miHostURLs(t, g)) })
+	eventually(t, "the re-added host to report healthy with a closed breaker", func() bool {
+		body := metricsText(t, g)
+		return metricsHasLine(body, series(hgHealthy, "upstream", "up", "host", "10.0.0.2:8080")+" 1") &&
+			metricsHasLine(body, series(hgBreaker, "upstream", "up", "host", "10.0.0.2:8080")+" 0")
+	}, func() string { return "series of 10.0.0.2:8080 not yet healthy and closed" })
+}
+
+func TestHostGaugesBoundedAcrossReloads(t *testing.T) {
+	n := newMemNetwork()
+	a := countedBackendFor(t, n, "a")
+	b := countedBackendFor(t, n, "b")
+	docAB := hgDoc("up", a.URL, b.URL)
+	docA := hgDoc("up", a.URL)
+	g := n.gateway(t, docAB, withClock(clock.NewFake(healthEpoch)))
+
+	for i := range 1000 {
+		if i%2 == 0 {
+			hgReload(t, g, docA)
+		} else {
+			hgReload(t, g, docAB)
+		}
+	}
+	hgLiveOne(t, g)
+	if got := len(hgSeries(t, g, "up")); got != 4 {
+		t.Fatalf("host series after 1000 reloads = %d, want 4", got)
+	}
+
+	hgReload(t, g, docA)
+	hgLiveOne(t, g)
+	if got := len(hgSeries(t, g, "up")); got != 2 {
+		t.Fatalf("host series after the final reload = %d, want 2", got)
+	}
+}
+
+func heapInUse() uint64 {
+	runtime.GC()
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	return ms.HeapInuse
+}
+
+func TestHostGaugesChurnLoad(t *testing.T) {
+	if testing.Short() || os.Getenv("MICROGATEWAY_LOAD") == "" {
+		t.Skip("set MICROGATEWAY_LOAD=1")
+	}
+	n := newMemNetwork()
+	a := countedBackendFor(t, n, "a")
+	b := countedBackendFor(t, n, "b")
+	docAB := hgDoc("up", a.URL, b.URL)
+	docA := hgDoc("up", a.URL)
+	g := n.gateway(t, docAB, withClock(clock.NewFake(healthEpoch)))
+
+	var base uint64
+	for i := range 100000 {
+		if i%2 == 0 {
+			hgReload(t, g, docA)
+		} else {
+			hgReload(t, g, docAB)
+		}
+		if i+1 == 10000 {
+			base = heapInUse()
+		}
+	}
+	hgLiveOne(t, g)
+	if got := len(hgSeries(t, g, "up")); got != 4 {
+		t.Fatalf("host series after 100000 reloads = %d, want 4", got)
+	}
+	limit := base*11/10 + 1<<20
+	if end := heapInUse(); end > limit {
+		t.Fatalf("HeapInuse after 100000 reloads = %d, want at most %d", end, limit)
+	}
 }
