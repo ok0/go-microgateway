@@ -30,7 +30,7 @@ type Options struct {
 	Logger *slog.Logger
 }
 
-// Store is a Redis backed store.RateLimiter. It is safe for concurrent use.
+// Store is a Redis backed store.RateLimiter and store.Cache. It is safe for concurrent use.
 // A Store holds no secret: credentials stay inside the client.
 type Store struct {
 	c         goredis.UniversalClient
@@ -39,10 +39,17 @@ type Store struct {
 	logger    *slog.Logger
 	sc        scriptSet
 	clockArgs func() []any
+	allowUs   int64
+	hook      func(hookPoint)
 	closed    atomic.Bool
 }
 
 var _ store.RateLimiter = (*Store)(nil)
+var _ store.Cache = (*Store)(nil)
+
+// clusterSkewUs is the allowance, in microseconds, for clock skew between the nodes of a cluster. It is added to the
+// lifetimes of keys whose slot may sit on another node's clock.
+const clusterSkewUs = 1_000_000
 
 // New returns a Store that uses c. New panics if c is nil, if the key prefix
 // contains '{' or '}', or if the prefix is empty after defaulting. New never
@@ -66,13 +73,17 @@ func New(c goredis.UniversalClient, o Options) *Store {
 }
 
 func newStore(c goredis.UniversalClient, owned bool, prefix string, logger *slog.Logger) *Store {
-	return &Store{
+	s := &Store{
 		c:      c,
 		owned:  owned,
 		prefix: prefix,
 		logger: logger,
 		sc:     serverScripts,
 	}
+	if _, ok := c.(*goredis.ClusterClient); ok {
+		s.allowUs = clusterSkewUs
+	}
+	return s
 }
 
 func (s *Store) keyFor(key string, a store.Algorithm) string {
@@ -119,9 +130,9 @@ func (s *Store) Take(ctx context.Context, key string, l store.Limit) (store.Deci
 	if s.clockArgs != nil {
 		args = append(args, s.clockArgs()...)
 	}
-	res, err := s.run(ctx, script, s.keyFor(key, l.Algorithm), args)
+	res, err := s.run(ctx, script, []string{s.keyFor(key, l.Algorithm)}, args)
 	if err != nil {
-		return store.Decision{}, s.fail(ctx, err)
+		return store.Decision{}, s.fail(ctx, "take", err)
 	}
 	d, ok := decode(res, limit)
 	if !ok {
@@ -130,27 +141,36 @@ func (s *Store) Take(ctx context.Context, key string, l store.Limit) (store.Deci
 	return d, nil
 }
 
-// run runs script on key with args and returns its reply. go-redis does not watch a context during socket I/O, so
-// when ctx can end, run waits for the reply or for the end of ctx, whichever comes first. A call it abandons holds
-// its connection until the read or write limit of the store ends it.
-func (s *Store) run(ctx context.Context, script *goredis.Script, key string, args []any) (any, error) {
+// run runs script on keys with args and returns its reply.
+func (s *Store) run(ctx context.Context, script *goredis.Script, keys []string, args []any) (any, error) {
+	var res any
+	err := s.await(ctx, func(ctx context.Context) error {
+		var err error
+		res, err = script.Run(ctx, s.c, keys, args...).Result()
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// await runs f under ctx. go-redis does not watch a context during socket I/O, so when ctx can end, await waits for
+// f or for the end of ctx, whichever comes first. A call it abandons holds its connection until the read or write
+// limit of the store ends it. When ctx cannot end, await runs f on the calling goroutine.
+func (s *Store) await(ctx context.Context, f func(context.Context) error) error {
 	if ctx.Done() == nil {
-		return script.Run(ctx, s.c, []string{key}, args...).Result()
+		return f(ctx)
 	}
-	type reply struct {
-		res any
-		err error
-	}
-	ch := make(chan reply, 1)
+	ch := make(chan error, 1)
 	go func() {
-		res, err := script.Run(ctx, s.c, []string{key}, args...).Result()
-		ch <- reply{res, err}
+		ch <- f(ctx)
 	}()
 	select {
-	case r := <-ch:
-		return r.res, r.err
+	case err := <-ch:
+		return err
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return ctx.Err()
 	}
 }
 
@@ -188,20 +208,20 @@ func decode(res any, limit int64) (store.Decision, bool) {
 	}, true
 }
 
-// fail maps an error from the script call to the error returned by Take. A
-// context that ended for any reason other than its deadline is reported as its
-// own error. Deadline expiry and every other timeout wrap store.ErrUnavailable
-// with the category "timeout". Every other failure wraps store.ErrUnavailable
-// and carries only a category produced by describe.
-func (s *Store) fail(ctx context.Context, err error) error {
+// fail maps an error from the script call of operation op to the error returned
+// to the caller. A context that ended for any reason other than its deadline is
+// reported as its own error. Deadline expiry and every other timeout wrap
+// store.ErrUnavailable with the category "timeout". Every other failure wraps
+// store.ErrUnavailable and carries only a category produced by describe.
+func (s *Store) fail(ctx context.Context, op string, err error) error {
 	cerr := ctx.Err()
 	if cerr != nil && !errors.Is(cerr, context.DeadlineExceeded) {
 		return cerr
 	}
 	if cerr != nil {
-		return fmt.Errorf("redis: take: timeout: %w", store.ErrUnavailable)
+		return fmt.Errorf("redis: %s: timeout: %w", op, store.ErrUnavailable)
 	}
-	return fmt.Errorf("redis: take: %s: %w", describe(err), store.ErrUnavailable)
+	return fmt.Errorf("redis: %s: %s: %w", op, describe(err), store.ErrUnavailable)
 }
 
 // describe returns a fixed category for err. The category never includes the

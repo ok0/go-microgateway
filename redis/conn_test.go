@@ -385,7 +385,7 @@ func TestConnLimitsOnStoreClock(t *testing.T) {
 			t.Fatalf("write error %v, want a deadline error", err)
 		}
 		// The store reports this error as it reports every connection timeout.
-		checkTimeout(t, (&Store{}).fail(context.Background(), err))
+		checkTimeout(t, (&Store{}).fail(context.Background(), "take", err))
 	})
 	t.Run("healthy", func(t *testing.T) {
 		stillPending(t, "slow healthy call", healthyErr)
