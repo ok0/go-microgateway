@@ -13,6 +13,7 @@ import (
 
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/coalesce"
 	"github.com/ok0/go-microgateway/internal/httpcache"
 	"github.com/ok0/go-microgateway/internal/httperr"
 	"github.com/ok0/go-microgateway/internal/metrics"
@@ -28,21 +29,22 @@ const (
 	resultMiss        = "miss"
 	resultBypass      = "bypass"
 
-	storeStored        = "stored"
-	storeNotStorable   = "not_storable"
-	storeTooLarge      = "too_large"
-	storeAborted       = "aborted"
-	storeRefused       = "refused"
-	storeError         = "error"
-	opGet              = "get"
-	opPut              = "put"
-	opPurge            = "purge"
-	memoryStoreLabel   = "memory"
-	bypassStoreError   = "store-error"
-	bypassUpgrade      = "upgrade"
-	bypassRange        = "range"
-	bypassPrecondition = "precondition"
-	detailOnlyIfCache  = "only-if-cached"
+	storeStored           = "stored"
+	storeNotStorable      = "not_storable"
+	storeTooLarge         = "too_large"
+	storeAborted          = "aborted"
+	storeRefused          = "refused"
+	storeError            = "error"
+	opGet                 = "get"
+	opPut                 = "put"
+	opPurge               = "purge"
+	memoryStoreLabel      = "memory"
+	bypassStoreError      = "store-error"
+	bypassUpgrade         = "upgrade"
+	bypassRange           = "range"
+	bypassPrecondition    = "precondition"
+	detailOnlyIfCache     = "only-if-cached"
+	detailCoalesceTimeout = "coalesce-timeout"
 )
 
 // Metrics holds the families the stage reports to. Each vector is required.
@@ -53,6 +55,8 @@ type Metrics struct {
 	Stores *metrics.CounterVec
 	// StoreErrors counts failed store calls by operation: get, put or purge.
 	StoreErrors *metrics.CounterVec
+	// Coalesced counts requests served by a response another request fetched, by route. Required when Deps.Group is set.
+	Coalesced *metrics.CounterVec
 }
 
 // Deps holds the collaborators of one cache stage.
@@ -61,6 +65,8 @@ type Deps struct {
 	Route string
 	// Store is the store the stage reads and writes.
 	Store store.Cache
+	// Group shares one upstream fetch among concurrent requests for the same entry. Nil forwards every request on its own.
+	Group *coalesce.Group
 	// Guard bounds the calls to Store. Nil calls Store directly.
 	Guard *storeguard.Guard
 	// StoreName names a configured store in logs. It is empty for the built-in memory cache.
@@ -96,6 +102,11 @@ type stage struct {
 	onStoreError func(op string)
 	errs         *ErrorLog
 	clk          clock.Clock
+	route        string
+	logger       *slog.Logger
+	group        *coalesce.Group
+	waitTimeout  time.Duration
+	coalesced    *metrics.Counter
 	requests     map[string]*metrics.Counter
 	stores       map[string]*metrics.Counter
 	storeErrs    map[string]*metrics.Counter
@@ -112,6 +123,10 @@ func NewStage(rc config.RouteCache, gc config.Cache, d Deps) (middleware.Middlew
 		return nil, errors.New("cache: clock is nil")
 	case d.Metrics == nil || d.Metrics.Requests == nil || d.Metrics.Stores == nil || d.Metrics.StoreErrors == nil:
 		return nil, errors.New("cache: metrics are incomplete")
+	case d.Group != nil && d.Metrics.Coalesced == nil:
+		return nil, errors.New("cache: metrics are incomplete")
+	case d.Group != nil && gc.Coalescing.Timeout == nil:
+		return nil, errors.New("cache: coalescing.timeout is not set")
 	case d.Retain <= 0:
 		return nil, errors.New("cache: retain must be positive")
 	case gc.Name == nil:
@@ -164,9 +179,16 @@ func NewStage(rc config.RouteCache, gc config.Cache, d Deps) (middleware.Middlew
 		onStoreError: d.OnStoreError,
 		errs:         errs,
 		clk:          d.Clock,
+		route:        d.Route,
+		logger:       logger,
+		group:        d.Group,
 		requests:     make(map[string]*metrics.Counter, 5),
 		stores:       make(map[string]*metrics.Counter, 6),
 		storeErrs:    make(map[string]*metrics.Counter, 3),
+	}
+	if d.Group != nil {
+		s.waitTimeout = gc.Coalescing.Timeout.Std()
+		s.coalesced = d.Metrics.Coalesced.With(d.Route)
 	}
 	for _, res := range []string{resultHit, resultStale, resultRevalidated, resultMiss, resultBypass} {
 		s.requests[res] = d.Metrics.Requests.With(d.Route, res)
@@ -197,7 +219,7 @@ func (s *stage) handle(next http.Handler, w http.ResponseWriter, r *http.Request
 	}
 	primary := httpcache.PrimaryKey(r)
 	if len(primary) > store.MaxKeyBytes {
-		s.forward(next, w, r, fillInput{primary: primary, fwd: httpcache.FwdURIMiss, key: s.keyOf(primary, ""), forced: true}, true)
+		s.forwardAlone(next, w, r, fillInput{primary: primary, fwd: httpcache.FwdURIMiss, key: s.keyOf(primary, ""), forced: true})
 		return
 	}
 	ctx := r.Context()
@@ -247,7 +269,7 @@ func (s *stage) handle(next http.Handler, w http.ResponseWriter, r *http.Request
 		case len(lk.VaryNames) > 0:
 			fwd = httpcache.FwdVaryMiss
 		}
-		s.forward(next, w, r, fillInput{primary: primary, lk: lk, e: e, fwd: fwd, key: key}, true)
+		s.fetch(next, w, r, fillInput{primary: primary, lk: lk, e: e, fwd: fwd, key: key}, primary+"\x00"+selected)
 	}
 }
 

@@ -37,6 +37,17 @@ func BenchmarkCacheMiss(b *testing.B) {
 	}
 }
 
+func BenchmarkCoalescedMiss(b *testing.B) {
+	rg := benchRig(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("http://example.com/coalesced?i=%d", i), nil)
+		rec := httptest.NewRecorder()
+		rg.h.ServeHTTP(rec, req)
+	}
+}
+
 func BenchmarkCachePassthrough(b *testing.B) {
 	rg := benchRig(b)
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/pass", nil)

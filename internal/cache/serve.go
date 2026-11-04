@@ -49,6 +49,51 @@ func (s *stage) serve(w http.ResponseWriter, r *http.Request, e *httpcache.Entry
 	}
 }
 
+// serveShared serves a response shared by a leader. It reports false, writing nothing, when the variant of the
+// waiter differs from the leader's.
+func (s *stage) serveShared(w http.ResponseWriter, r *http.Request, in fillInput, sh *sharedResponse) bool {
+	h0 := sh.header
+	if sh.merged != nil {
+		h0 = sh.merged.Header
+	}
+	names, star := httpcache.VaryNames(h0)
+	sec, ok := httpcache.SecondaryKey(names, r)
+	if star || !ok || sec != sh.secondary {
+		return false
+	}
+	st := sh.st
+	st.Stored = false
+	st.Collapsed = true
+	st.Key = in.key
+	if sh.merged != nil {
+		s.serve(w, r, sh.merged, sh.age, st)
+		return true
+	}
+	h := w.Header()
+	for k, vs := range sh.header {
+		h[textproto.CanonicalMIMEHeaderKey(k)] = slices.Clone(vs)
+	}
+	if httpcache.NotModified(r, sh.header) {
+		keep := httpcache.NotModifiedHeader(sh.header)
+		for k := range sh.header {
+			if ck := textproto.CanonicalMIMEHeaderKey(k); keep[ck] == nil && ck != "Age" {
+				h.Del(ck)
+			}
+		}
+		h.Del("Content-Length")
+		appendCacheStatus(h, s.member(st))
+		w.WriteHeader(http.StatusNotModified)
+		return true
+	}
+	appendCacheStatus(h, s.member(st))
+	w.WriteHeader(sh.status)
+	bodyBearing := sh.status >= 200 && sh.status != http.StatusNoContent && sh.status != http.StatusNotModified
+	if r.Method != http.MethodHead && bodyBearing {
+		_, _ = w.Write(sh.body)
+	}
+	return true
+}
+
 // statusWriter appends one Cache-Status member to the response it wraps, before the first final header is written.
 type statusWriter struct {
 	http.ResponseWriter

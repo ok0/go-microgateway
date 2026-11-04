@@ -231,7 +231,7 @@ func TestAborted(t *testing.T) {
 		}
 	})
 	t.Run("client cancelled mid-body", func(t *testing.T) {
-		rg := newRig(t, rigOpts{})
+		rg := newRig(t, rigOpts{global: "coalescing:\n  enabled: false"})
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		rg.orig.setHandle(func(w http.ResponseWriter, r *http.Request) {
@@ -253,6 +253,31 @@ func TestAborted(t *testing.T) {
 		rg.orig.script(http.StatusOK, http.Header{"Cache-Control": {"max-age=60"}}, "x")
 		if hit(t, rg.get("/c", nil)) {
 			t.Fatal("cancelled fill was served")
+		}
+	})
+	t.Run("client cancelled mid-body while leading still stores", func(t *testing.T) {
+		rg := newRig(t, rigOpts{})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		rg.orig.setHandle(func(w http.ResponseWriter, r *http.Request) {
+			ex := reqctx.ExchangeFrom(r.Context())
+			ex.Begin()
+			w.Header().Set("Cache-Control", "max-age=60")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("first"))
+			cancel()
+			_, _ = w.Write([]byte("second"))
+			ex.Finish()
+		})
+		req := httptest.NewRequest(http.MethodGet, "http://example.com/c", nil).WithContext(ctx)
+		do(rg.h, req)
+		if rg.stores(storeStored) != 1 || len(rg.spy.callsOf(opPut)) != 1 {
+			t.Fatalf("stored=%v puts=%d", rg.stores(storeStored), len(rg.spy.callsOf(opPut)))
+		}
+		rg.orig.setHandle(nil)
+		rec := rg.get("/c", nil)
+		if !hit(t, rec) || rec.Body.String() != "firstsecond" {
+			t.Fatalf("next GET body %q", rec.Body.String())
 		}
 	})
 }

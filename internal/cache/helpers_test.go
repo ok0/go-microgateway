@@ -14,6 +14,7 @@ import (
 
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/coalesce"
 	"github.com/ok0/go-microgateway/internal/httpcache"
 	"github.com/ok0/go-microgateway/internal/memstore"
 	"github.com/ok0/go-microgateway/internal/metrics"
@@ -34,18 +35,20 @@ type spyCall struct {
 	Secondary string
 	VaryNames []string
 	Tags      []string
+	Header    http.Header
 	TTL       time.Duration
 	Stored    bool
 	Purge     store.Purge
 }
 
-// spy wraps a memstore cache, records every call and injects failures and hangs per operation.
+// spy wraps a memstore cache, records every call and injects failures, hangs and panics per operation.
 type spy struct {
 	inner  *memstore.Cache
 	mu     sync.Mutex
 	calls  []spyCall
 	errs   map[string]error
 	holds  map[string]chan struct{}
+	panics map[string]any
 	refuse bool
 }
 
@@ -53,7 +56,14 @@ func newSpy(tb testing.TB, clk clock.Clock) *spy {
 	tb.Helper()
 	inner := memstore.NewCache(memstore.CacheOptions{MaxBytes: 1 << 22, Clock: clk})
 	tb.Cleanup(func() { _ = inner.Close() })
-	return &spy{inner: inner, errs: map[string]error{}, holds: map[string]chan struct{}{}}
+	return &spy{inner: inner, errs: map[string]error{}, holds: map[string]chan struct{}{}, panics: map[string]any{}}
+}
+
+// panicOn makes every call of op panic.
+func (s *spy) panicOn(op string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.panics[op] = "secret panic text"
 }
 
 // Close satisfies store.Backend. The memory cache is closed by the test cleanup.
@@ -98,8 +108,11 @@ func (s *spy) setRefuse(v bool) {
 
 func (s *spy) gate(ctx context.Context, op string) error {
 	s.mu.Lock()
-	hold, err := s.holds[op], s.errs[op]
+	hold, err, p := s.holds[op], s.errs[op], s.panics[op]
 	s.mu.Unlock()
+	if p != nil {
+		panic(p)
+	}
 	if hold != nil {
 		select {
 		case <-hold:
@@ -122,6 +135,7 @@ func (s *spy) Put(ctx context.Context, tok store.FillToken, primary, secondary s
 	c := spyCall{Op: opPut, Primary: primary, Secondary: secondary, VaryNames: slices.Clone(varyNames), TTL: ttl}
 	if e != nil {
 		c.Tags = slices.Clone(e.Tags)
+		c.Header = e.Header.Clone()
 	}
 	if err := s.gate(ctx, opPut); err != nil {
 		s.record(c)
@@ -171,14 +185,25 @@ type origin struct {
 	body       []byte
 	omitFinish bool
 	handle     func(w http.ResponseWriter, r *http.Request)
+	gate       chan struct{}
+	arrived    chan struct{}
 }
 
 func (o *origin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	o.mu.Lock()
 	o.calls++
 	o.seen = append(o.seen, r.Header.Clone())
+	gate, arrived := o.gate, o.arrived
 	h, header, status, body, omit := o.handle, o.header, o.status, o.body, o.omitFinish
 	o.mu.Unlock()
+	if gate != nil {
+		arrived <- struct{}{}
+		select {
+		case <-gate:
+		case <-r.Context().Done():
+			return
+		}
+	}
 	if h != nil {
 		h(w, r)
 		return
@@ -228,7 +253,68 @@ func (o *origin) last() http.Header {
 	return o.seen[len(o.seen)-1]
 }
 
-// rigOpts selects the configuration and collaborators of a rig.
+// hold makes every origin call from now on wait until release is called or the request context ends. arrived
+// receives one value per held call before it waits. release is idempotent; it also lifts the hold for later calls.
+func (o *origin) hold() (arrived <-chan struct{}, release func()) {
+	gate := make(chan struct{})
+	ch := make(chan struct{}, 1024)
+	o.mu.Lock()
+	o.gate, o.arrived = gate, ch
+	o.mu.Unlock()
+	var once sync.Once
+	return ch, func() {
+		once.Do(func() {
+			o.mu.Lock()
+			if o.gate == gate {
+				o.gate, o.arrived = nil, nil
+			}
+			o.mu.Unlock()
+			close(gate)
+		})
+	}
+}
+
+// conditional returns how many origin requests carried If-None-Match or If-Modified-Since.
+func (o *origin) conditional() int {
+	return o.countSeen(true)
+}
+
+// unconditional returns how many origin requests carried neither If-None-Match nor If-Modified-Since.
+func (o *origin) unconditional() int {
+	return o.countSeen(false)
+}
+
+func (o *origin) countSeen(conditional bool) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	n := 0
+	for _, h := range o.seen {
+		if (h.Get("If-None-Match") != "" || h.Get("If-Modified-Since") != "") == conditional {
+			n++
+		}
+	}
+	return n
+}
+
+// parallel runs f(i) for i in [0, n) in n goroutines. The returned channel is closed when all of them returned.
+func parallel(n int, f func(i int)) <-chan struct{} {
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := range n {
+		go func() {
+			defer wg.Done()
+			f(i)
+		}()
+	}
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	return done
+}
+
+// rigOpts selects the configuration and collaborators of a rig. wrap, when set, is applied outside the stage.
 type rigOpts struct {
 	route        string
 	global       string
@@ -238,6 +324,8 @@ type rigOpts struct {
 	credential   func(*http.Request) bool
 	onStoreError func(op string)
 	errs         *ErrorLog
+	logger       *slog.Logger
+	wrap         func(http.Handler) http.Handler
 }
 
 // rig is one cache stage in front of a scripted origin.
@@ -248,6 +336,7 @@ type rig struct {
 	mets  *Metrics
 	orig  *origin
 	guard *storeguard.Guard
+	group *coalesce.Group
 	h     http.Handler
 }
 
@@ -274,8 +363,12 @@ func newRig(tb testing.TB, o rigOpts) *rig {
 		Errors:       o.errs,
 		Clock:        clk,
 		Metrics:      mets,
+		Logger:       o.logger,
 	}
-	r := &rig{tb: tb, clk: clk, spy: sp, mets: mets, orig: orig}
+	if *gc.Coalescing.Enabled {
+		d.Group = coalesce.New(*gc.Coalescing.MaxKeys, *gc.Coalescing.MaxWaiters, clk)
+	}
+	r := &rig{tb: tb, clk: clk, spy: sp, mets: mets, orig: orig, group: d.Group}
 	if o.guard {
 		g, err := storeguard.New("shared", storeguard.Settings{ConsecutiveFailures: 2, OpenTimeout: time.Second, MaxInflight: 16}, clk, nil)
 		if err != nil {
@@ -290,6 +383,9 @@ func newRig(tb testing.TB, o rigOpts) *rig {
 		tb.Fatal(err)
 	}
 	r.h = mw(orig)
+	if o.wrap != nil {
+		r.h = o.wrap(r.h)
+	}
 	return r
 }
 
@@ -339,7 +435,11 @@ func newMetrics(tb testing.TB, reg *metrics.Registry) *Metrics {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	return &Metrics{Requests: req, Stores: stores, StoreErrors: storeErrs}
+	coalesced, err := reg.Counter("microgateway_cache_coalesced_total", "Cache requests served by another request's upstream fetch.", "route")
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return &Metrics{Requests: req, Stores: stores, StoreErrors: storeErrs, Coalesced: coalesced}
 }
 
 // get serves a GET for path with the given request header through the rig.
@@ -365,6 +465,10 @@ func (r *rig) stores(result string) float64 {
 
 func (r *rig) storeErrs(op string) float64 {
 	return r.mets.StoreErrors.With(op).Value()
+}
+
+func (r *rig) coalesced() float64 {
+	return r.mets.Coalesced.With(testRoute).Value()
 }
 
 func do(h http.Handler, req *http.Request) *httptest.ResponseRecorder {

@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ok0/go-microgateway/internal/coalesce"
 	"github.com/ok0/go-microgateway/internal/httpcache"
 	"github.com/ok0/go-microgateway/internal/reqctx"
 	"github.com/ok0/go-microgateway/store"
@@ -19,6 +20,25 @@ type fillInput struct {
 	fwd     string
 	key     string
 	forced  bool
+	detail  string
+}
+
+// fetch describes how one forward runs. ctx is the upstream request context: the request context unless the forward
+// is detached. lead ignores client write errors and keeps buffering after the client left. call is completed early
+// with errNotShared when the response cannot be shared. sent records that a final header reached the client.
+type fetch struct {
+	ctx  context.Context
+	lead bool
+	call *coalesce.Call
+	sent bool
+}
+
+// outcome reports one forward. result is the request result to count, shared the response to share with waiters
+// (nil when it is not shareable or not complete), and stored the store outcome, already counted.
+type outcome struct {
+	result string
+	shared *sharedResponse
+	stored string
 }
 
 // fillWriter is the response writer the origin writes to during a forward. It forwards every byte to the client
@@ -32,6 +52,9 @@ type fillWriter struct {
 	in          fillInput
 	conditional bool
 	requestTime time.Time
+	f           *fetch
+	outer       http.Header
+	clientGone  bool
 
 	responseTime time.Time
 	final        bool
@@ -44,6 +67,9 @@ type fillWriter struct {
 	notStorable bool
 	tooLarge    bool
 	buffering   bool
+	shareable   bool
+	shareHdr    http.Header
+	member      httpcache.Status
 	ttl         time.Duration
 	tags        []string
 	stored      http.Header
@@ -54,7 +80,7 @@ type fillWriter struct {
 	buf         []byte
 }
 
-func (s *stage) newFill(w http.ResponseWriter, r *http.Request, in fillInput, conditional bool) *fillWriter {
+func (s *stage) newFill(w http.ResponseWriter, r *http.Request, in fillInput, conditional bool, f *fetch) *fillWriter {
 	return &fillWriter{
 		s:           s,
 		w:           w,
@@ -63,14 +89,17 @@ func (s *stage) newFill(w http.ResponseWriter, r *http.Request, in fillInput, co
 		in:          in,
 		conditional: conditional,
 		requestTime: s.clk.Now(),
+		f:           f,
+		outer:       w.Header().Clone(),
 		maxBody:     s.maxBody,
 	}
 }
 
 // forward sends the request to the origin through next and settles the response. A revalidate forward is
 // conditional when the stored entry carries a validator. A conditional forward that receives 304 refreshes the
-// stored entry; when that is not possible the request is forwarded again, unconditionally.
-func (s *stage) forward(next http.Handler, w http.ResponseWriter, r *http.Request, in fillInput, revalidate bool) {
+// stored entry; when that is not possible the request is forwarded again, unconditionally. No request is counted
+// here; the caller counts outcome.result.
+func (s *stage) forward(next http.Handler, w http.ResponseWriter, r *http.Request, in fillInput, revalidate bool, f *fetch) outcome {
 	fr, conditional := r, false
 	if revalidate {
 		if c := httpcache.Conditional(r, in.e); c != nil {
@@ -78,18 +107,21 @@ func (s *stage) forward(next http.Handler, w http.ResponseWriter, r *http.Reques
 		}
 	}
 	ex := &reqctx.Exchange{}
-	fr = fr.WithContext(reqctx.WithExchange(fr.Context(), ex))
-	fw := s.newFill(w, r, in, conditional)
+	fr = fr.WithContext(reqctx.WithExchange(f.ctx, ex))
+	fw := s.newFill(w, r, in, conditional, f)
 	fw.run(next, fr)
 	if fw.swallowed {
-		if s.refresh(w, r, fw) {
-			return
+		if o, ok := s.refresh(w, r, fw); ok {
+			return o
 		}
-		s.forward(next, w, r, in, false)
-		return
+		return s.forward(next, w, r, in, false, f)
 	}
-	s.settle(r, fw, ex)
-	s.count(resultMiss)
+	o := outcome{result: resultMiss}
+	if fw.shareable && !fw.tooLarge && fw.complete(ex) {
+		o.shared = s.share(r, &sharedResponse{status: fw.code, header: fw.shareHdr, body: fw.buf, result: resultMiss, st: fw.member})
+	}
+	o.stored = s.settle(fw, ex)
+	return o
 }
 
 // run calls the origin. A panic marks the fill aborted and is propagated.
@@ -98,7 +130,6 @@ func (fw *fillWriter) run(next http.Handler, fr *http.Request) {
 	defer func() {
 		if !done {
 			fw.s.countStore(storeAborted)
-			fw.s.count(resultMiss)
 		}
 	}()
 	next.ServeHTTP(fw, fr)
@@ -129,10 +160,15 @@ func (fw *fillWriter) WriteHeader(code int) {
 	if fw.conditional && code == http.StatusNotModified {
 		fw.swallowed = true
 		fw.h304 = fw.hdr.Clone()
+		dropOuter(fw.h304, fw.outer)
 		return
 	}
 	fw.commit()
+	if fw.f.call != nil && !fw.shareable {
+		fw.f.call.Complete(nil, errNotShared)
+	}
 	replaceHeader(fw.w.Header(), fw.hdr)
+	fw.f.sent = true
 	fw.w.WriteHeader(code)
 }
 
@@ -144,6 +180,7 @@ func (fw *fillWriter) commit() {
 		fw.hdr.Set("Date", v)
 	}
 	st := fw.hdr.Clone()
+	dropOuter(st, fw.outer)
 	fw.notStorable = fw.in.forced || code == http.StatusSwitchingProtocols || len(fw.hdr.Values("Trailer")) > 0 ||
 		(fw.in.e != nil && code >= 500)
 	if !fw.notStorable {
@@ -162,17 +199,20 @@ func (fw *fillWriter) commit() {
 	}
 	fw.declared = declaredLength(fw.r, fw.hdr, code)
 	storable := !fw.notStorable && fw.ttl > 0
+	fw.shareable = storable && fw.declared <= int64(fw.maxBody)
 	fw.tooLarge = fw.declared > int64(fw.maxBody)
 	fw.buffering = storable && fw.r.Method == http.MethodGet && !fw.tooLarge
 	if fw.buffering && fw.declared >= 0 {
 		fw.buf = make([]byte, 0, fw.declared)
 	}
-	member := httpcache.Status{Fwd: fw.in.fwd, Key: fw.in.key}
+	member := httpcache.Status{Fwd: fw.in.fwd, Key: fw.in.key, Detail: fw.in.detail}
 	if storable && fw.declared >= 0 && fw.declared <= int64(fw.maxBody) {
 		member.Stored = true
 		member.TTL = httpcache.TTLSeconds(httpcache.Remaining(lifetime, fw.initialAge))
 		member.HasTTL = true
 	}
+	fw.member = member
+	fw.shareHdr = sharedHeader(fw.hdr, fw.outer)
 	appendCacheStatus(fw.hdr, s.member(member))
 }
 
@@ -200,19 +240,25 @@ func (fw *fillWriter) Write(p []byte) (int, error) {
 	if fw.failed {
 		return 0, fw.writeErr
 	}
-	n, err := fw.w.Write(p)
-	fw.written += int64(n)
-	if err != nil {
-		fw.failed = true
-		fw.writeErr = err
-		fw.buf = nil
-		fw.buffering = false
-		return n, err
+	if !fw.clientGone {
+		n, err := fw.w.Write(p)
+		if err != nil && !fw.f.lead {
+			fw.written += int64(n)
+			fw.failed = true
+			fw.writeErr = err
+			fw.buf = nil
+			fw.buffering = false
+			return n, err
+		}
+		if err != nil {
+			fw.clientGone = true
+		}
 	}
+	fw.written += int64(len(p))
 	if fw.buffering {
 		fw.appendBody(p)
 	}
-	return n, nil
+	return len(p), nil
 }
 
 // appendBody copies p into the buffer. The buffer never grows beyond max_body_bytes; exceeding it abandons the copy.
@@ -222,6 +268,9 @@ func (fw *fillWriter) appendBody(p []byte) {
 		fw.buf = nil
 		fw.buffering = false
 		fw.tooLarge = true
+		if fw.f.call != nil {
+			fw.f.call.Complete(nil, errNotShared)
+		}
 		return
 	}
 	if need > cap(fw.buf) {
@@ -237,7 +286,7 @@ func (fw *fillWriter) Flush() {
 	if !fw.final {
 		fw.WriteHeader(http.StatusOK)
 	}
-	if fw.swallowed {
+	if fw.swallowed || fw.clientGone {
 		return
 	}
 	_ = http.NewResponseController(fw.w).Flush()
@@ -248,28 +297,29 @@ func (fw *fillWriter) Unwrap() http.ResponseWriter {
 	return fw.w
 }
 
-// complete reports whether the origin body was read to its end while the client stayed connected, and whether the
-// declared length, when there is one, was written in full.
-func (fw *fillWriter) complete(r *http.Request, ex *reqctx.Exchange) bool {
-	return fw.final && !fw.failed && r.Context().Err() == nil && ex.Complete() &&
+// complete reports whether the origin body was read to its end while the upstream context stayed alive, and whether
+// the declared length, when there is one, was written in full.
+func (fw *fillWriter) complete(ex *reqctx.Exchange) bool {
+	return fw.final && !fw.failed && fw.f.ctx.Err() == nil && ex.Complete() &&
 		(fw.declared < 0 || fw.written == fw.declared)
 }
 
-// settle stores the response of a forward when it qualifies and accounts for the outcome.
-func (s *stage) settle(r *http.Request, fw *fillWriter, ex *reqctx.Exchange) {
-	var outcome string
+// settle stores the response of a forward when it qualifies, counts the store outcome and returns it.
+func (s *stage) settle(fw *fillWriter, ex *reqctx.Exchange) string {
+	var storage string
 	switch {
 	case fw.notStorable:
-		outcome = storeNotStorable
+		storage = storeNotStorable
 	case fw.tooLarge:
-		outcome = storeTooLarge
-	case !fw.complete(r, ex):
-		outcome = storeAborted
+		storage = storeTooLarge
+	case !fw.complete(ex):
+		storage = storeAborted
 	default:
-		outcome = s.storeEntry(r, fw.in.lk.Token, fw.in.primary, fw.stored, fw.buf, fw.code, fw.tags, fw.initialAge, fw.ttl)
+		storage = s.storeEntry(fw.r, fw.in.lk.Token, fw.in.primary, fw.stored, fw.buf, fw.code, fw.tags, fw.initialAge, fw.ttl)
 	}
 	fw.buf = nil
-	s.countStore(outcome)
+	s.countStore(storage)
+	return storage
 }
 
 // storeEntry puts one entry under the fill token tok and returns the storage outcome.
@@ -300,17 +350,17 @@ func (s *stage) storeEntry(r *http.Request, tok store.FillToken, primary string,
 
 // refresh applies a 304 received for a conditional forward to the stored entry, stores the merged entry and
 // serves it. It returns false, without writing anything, when the 304 cannot be merged.
-func (s *stage) refresh(w http.ResponseWriter, r *http.Request, fw *fillWriter) bool {
+func (s *stage) refresh(w http.ResponseWriter, r *http.Request, fw *fillWriter) (outcome, bool) {
 	in := fw.in
 	merged, ok := httpcache.Merge304(in.e, fw.h304)
 	if !ok {
-		return false
+		return outcome{}, false
 	}
 	tags := in.lk.Entry.Tags
 	if len(fw.h304.Values(s.tagHeader)) > 0 {
 		t, ok := httpcache.ParseTags(fw.h304, s.tagHeader, s.opts.TagDelimiter)
 		if !ok {
-			return false
+			return outcome{}, false
 		}
 		tags = t
 	}
@@ -325,16 +375,26 @@ func (s *stage) refresh(w http.ResponseWriter, r *http.Request, fw *fillWriter) 
 	if s.stripTag {
 		stored.Del(s.tagHeader)
 	}
-	s.countStore(s.storeEntry(r, in.lk.Token, in.primary, stored, merged.Body, merged.Status, tags, initialAge, ttl))
-	s.serve(w, r, merged, initialAge, httpcache.Status{
+	storage := storeNotStorable
+	if !in.forced {
+		storage = s.storeEntry(r, in.lk.Token, in.primary, stored, merged.Body, merged.Status, tags, initialAge, ttl)
+	}
+	s.countStore(storage)
+	st := httpcache.Status{
 		Hit:          true,
 		Fwd:          httpcache.FwdStale,
 		FwdStatus:    http.StatusNotModified,
 		HasFwdStatus: true,
+		Detail:       in.detail,
 		Key:          in.key,
-	})
-	s.count(resultRevalidated)
-	return true
+	}
+	fw.f.sent = true
+	s.serve(w, r, merged, initialAge, st)
+	return outcome{
+		result: resultRevalidated,
+		stored: storage,
+		shared: s.share(r, &sharedResponse{merged: merged, age: initialAge, result: resultRevalidated, st: st}),
+	}, true
 }
 
 func replaceHeader(dst, src http.Header) {
