@@ -45,6 +45,13 @@ const (
 	bypassPrecondition    = "precondition"
 	detailOnlyIfCache     = "only-if-cached"
 	detailCoalesceTimeout = "coalesce-timeout"
+	detailSWR             = "stale-while-revalidate"
+
+	bgRevalidated = "revalidated"
+	bgReplaced    = "replaced"
+	bgNotStored   = "not_stored"
+	bgError       = "error"
+	bgSkipped     = "skipped"
 )
 
 // Metrics holds the families the stage reports to. Each vector is required.
@@ -57,6 +64,8 @@ type Metrics struct {
 	StoreErrors *metrics.CounterVec
 	// Coalesced counts requests served by a response another request fetched, by route. Required when Deps.Group is set.
 	Coalesced *metrics.CounterVec
+	// Background counts background revalidations by route and result: revalidated, replaced, not_stored, error or skipped. Required when Deps.Background is set.
+	Background *metrics.CounterVec
 }
 
 // Deps holds the collaborators of one cache stage.
@@ -67,6 +76,8 @@ type Deps struct {
 	Store store.Cache
 	// Group shares one upstream fetch among concurrent requests for the same entry. Nil forwards every request on its own.
 	Group *coalesce.Group
+	// Background runs the refreshes of entries served under stale-while-revalidate, in the scope of the stage's generation. Nil revalidates such entries synchronously.
+	Background *Scope
 	// Guard bounds the calls to Store. Nil calls Store directly.
 	Guard *storeguard.Guard
 	// StoreName names a configured store in logs. It is empty for the built-in memory cache.
@@ -107,6 +118,8 @@ type stage struct {
 	group        *coalesce.Group
 	waitTimeout  time.Duration
 	coalesced    *metrics.Counter
+	runner       *Scope
+	background   map[string]*metrics.Counter
 	requests     map[string]*metrics.Counter
 	stores       map[string]*metrics.Counter
 	storeErrs    map[string]*metrics.Counter
@@ -124,6 +137,8 @@ func NewStage(rc config.RouteCache, gc config.Cache, d Deps) (middleware.Middlew
 	case d.Metrics == nil || d.Metrics.Requests == nil || d.Metrics.Stores == nil || d.Metrics.StoreErrors == nil:
 		return nil, errors.New("cache: metrics are incomplete")
 	case d.Group != nil && d.Metrics.Coalesced == nil:
+		return nil, errors.New("cache: metrics are incomplete")
+	case d.Background != nil && d.Metrics.Background == nil:
 		return nil, errors.New("cache: metrics are incomplete")
 	case d.Group != nil && gc.Coalescing.Timeout == nil:
 		return nil, errors.New("cache: coalescing.timeout is not set")
@@ -189,6 +204,13 @@ func NewStage(rc config.RouteCache, gc config.Cache, d Deps) (middleware.Middlew
 	if d.Group != nil {
 		s.waitTimeout = gc.Coalescing.Timeout.Std()
 		s.coalesced = d.Metrics.Coalesced.With(d.Route)
+	}
+	if d.Background != nil {
+		s.runner = d.Background
+		s.background = make(map[string]*metrics.Counter, 5)
+		for _, res := range []string{bgRevalidated, bgReplaced, bgNotStored, bgError, bgSkipped} {
+			s.background[res] = d.Metrics.Background.With(d.Route, res)
+		}
 	}
 	for _, res := range []string{resultHit, resultStale, resultRevalidated, resultMiss, resultBypass} {
 		s.requests[res] = d.Metrics.Requests.With(d.Route, res)
@@ -261,6 +283,14 @@ func (s *stage) handle(next http.Handler, w http.ResponseWriter, r *http.Request
 		appendCacheStatus(w.Header(), s.member(httpcache.Status{Detail: detailOnlyIfCache, Key: key}))
 		httperr.Write(w, r, http.StatusGatewayTimeout, httperr.CodeNotCached, httperr.Message(httperr.CodeNotCached))
 		s.count(resultMiss)
+	case httpcache.StaleRevalidateBackground:
+		if s.runner != nil {
+			s.serve(w, r, e, age, httpcache.Status{Hit: true, Fwd: httpcache.FwdStale, Detail: detailSWR, Key: key})
+			s.count(resultStale)
+			s.revalidateInBackground(next, r, fillInput{primary: primary, lk: lk, e: e, fwd: httpcache.FwdStale, key: key}, primary+"\x00"+selected)
+			return
+		}
+		fallthrough
 	default:
 		fwd := httpcache.FwdURIMiss
 		switch {

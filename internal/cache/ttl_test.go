@@ -89,19 +89,20 @@ func TestTTLBoundaries(t *testing.T) {
 
 func TestStorageBoundary(t *testing.T) {
 	cases := []struct {
-		name  string
-		route string
-		keep  time.Duration
+		name         string
+		route        string
+		keep         time.Duration
+		noBackground bool
 	}{
 		{name: "keep", route: "keep: 30s", keep: 30 * time.Second},
-		{name: "stale_while_revalidate", route: "stale_while_revalidate: 40s", keep: 40 * time.Second},
+		{name: "stale_while_revalidate", route: "stale_while_revalidate: 40s", keep: 40 * time.Second, noBackground: true},
 		{name: "stale_if_error", route: "stale_if_error: 50s", keep: 50 * time.Second},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			s := ttlLifetime + c.keep
 			probe := func(offset time.Duration) *rig {
-				rg := newRig(t, rigOpts{route: "enabled: true\n" + c.route})
+				rg := newRig(t, rigOpts{route: "enabled: true\n" + c.route, noBackground: c.noBackground})
 				rg.orig.script(http.StatusOK, withHeaders(http.Header{"Cache-Control": {"max-age=60"}}), "x")
 				rg.get("/s", nil)
 				rg.clk.Advance(offset)

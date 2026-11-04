@@ -190,3 +190,84 @@ func (s *stage) share(r *http.Request, sh *sharedResponse) *sharedResponse {
 	sh.secondary = sec
 	return sh
 }
+
+// refreshRequest returns the request a background refresh sends: a copy of r without its body, cache directives or
+// preconditions, which apply to the client's request alone. Credentials are forwarded as r carried them.
+func refreshRequest(r *http.Request) *http.Request {
+	br := r.Clone(context.WithoutCancel(r.Context()))
+	br.Body = http.NoBody
+	br.ContentLength = 0
+	br.GetBody = nil
+	for _, k := range []string{"Cache-Control", "Pragma", "If-None-Match", "If-Modified-Since", "If-Match", "If-Unmodified-Since", "If-Range"} {
+		br.Header.Del(k)
+	}
+	return br
+}
+
+// revalidateInBackground starts a refresh of the stored entry under ckey, or counts it as skipped when the runner does
+// not accept it.
+func (s *stage) revalidateInBackground(next http.Handler, r *http.Request, in fillInput, ckey string) {
+	br := refreshRequest(r)
+	parent := r.Context()
+	if !s.runner.Go(ckey, func(stop context.Context) { s.backgroundRefresh(next, parent, br, in, ckey, stop) }) {
+		s.background[bgSkipped].Inc()
+	}
+}
+
+// backgroundRefresh forwards br to the origin as a refresh of the entry under ckey and counts its result. With a
+// group, the refresh leads the call of ckey, so that concurrent requests for the entry wait for it instead of
+// fetching again; a call already in flight skips the refresh.
+func (s *stage) backgroundRefresh(next http.Handler, parent context.Context, br *http.Request, in fillInput, ckey string, stop context.Context) {
+	ctx, cancel := s.detach(parent, stop)
+	defer cancel()
+	ctx = reqctx.WithInfo(ctx, &reqctx.Info{})
+	f := &fetch{ctx: ctx, lead: true}
+	var o outcome
+	run := func() (any, error) {
+		o = s.forward(next, discardWriter{h: http.Header{}}, br, in, true, f)
+		return o.completion()
+	}
+	var pe *coalesce.PanicError
+	if s.group != nil {
+		c, ok := s.group.Begin(ckey)
+		if !ok {
+			s.background[bgSkipped].Inc()
+			return
+		}
+		f.call = c
+		pe = c.Lead(run)
+	} else {
+		pe = coalesce.Protect(func() { _, _ = run() })
+	}
+	s.background[s.backgroundResult(o, pe, parent)].Inc()
+}
+
+// backgroundResult returns the background result to count for a refresh that ended with o or with the panic pe.
+// A panic is logged as a leader panic is, with the request ID of parent.
+func (s *stage) backgroundResult(o outcome, pe *coalesce.PanicError, parent context.Context) string {
+	switch {
+	case pe != nil && pe.Value == http.ErrAbortHandler:
+		return bgNotStored
+	case pe != nil:
+		s.logger.Error("panic recovered", "panic", fmt.Sprint(pe.Value), "request_id", reqctx.RequestID(parent), "stack", string(pe.Stack))
+		return bgError
+	case o.result == resultRevalidated && o.stored == storeStored:
+		return bgRevalidated
+	case o.stored == storeStored:
+		return bgReplaced
+	case !o.responded && o.failure != 0:
+		return bgError
+	}
+	return bgNotStored
+}
+
+// discardWriter is the response sink of a background refresh.
+type discardWriter struct{ h http.Header }
+
+func (w discardWriter) Header() http.Header { return w.h }
+
+func (w discardWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+func (w discardWriter) WriteHeader(int) {}
+
+func (w discardWriter) Flush() {}

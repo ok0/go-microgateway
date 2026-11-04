@@ -187,16 +187,46 @@ func TestRevalidationSoftPurgeNeverServedStale(t *testing.T) {
 }
 
 func TestRevalidationStaleWhileRevalidateWindow(t *testing.T) {
-	rg := newRig(t, rigOpts{route: "stale_while_revalidate: 1h"})
-	rg.orig.script(http.StatusOK, http.Header{"Cache-Control": {"max-age=60"}, "Etag": {`"v1"`}}, "old")
-	rg.get("/swr", nil)
-	rg.clk.Advance(61 * time.Second)
-	rg.orig.script(http.StatusNotModified, http.Header{"Cache-Control": {"max-age=60"}, "Etag": {`"v1"`}}, "")
-	rec := rg.get("/swr", nil)
-	if got := rg.orig.last().Get("If-None-Match"); got != `"v1"` {
-		t.Fatalf("origin If-None-Match %q, want \"v1\"", got)
-	}
-	if rg.requests(resultRevalidated) != 1 || rec.Body.String() != "old" {
-		t.Fatalf("revalidated=%v body %q", rg.requests(resultRevalidated), rec.Body.String())
-	}
+	t.Run("refreshed in the background", func(t *testing.T) {
+		rg := newRig(t, rigOpts{route: "stale_while_revalidate: 1h"})
+		rg.orig.script(http.StatusOK, http.Header{"Cache-Control": {"max-age=60"}, "Etag": {`"v1"`}}, "old")
+		rg.get("/swr", nil)
+		rg.clk.Advance(61 * time.Second)
+		rg.orig.script(http.StatusNotModified, http.Header{"Cache-Control": {"max-age=60"}, "Etag": {`"v1"`}}, "")
+		rec := rg.get("/swr", nil)
+		if rec.Body.String() != "old" || rec.Header().Get("Age") != "61" {
+			t.Fatalf("stale response body %q Age %q, want old at Age 61", rec.Body.String(), rec.Header().Get("Age"))
+		}
+		if st := lastStatus(t, rec); !st.Hit || st.Fwd != httpcache.FwdStale || st.Detail != detailSWR || st.TTL != -1 || st.HasFwdStatus {
+			t.Fatalf("status %+v, want hit fwd=stale detail=stale-while-revalidate ttl -1 without fwd-status", st)
+		}
+		rg.settle()
+		if got := rg.orig.last().Get("If-None-Match"); got != `"v1"` {
+			t.Fatalf("origin If-None-Match %q, want \"v1\"", got)
+		}
+		if rg.requests(resultStale) != 1 || rg.requests(resultRevalidated) != 0 || rg.background(bgRevalidated) != 1 {
+			t.Fatalf("stale=%v revalidated=%v background revalidated=%v, want 1 0 1", rg.requests(resultStale), rg.requests(resultRevalidated), rg.background(bgRevalidated))
+		}
+		next := rg.get("/swr", nil)
+		if st := lastStatus(t, next); !st.Hit || st.Fwd != "" || !st.HasTTL || st.TTL != 60 {
+			t.Fatalf("next status %+v, want fresh hit with ttl 60", st)
+		}
+		if next.Header().Get("Age") != "0" {
+			t.Errorf("next Age %q, want 0", next.Header().Get("Age"))
+		}
+	})
+	t.Run("revalidated synchronously without background", func(t *testing.T) {
+		rg := newRig(t, rigOpts{route: "stale_while_revalidate: 1h", noBackground: true})
+		rg.orig.script(http.StatusOK, http.Header{"Cache-Control": {"max-age=60"}, "Etag": {`"v1"`}}, "old")
+		rg.get("/swr", nil)
+		rg.clk.Advance(61 * time.Second)
+		rg.orig.script(http.StatusNotModified, http.Header{"Cache-Control": {"max-age=60"}, "Etag": {`"v1"`}}, "")
+		rec := rg.get("/swr", nil)
+		if got := rg.orig.last().Get("If-None-Match"); got != `"v1"` {
+			t.Fatalf("origin If-None-Match %q, want \"v1\"", got)
+		}
+		if rg.requests(resultRevalidated) != 1 || rec.Body.String() != "old" {
+			t.Fatalf("revalidated=%v body %q", rg.requests(resultRevalidated), rec.Body.String())
+		}
+	})
 }

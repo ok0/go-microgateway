@@ -20,6 +20,7 @@ import (
 	"github.com/ok0/go-microgateway/internal/metrics"
 	"github.com/ok0/go-microgateway/internal/reqctx"
 	"github.com/ok0/go-microgateway/internal/storeguard"
+	"github.com/ok0/go-microgateway/internal/testwait"
 	"github.com/ok0/go-microgateway/store"
 )
 
@@ -30,15 +31,16 @@ const testRoute = "users"
 
 // spyCall records one call to the spy store.
 type spyCall struct {
-	Op        string
-	Primary   string
-	Secondary string
-	VaryNames []string
-	Tags      []string
-	Header    http.Header
-	TTL       time.Duration
-	Stored    bool
-	Purge     store.Purge
+	Op         string
+	Primary    string
+	Secondary  string
+	VaryNames  []string
+	Tags       []string
+	Header     http.Header
+	TTL        time.Duration
+	InitialAge time.Duration
+	Stored     bool
+	Purge      store.Purge
 }
 
 // spy wraps a memstore cache, records every call and injects failures, hangs and panics per operation.
@@ -136,6 +138,7 @@ func (s *spy) Put(ctx context.Context, tok store.FillToken, primary, secondary s
 	if e != nil {
 		c.Tags = slices.Clone(e.Tags)
 		c.Header = e.Header.Clone()
+		c.InitialAge = e.InitialAge
 	}
 	if err := s.gate(ctx, opPut); err != nil {
 		s.record(c)
@@ -326,18 +329,21 @@ type rigOpts struct {
 	errs         *ErrorLog
 	logger       *slog.Logger
 	wrap         func(http.Handler) http.Handler
+	noBackground bool
 }
 
 // rig is one cache stage in front of a scripted origin.
 type rig struct {
-	tb    testing.TB
-	clk   *clock.Fake
-	spy   *spy
-	mets  *Metrics
-	orig  *origin
-	guard *storeguard.Guard
-	group *coalesce.Group
-	h     http.Handler
+	tb     testing.TB
+	clk    *clock.Fake
+	spy    *spy
+	mets   *Metrics
+	orig   *origin
+	guard  *storeguard.Guard
+	group  *coalesce.Group
+	runner *Runner
+	scope  *Scope
+	h      http.Handler
 }
 
 func newRig(tb testing.TB, o rigOpts) *rig {
@@ -369,6 +375,14 @@ func newRig(tb testing.TB, o rigOpts) *rig {
 		d.Group = coalesce.New(*gc.Coalescing.MaxKeys, *gc.Coalescing.MaxWaiters, clk)
 	}
 	r := &rig{tb: tb, clk: clk, spy: sp, mets: mets, orig: orig, group: d.Group}
+	if !o.noBackground {
+		runner := NewRunner(*gc.MaxBackground)
+		scope := runner.Scope()
+		tb.Cleanup(func() { scope.Cancel(); _ = runner.Close() })
+		d.Background = scope
+		r.runner = runner
+		r.scope = scope
+	}
 	if o.guard {
 		g, err := storeguard.New("shared", storeguard.Settings{ConsecutiveFailures: 2, OpenTimeout: time.Second, MaxInflight: 16}, clk, nil)
 		if err != nil {
@@ -439,7 +453,11 @@ func newMetrics(tb testing.TB, reg *metrics.Registry) *Metrics {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	return &Metrics{Requests: req, Stores: stores, StoreErrors: storeErrs, Coalesced: coalesced}
+	background, err := reg.Counter("microgateway_cache_background_revalidations_total", "Cache background revalidations.", "route", "result")
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return &Metrics{Requests: req, Stores: stores, StoreErrors: storeErrs, Coalesced: coalesced, Background: background}
 }
 
 // get serves a GET for path with the given request header through the rig.
@@ -469,6 +487,15 @@ func (r *rig) storeErrs(op string) float64 {
 
 func (r *rig) coalesced() float64 {
 	return r.mets.Coalesced.With(testRoute).Value()
+}
+
+func (r *rig) background(result string) float64 {
+	return r.mets.Background.With(testRoute, result).Value()
+}
+
+// settle waits until no background refresh of the rig runs.
+func (r *rig) settle() {
+	testwait.Until(r.tb, "background refreshes finished", func() bool { return r.runner.Running() == 0 }, nil)
 }
 
 func do(h http.Handler, req *http.Request) *httptest.ResponseRecorder {

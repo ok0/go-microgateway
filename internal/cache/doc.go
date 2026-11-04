@@ -28,6 +28,11 @@
 // Responses produced by outer stages, such as auth or rate_limit rejections,
 // do not carry it.
 //
-// Stale-while-revalidate windows are revalidated synchronously, and
-// stale-if-error is not applied yet.
+// Inside a stale-while-revalidate window a stale entry is served at once and
+// refreshed in the background: at most one refresh per entry and
+// cache.max_background refreshes per instance; a refresh is skipped, never
+// queued, when either bound is reached. A refresh is a conditional request
+// derived from the triggering request without its Cache-Control, Pragma and
+// precondition fields; it forwards that request's credentials. Stale-if-error
+// is not applied yet.
 package cache

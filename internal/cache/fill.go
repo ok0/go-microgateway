@@ -34,11 +34,14 @@ type fetch struct {
 }
 
 // outcome reports one forward. result is the request result to count, shared the response to share with waiters
-// (nil when it is not shareable or not complete), and stored the store outcome, already counted.
+// (nil when it is not shareable or not complete), and stored the store outcome, already counted. responded reports
+// whether an upstream response was received, and failure is the final status when it is 500, 502, 503 or 504, else 0.
 type outcome struct {
-	result string
-	shared *sharedResponse
-	stored string
+	result    string
+	shared    *sharedResponse
+	stored    string
+	responded bool
+	failure   int
 }
 
 // fillWriter is the response writer the origin writes to during a forward. It forwards every byte to the client
@@ -116,7 +119,7 @@ func (s *stage) forward(next http.Handler, w http.ResponseWriter, r *http.Reques
 		}
 		return s.forward(next, w, r, in, false, f)
 	}
-	o := outcome{result: resultMiss}
+	o := outcome{result: resultMiss, responded: ex.Responded(), failure: failureStatus(fw.code)}
 	if fw.shareable && !fw.tooLarge && fw.complete(ex) {
 		o.shared = s.share(r, &sharedResponse{status: fw.code, header: fw.shareHdr, body: fw.buf, result: resultMiss, st: fw.member})
 	}
@@ -391,10 +394,20 @@ func (s *stage) refresh(w http.ResponseWriter, r *http.Request, fw *fillWriter) 
 	fw.f.sent = true
 	s.serve(w, r, merged, initialAge, st)
 	return outcome{
-		result: resultRevalidated,
-		stored: storage,
-		shared: s.share(r, &sharedResponse{merged: merged, age: initialAge, result: resultRevalidated, st: st}),
+		result:    resultRevalidated,
+		stored:    storage,
+		shared:    s.share(r, &sharedResponse{merged: merged, age: initialAge, result: resultRevalidated, st: st}),
+		responded: true,
 	}, true
+}
+
+// failureStatus returns code when it is 500, 502, 503 or 504, and 0 otherwise.
+func failureStatus(code int) int {
+	switch code {
+	case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return code
+	}
+	return 0
 }
 
 func replaceHeader(dst, src http.Header) {
