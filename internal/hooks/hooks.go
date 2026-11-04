@@ -7,6 +7,7 @@ import (
 
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/coalesce"
 	"github.com/ok0/go-microgateway/internal/memstore"
 )
 
@@ -52,6 +53,8 @@ type Stats struct {
 	Generation                                    any     // identity of the active generation; equal values mean the same generation
 	ReloadSuccess, ReloadFailure, ReloadUnchanged float64 // configuration reload attempts, by result
 	MemCache                                      *memstore.CacheStats
+	Coalesce                                      *coalesce.Stats // in-flight coalescing state of the active generation; nil without coalescing
+	Background                                    int             // background refreshes running in the active generation's runner
 }
 
 // Inspect returns the Stats of gw, which must be a *microgateway.Gateway; it panics for any other value. Package

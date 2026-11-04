@@ -97,6 +97,10 @@ func init() {
 		if mc, ok := g.cur.Load().snap.MemCacheStats(); ok {
 			st.MemCache = &mc
 		}
+		if cs, ok := g.cur.Load().snap.CoalesceStats(); ok {
+			st.Coalesce = &cs
+		}
+		st.Background = g.cur.Load().snap.BackgroundRunning()
 		return st
 	}
 	hooks.StoreClock = func(p any) clock.Clock {
