@@ -1,7 +1,7 @@
 package redis
 
 const luaCacheLib = `
-if U > 8912591254740990 then return redis.error_reply('ERR microgateway: clock out of range') end
+if U > 8912591253740990 then return redis.error_reply('ERR microgateway: clock out of range') end
 local function ceil_ms(us, rem)
   local ms, r = idiv(us, 1000)
   if r * 1000 + rem > 0 then ms = ms + 1 end

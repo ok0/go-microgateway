@@ -22,6 +22,9 @@ const (
 	purgeBatch = 100
 	// toleranceUs is store.PurgeTolerance in microseconds.
 	toleranceUs = int64(store.PurgeTolerance / time.Microsecond)
+	// maxClockUs is the largest clock, in microseconds, that a cache script accepts. It equals
+	// 1<<53 - 2 - MaxTTL/µs - clusterSkewUs, the literal in luaCacheLib, so every lifetime sum stays an exact integer.
+	maxClockUs = 8912591253740990
 )
 
 // primaryKeys are the keys that hold one primary key. Every key shares the hash tag of the primary's bucket.
