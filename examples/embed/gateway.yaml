@@ -1,0 +1,80 @@
+# The configuration of the embedding program in this directory. The program serves
+# /app/hello itself and sends every other path to the gateway built from this file.
+# Run it from the repository root with: go run ./examples/embed
+# Read this file from disk instead of the embedded copy with: go run ./examples/embed -config examples/embed/gateway.yaml
+# Set BACKEND_URL to point the api route at another upstream; it defaults to http://127.0.0.1:9001.
+#
+# All credentials are fake and exist only for this example:
+#   API key example-api-key-embed (consumer embed-client) for /api/:
+#     curl -H 'X-API-Key: example-api-key-embed' http://127.0.0.1:8080/api/items
+#   Admin token example-admin-token for the admin listener, cache purge only:
+#     curl -X POST -H 'Authorization: Bearer example-admin-token' -d '{"all":true}' http://127.0.0.1:9901/cache/purge
+version: 1
+
+listeners:
+  - name: public
+    address: ":8080"
+
+# The embedding program serves the admin handler on its own -admin listener. This block
+# supplies the admin key that the handler accepts.
+admin:
+  address: "127.0.0.1:9901"
+  auth:
+    keys:
+      - id: example-admin
+        hash: "sha256:d2eadfb6e52d65b4bbf254e5046c0c495328b4d208f8b1591c229e62c5c6362f"
+
+# A store type that the program registers in Go. Its name is example-memory, and its
+# max_keys parameter caps the number of keys it holds.
+stores:
+  - name: local-limits
+    type: example-memory
+    params:
+      max_keys: 10000
+
+upstreams:
+  - name: backend
+    hosts:
+      - url: "${BACKEND_URL:-http://127.0.0.1:9001}"
+
+auth:
+  api_keys:
+    - name: example-keys
+      keys:
+        - id: example-embed
+          hash: "sha256:34d6fd40ce086b774b61f5f4c4c954e2e4884e1479f5fbc78bd66ff68dc3305e"
+          consumer: embed-client
+
+# A middleware type that the program registers in Go. It copies the consumer of the
+# request into the response header named by its header parameter.
+middlewares:
+  - name: audit
+    type: audit
+    params:
+      header: X-Audit-Consumer
+
+routes:
+  # Requests under /api/ need an API key. The audit middleware runs after authentication
+  # and before the rate limit, so the header is present on 429 responses too.
+  - name: api
+    match:
+      path: /api/
+    upstream: backend
+    auth:
+      mode: apikey
+      providers:
+        - example-keys
+    rate_limit:
+      rate: 2
+      per: 1m
+      burst: 2
+      store: local-limits
+    middlewares:
+      - audit
+    pipeline:
+      - timeout
+      - auth
+      - audit
+      - rate_limit
+      - circuit_breaker
+      - retry
