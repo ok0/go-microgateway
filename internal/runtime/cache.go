@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -47,7 +48,41 @@ type cacheWiring struct {
 	purger       *cache.Purger
 }
 
+// checkCacheDefaults reports the first defaulted field of c that the cache wiring needs and finds unset. Build
+// takes a validated configuration, whose defaults are applied; this keeps any other caller from a nil dereference.
+func checkCacheDefaults(c *config.Cache) error {
+	if c.Coalescing.Enabled == nil {
+		return errors.New("cache: coalescing.enabled is not set")
+	}
+	if *c.Coalescing.Enabled {
+		if c.Coalescing.MaxKeys == nil {
+			return errors.New("cache: coalescing.max_keys is not set")
+		}
+		if c.Coalescing.MaxWaiters == nil {
+			return errors.New("cache: coalescing.max_waiters is not set")
+		}
+	}
+	if c.MaxBackground == nil {
+		return errors.New("cache: max_background is not set")
+	}
+	if c.StoreTimeout == nil {
+		return errors.New("cache: store_timeout is not set")
+	}
+	if c.Store == "" {
+		if c.Memory.MaxBytes == nil {
+			return errors.New("cache: memory.max_bytes is not set")
+		}
+		if c.Memory.Shards == nil {
+			return errors.New("cache: memory.shards is not set")
+		}
+	}
+	return nil
+}
+
 func buildCacheWiring(cfg *config.Config, tx *state.Tx, clk clock.Clock, logger *slog.Logger, cs *CacheSeries, s *Series, built map[string]*builtStore, retention *cache.Retention) (*cacheWiring, error) {
+	if err := checkCacheDefaults(&cfg.Cache); err != nil {
+		return nil, err
+	}
 	w := &cacheWiring{
 		series:    cs,
 		errs:      cache.NewErrorLog(logger, clk),
