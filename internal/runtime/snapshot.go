@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/auth"
@@ -36,6 +37,8 @@ type Deps struct {
 	Resolver      upstream.Resolver
 	KeySetFetcher auth.Fetcher // nil uses auth.NewHTTPFetcher(nil)
 	Stores        *StoreSet    // nil registers no store types
+	// Retention is the purge marker high-water shared by every snapshot of one gateway. Nil gives each snapshot its own.
+	Retention *cache.Retention
 }
 
 type Snapshot struct {
@@ -57,6 +60,11 @@ type Snapshot struct {
 	coalesce    *coalesce.Group
 	runner      *cache.Runner
 	background  *cache.Scope
+	purger      *cache.Purger
+	retention   *cache.Retention
+	retainFloor time.Duration
+	adminIDs    []string
+	adminHashes [][32]byte
 }
 
 type routeEntry struct {
@@ -140,9 +148,18 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 		return nil, err
 	}
 
+	adminIDs, adminHashes, err := adminKeys(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	retention := d.Retention
+	if retention == nil {
+		retention = new(cache.Retention)
+	}
 	var cw *cacheWiring
 	if cacheEnabled(cfg) {
-		cw, err = buildCacheWiring(cfg, tx, clk, logger, cs, series, built)
+		cw, err = buildCacheWiring(cfg, tx, clk, logger, cs, series, built, retention)
 		if err != nil {
 			return nil, err
 		}
@@ -295,11 +312,15 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 	var group *coalesce.Group
 	var runner *cache.Runner
 	var background *cache.Scope
+	var purger *cache.Purger
+	var retainFloor time.Duration
 	if cw != nil {
 		memCache = cw.mem
 		group = cw.group
 		runner = cw.runner
 		background = cw.scope
+		purger = cw.purger
+		retainFloor = cw.retain
 	}
 	s := &Snapshot{
 		Config:      cfg,
@@ -318,6 +339,11 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 		coalesce:    group,
 		runner:      runner,
 		background:  background,
+		purger:      purger,
+		retention:   retention,
+		retainFloor: retainFloor,
+		adminIDs:    adminIDs,
+		adminHashes: adminHashes,
 	}
 	root := []middleware.Middleware{
 		middleware.RequestID(cfg.Global.RequestIDHeader),
@@ -416,8 +442,26 @@ func (s *Snapshot) Activate() {
 				s.cacheSeries.StoreErrors.With(op)
 			}
 		}
+		for _, t := range []string{cache.PurgeTypeURL, cache.PurgeTypeTag, cache.PurgeTypeAll} {
+			for _, m := range []string{"hard", "soft"} {
+				s.cacheSeries.Purges.With(t, m)
+			}
+		}
+	}
+	if s.purger != nil {
+		s.retention.Raise(s.retainFloor)
 	}
 	s.RefreshCacheGauges()
+}
+
+// Purger returns the purge service of the snapshot's cache, or nil when no route enables caching.
+func (s *Snapshot) Purger() *cache.Purger {
+	return s.purger
+}
+
+// AdminKeys returns the ids and sha256 digests of the admin keys of the snapshot's configuration, index-aligned.
+func (s *Snapshot) AdminKeys() (ids []string, hashes [][32]byte) {
+	return s.adminIDs, s.adminHashes
 }
 
 // RefreshCacheGauges sets the size gauges of the built-in memory cache. It does nothing when the snapshot has none.

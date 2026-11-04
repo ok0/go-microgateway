@@ -39,17 +39,20 @@ type cacheWiring struct {
 	series       *CacheSeries
 	errs         *cache.ErrorLog
 	retain       time.Duration
+	retention    *cache.Retention
 	onStoreError func(op string)
 	group        *coalesce.Group
 	runner       *cache.Runner
 	scope        *cache.Scope
+	purger       *cache.Purger
 }
 
-func buildCacheWiring(cfg *config.Config, tx *state.Tx, clk clock.Clock, logger *slog.Logger, cs *CacheSeries, s *Series, built map[string]*builtStore) (*cacheWiring, error) {
+func buildCacheWiring(cfg *config.Config, tx *state.Tx, clk clock.Clock, logger *slog.Logger, cs *CacheSeries, s *Series, built map[string]*builtStore, retention *cache.Retention) (*cacheWiring, error) {
 	w := &cacheWiring{
-		series: cs,
-		errs:   cache.NewErrorLog(logger, clk),
-		retain: cfg.Cache.MaxStorageTTL(cfg.Routes),
+		series:    cs,
+		errs:      cache.NewErrorLog(logger, clk),
+		retain:    cfg.Cache.MaxStorageTTL(cfg.Routes),
+		retention: retention,
 	}
 	if *cfg.Cache.Coalescing.Enabled {
 		co := cfg.Cache.Coalescing
@@ -84,17 +87,24 @@ func buildCacheWiring(cfg *config.Config, tx *state.Tx, clk clock.Clock, logger 
 		}
 		w.store = m
 		w.mem = m
-		return w, nil
+	} else {
+		name := cfg.Cache.Store
+		b, ok := built[name]
+		if !ok {
+			return nil, fmt.Errorf("cache store %q is not built", name)
+		}
+		w.store = b.backend
+		w.guard = b.guard.g
+		w.storeName = name
+		w.onStoreError = func(op string) { s.StoreErrors.With(name, op).Inc() }
 	}
-	name := cfg.Cache.Store
-	b, ok := built[name]
-	if !ok {
-		return nil, fmt.Errorf("cache store %q is not built", name)
+	p, err := cache.NewPurger(cache.PurgerDeps{Store: w.store, Guard: w.guard, StoreName: w.storeName, Timeout: cfg.Cache.StoreTimeout.Std(),
+		Retain: w.retain, Retention: retention, OnStoreError: w.onStoreError,
+		Metrics: &cache.PurgeMetrics{Purges: cs.Purges, StoreErrors: cs.StoreErrors}, Logger: logger})
+	if err != nil {
+		return nil, err
 	}
-	w.store = b.backend
-	w.guard = b.guard.g
-	w.storeName = name
-	w.onStoreError = func(op string) { s.StoreErrors.With(name, op).Inc() }
+	w.purger = p
 	return w, nil
 }
 
@@ -113,6 +123,7 @@ func buildCacheStage(r *config.Route, cfg *config.Config, w *cacheWiring, provid
 		StoreName:    w.storeName,
 		Credential:   func(req *http.Request) bool { return auth.Presented(req, ps) },
 		Retain:       w.retain,
+		Retention:    w.retention,
 		OnStoreError: w.onStoreError,
 		Errors:       w.errs,
 		Clock:        clk,

@@ -125,6 +125,8 @@ type CacheSeries struct {
 	Coalesced *metrics.CounterVec
 	// Background counts background revalidations by route and result.
 	Background *metrics.CounterVec
+	// Purges counts successful cache purge calls by type and mode.
+	Purges *metrics.CounterVec
 }
 
 // RegisterCacheSeries registers (or, for an identical earlier registration, reuses) the cache series in r.
@@ -161,5 +163,9 @@ func RegisterCacheSeries(r *metrics.Registry) (*CacheSeries, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &CacheSeries{Requests: requests, Stores: stores, StoreErrors: storeErrors, Evictions: evictions, Bytes: bytes, Entries: entries, Coalesced: coalesced, Background: background}, nil
+	purges, err := r.Counter("microgateway_cache_purges_total", "Successful cache purge calls, by type (url, tag, all) and mode (hard, soft).", "type", "mode")
+	if err != nil {
+		return nil, err
+	}
+	return &CacheSeries{Requests: requests, Stores: stores, StoreErrors: storeErrors, Evictions: evictions, Bytes: bytes, Entries: entries, Coalesced: coalesced, Background: background, Purges: purges}, nil
 }

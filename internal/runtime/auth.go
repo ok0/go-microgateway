@@ -1,13 +1,11 @@
 package runtime
 
 import (
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"maps"
 	"net/textproto"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/ok0/go-microgateway/config"
@@ -171,15 +169,12 @@ func buildAPIKey(a *config.APIKeyProvider) (*auth.APIKey, error) {
 	}
 	var entries []auth.APIKeyEntry
 	for _, k := range slices.Concat(a.Keys, a.FileKeys) {
-		hash, err := hex.DecodeString(strings.ToLower(strings.TrimPrefix(k.Hash.Reveal(), "sha256:")))
-		if err != nil {
+		hash, ok := decodeKeyHash(k.Hash.Reveal())
+		if !ok {
 			return nil, fmt.Errorf("auth provider %q key %q: invalid hash", a.Name, k.ID)
 		}
 		var e auth.APIKeyEntry
-		if len(hash) != len(e.Hash) {
-			return nil, fmt.Errorf("auth provider %q key %q: invalid hash", a.Name, k.ID)
-		}
-		copy(e.Hash[:], hash)
+		e.Hash = hash
 		e.ID = k.ID
 		e.Consumer = k.Consumer
 		e.Metadata = k.Metadata
