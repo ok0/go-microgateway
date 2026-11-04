@@ -15,6 +15,7 @@ import (
 
 type fidelityEnv struct {
 	c       goredis.UniversalClient
+	addr    string
 	setTime func(time.Time)
 	advance func(time.Duration)
 }
@@ -95,6 +96,36 @@ func runPexpireatAbsolute(t *testing.T, env fidelityEnv, name, write string) {
 	}
 	if env.setTime != nil && w != miniStart.UnixMilli()+201 {
 		t.Fatalf("expiry = %d, want %d", w, miniStart.UnixMilli()+201)
+	}
+}
+
+// hscanThroughPager runs HSCAN with COUNT 100 to cursor 0 through a respProxy that answers HSCAN itself (D11) and
+// returns each page's flat reply. The client uses the database of env.c.
+func hscanThroughPager(t *testing.T, env fidelityEnv, key string, cfg *pagerConfig) [][]string {
+	t.Helper()
+	ctx := context.Background()
+	gc, ok := env.c.(*goredis.Client)
+	if !ok {
+		t.Fatalf("fidelityEnv.c is %T, want *goredis.Client", env.c)
+	}
+	p := newRespProxy(t, env.addr)
+	p.SetHscanPager(cfg)
+	pc := newTestClient(t, p.Addr(), gc.Options().DB)
+	var pages [][]string
+	var cursor uint64
+	for {
+		if len(pages) >= 10000 {
+			t.Fatal("pager HSCAN cursor did not return to 0 within 10000 calls")
+		}
+		page, next, err := pc.HScan(ctx, key, cursor, "", 100).Result()
+		if err != nil {
+			t.Fatal(err)
+		}
+		pages = append(pages, page)
+		cursor = next
+		if cursor == 0 {
+			return pages
+		}
 	}
 }
 
@@ -561,8 +592,118 @@ return string.format('%.17g', estimate(tonumber(ARGV[2]), tonumber(ARGV[3]), ton
 				t.Fatalf("HSCAN field %q = %q, want %q", k, seen[k], v)
 			}
 		}
-		if calls < 2 {
+		if env.setTime != nil {
+			if calls != 1 {
+				t.Fatalf("miniredis HSCAN returned %d pages, want 1 (documented divergence D11: COUNT is ignored)", calls)
+			}
+		} else if calls < 2 {
 			t.Fatalf("HSCAN with COUNT 100 returned %d page(s) for %d fields, want more than one", calls, n)
+		}
+	})
+
+	t.Run("HscanPagedCoversAll", func(t *testing.T) {
+		if env.addr == "" {
+			t.Fatal("fidelityEnv.addr is not set: the pager probe proxies HSCAN to the server at that address")
+		}
+		key := probeKey(t, c, "HscanPagedCoversAll")
+		const n = 1050
+		want := make(map[string]string, n)
+		fields := make([]any, 0, 2*n)
+		for i := 0; i < n; i++ {
+			k, v := "f"+strconv.Itoa(i), "v"+strconv.Itoa(i)
+			want[k] = v
+			fields = append(fields, k, v)
+		}
+		if err := c.HSet(ctx, key, fields...).Err(); err != nil {
+			t.Fatal(err)
+		}
+
+		pages := hscanThroughPager(t, env, key, &pagerConfig{})
+		if len(pages) != 11 {
+			t.Fatalf("pager with COUNT 100 returned %d pages for %d fields, want 11", len(pages), n)
+		}
+		counts := make(map[string]int, n)
+		got := make(map[string]string, n)
+		for i, page := range pages {
+			if len(page) > 2*100 {
+				t.Fatalf("page %d has %d pairs, want at most 100", i, len(page)/2)
+			}
+			for j := 0; j+1 < len(page); j += 2 {
+				counts[page[j]]++
+				got[page[j]] = page[j+1]
+			}
+		}
+		if len(got) != n {
+			t.Fatalf("pager covered %d fields, want %d", len(got), n)
+		}
+		for k, v := range want {
+			if got[k] != v || counts[k] != 1 {
+				t.Fatalf("pager field %q = %q (returned %d times), want %q once", k, got[k], counts[k], v)
+			}
+		}
+
+		pages = hscanThroughPager(t, env, key, &pagerConfig{Duplicate: true})
+		if len(pages) < 2 {
+			t.Fatalf("pager with Duplicate returned %d page(s), want more than one", len(pages))
+		}
+		counts = make(map[string]int, n)
+		got = make(map[string]string, n)
+		for _, page := range pages {
+			for j := 0; j+1 < len(page); j += 2 {
+				counts[page[j]]++
+				got[page[j]] = page[j+1]
+			}
+		}
+		if len(got) != n {
+			t.Fatalf("pager with Duplicate covered %d fields, want %d", len(got), n)
+		}
+		for k, v := range want {
+			if got[k] != v {
+				t.Fatalf("pager with Duplicate field %q = %q, want %q", k, got[k], v)
+			}
+		}
+		duplicated := false
+		for _, cnt := range counts {
+			if cnt > 1 {
+				duplicated = true
+			}
+		}
+		if !duplicated {
+			t.Fatal("pager with Duplicate returned no field twice")
+		}
+	})
+
+	t.Run("ScriptKeyGuard", func(t *testing.T) {
+		key := probeKey(t, c, "ScriptKeyGuard")
+		other := probeKey(t, c, "ScriptKeyGuard/other")
+		got, err := goredis.NewScript(luaKeyGuard+"redis.call('HSET', KEYS[1], 'f', 'v'); return redis.call('HGET', KEYS[1], 'f')").Run(ctx, c, []string{key}).Text()
+		if err != nil {
+			t.Fatalf("declared key HSET: %v", err)
+		}
+		if got != "v" {
+			t.Fatalf("declared key HGET = %q, want %q", got, "v")
+		}
+		_, err = goredis.NewScript(luaKeyGuard+"return redis.error_reply('ERR microgateway: probe')").Run(ctx, c, []string{key}).Result()
+		var rerr goredis.Error
+		if err == nil || !errors.As(err, &rerr) || !strings.HasPrefix(err.Error(), "ERR microgateway: probe") {
+			t.Fatalf("redis.error_reply through the guard: %v, want the error reply", err)
+		}
+		cases := []struct{ name, body, want string }{
+			{"HSET on an undeclared key", "redis.call('HSET', ARGV[1], 'f', 'v')", "microgateway-test: undeclared key"},
+			{"RENAME to an undeclared key", "redis.call('RENAME', KEYS[1], ARGV[1])", "microgateway-test: undeclared key"},
+			{"KEYS *", "return redis.call('KEYS', '*')", "microgateway-test: forbidden command"},
+		}
+		for _, cs := range cases {
+			_, err := goredis.NewScript(luaKeyGuard+cs.body).Run(ctx, c, []string{key}, other).Result()
+			if err == nil || !strings.Contains(err.Error(), cs.want) {
+				t.Fatalf("%s: got %v, want the guard text %q", cs.name, err, cs.want)
+			}
+		}
+		if n, err := c.Exists(ctx, other).Result(); err != nil || n != 0 {
+			t.Fatalf("EXISTS undeclared key after the guard = %d, %v; want 0", n, err)
+		}
+		if n, err := c.HLen(ctx, key).Result(); err != nil || n != 1 {
+			t.Fatalf("HLEN declared key after the guard = %d, %v; want 1", n, err)
 		}
 	})
 
@@ -642,12 +783,12 @@ return string.format('%.17g', estimate(tonumber(ARGV[2]), tonumber(ARGV[3]), ton
 
 	t.Run("LuaExactIntegers", func(t *testing.T) {
 		key := probeKey(t, c, "LuaExactIntegers")
-		script := goredis.NewScript("return {string.format('%.0f', 8912591254740990 + 94608000000000), string.format('%.0f', tonumber('9007199254740991')), string.format('%.0f', tonumber('1786000000123456') + 1)}")
+		script := goredis.NewScript("return {string.format('%.0f', 8912591253740990 + 94608000000000 + 1000000), string.format('%.0f', 8912591253740990 + 94608000000000 + 1000000 + 1), string.format('%.0f', tonumber('9007199254740991')), string.format('%.0f', tonumber('1786000000123456') + 1)}")
 		got, err := script.Run(ctx, c, []string{key}).StringSlice()
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := []string{"9007199254740990", "9007199254740991", "1786000000123457"}
+		want := []string{"9007199254740990", "9007199254740991", "9007199254740991", "1786000000123457"}
 		if len(got) != len(want) {
 			t.Fatalf("got %q, want %q", got, want)
 		}
@@ -827,7 +968,8 @@ func TestSpike(t *testing.T) {
 		c := newTestClient(t, m.Addr(), 0)
 		now := miniStart
 		runFidelityProbes(t, fidelityEnv{
-			c: c,
+			c:    c,
+			addr: m.Addr(),
 			setTime: func(at time.Time) {
 				now = at
 				m.SetTime(at)

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -79,6 +80,31 @@ func newTestClient(t *testing.T, addr string, db int) *goredis.Client {
 	t.Cleanup(func() { _ = c.Close() })
 	return c
 }
+
+// luaKeyGuard shadows redis with a table whose call and pcall reject, before the command runs, any key argument that
+// is not in KEYS, and any command that cannot be proven single-slot. It assigns no globals.
+const luaKeyGuard = `local redis = setmetatable({}, {__index = redis})
+local declared = {}
+for _, k in ipairs(KEYS) do declared[tostring(k)] = true end
+local forbidden = {KEYS = true, SCAN = true, MGET = true, MSET = true, RENAMENX = true, COPY = true, SORT = true, BITOP = true, SMOVE = true, LMOVE = true, RPOPLPUSH = true, PFMERGE = true}
+local function requireDeclared(k)
+  if not declared[tostring(k)] then error('microgateway-test: undeclared key ' .. tostring(k), 0) end
+end
+local function guard(...)
+  local args = {...}
+  local name = string.upper(tostring(args[1]))
+  if forbidden[name] or string.sub(name, -5) == 'STORE' then error('microgateway-test: forbidden command ' .. name, 0) end
+  if name == 'TIME' then return end
+  if name == 'DEL' or name == 'UNLINK' or name == 'EXISTS' or name == 'RENAME' then
+    for i = 2, #args do requireDeclared(args[i]) end
+  elseif args[2] ~= nil then
+    requireDeclared(args[2])
+  end
+end
+local rawcall, rawpcall = redis.call, redis.pcall
+redis.call = function(...) guard(...); return rawcall(...) end
+redis.pcall = function(...) guard(...); return rawpcall(...) end
+`
 
 const luaClockInjected = "local SEC = tonumber(ARGV[#ARGV - 1])\nlocal USEC = tonumber(ARGV[#ARGV])\n"
 
@@ -203,14 +229,32 @@ type respProxy struct {
 	addr   string
 	target string
 
-	mu       sync.Mutex
-	ln       net.Listener // nil while the proxy is down
-	served   chan struct{}
-	conns    map[net.Conn]struct{}
-	mode     proxyMode
-	commands []string
-	requests [][]string
-	setup    []string
+	mu         sync.Mutex
+	ln         net.Listener // nil while the proxy is down
+	served     chan struct{}
+	conns      map[net.Conn]struct{}
+	mode       proxyMode
+	commands   []string
+	requests   [][]string
+	setup      []string
+	pager      *pagerConfig
+	cursors    map[uint64]string
+	nextCursor uint64
+	violations []string
+}
+
+// pagerConfig makes the proxy answer HSCAN itself (D11). Page > 0 caps the pairs per page at min(COUNT, Page).
+// Duplicate re-emits the previous page's last field first.
+type pagerConfig struct {
+	Page      int
+	Duplicate bool
+}
+
+// serverError is an error reply from the target, kept as its raw RESP line so it can be relayed unchanged.
+type serverError string
+
+func (e serverError) Error() string {
+	return string(e)
 }
 
 func newRespProxy(t *testing.T, target string) *respProxy {
@@ -313,10 +357,32 @@ func (p *respProxy) Reset() {
 	p.setup = nil
 }
 
+// SetHscanPager makes HSCAN be answered by the proxy from HGETALL of the target (D11). nil forwards HSCAN unchanged.
+func (p *respProxy) SetHscanPager(cfg *pagerConfig) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.pager = cfg
+	p.cursors = make(map[uint64]string)
+	p.nextCursor = 0
+}
+
+// Violations returns the slot co-location violations seen so far (D12b).
+func (p *respProxy) Violations() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.violations...)
+}
+
 func (p *respProxy) currentMode() proxyMode {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.mode
+}
+
+func (p *respProxy) currentPager() *pagerConfig {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.pager
 }
 
 func (p *respProxy) record(name string, args []string) {
@@ -324,6 +390,44 @@ func (p *respProxy) record(name string, args []string) {
 	defer p.mu.Unlock()
 	p.commands = append(p.commands, name)
 	p.requests = append(p.requests, args)
+	if v, bad := slotViolation(name, keysOf(name, args)); bad {
+		p.violations = append(p.violations, v)
+	}
+}
+
+// keysOf returns the key arguments whose slots must agree for a data-plane request.
+func keysOf(name string, args []string) []string {
+	switch name {
+	case "EVAL", "EVALSHA":
+		if len(args) < 3 {
+			return nil
+		}
+		n, err := strconv.Atoi(args[2])
+		if err != nil || n < 0 || 3+n > len(args) {
+			return nil
+		}
+		return args[3 : 3+n]
+	case "DEL", "UNLINK", "EXISTS", "RENAME":
+		if len(args) < 2 {
+			return nil
+		}
+		return args[1:]
+	}
+	return nil
+}
+
+// slotViolation reports the first key whose slot differs from the first key's slot.
+func slotViolation(name string, keys []string) (string, bool) {
+	if len(keys) < 2 {
+		return "", false
+	}
+	first := keySlot(keys[0])
+	for _, k := range keys[1:] {
+		if s := keySlot(k); s != first {
+			return fmt.Sprintf("%s: slots %d %d", name, first, s), true
+		}
+	}
+	return "", false
 }
 
 func (p *respProxy) serve(ln net.Listener, served chan struct{}) {
@@ -378,12 +482,20 @@ func (p *respProxy) handle(client net.Conn) {
 		}
 		p.record(name, args)
 		mode := p.currentMode()
-		if _, err := up.Write(raw); err != nil {
-			return
-		}
-		reply, err := readReply(ur)
-		if err != nil {
-			return
+		var reply []byte
+		if cfg := p.currentPager(); cfg != nil && name == "HSCAN" {
+			reply, err = p.pagedHscan(cfg, args, up, ur)
+			if err != nil {
+				return
+			}
+		} else {
+			if _, err := up.Write(raw); err != nil {
+				return
+			}
+			reply, err = readReply(ur)
+			if err != nil {
+				return
+			}
 		}
 		if mode == proxyDropReply {
 			return
@@ -481,6 +593,155 @@ func readReply(r *bufio.Reader) ([]byte, error) {
 		return out, nil
 	}
 	return nil, fmt.Errorf("unsupported RESP reply type %q", line[0])
+}
+
+// pagedHscan answers one HSCAN from HGETALL of the target on the same connection. Fields are sorted bytewise and each
+// page resumes strictly after the last field of the previous page (D11). A server-style error is returned as the
+// reply; a non-nil error means the connection is broken.
+func (p *respProxy) pagedHscan(cfg *pagerConfig, args []string, up io.Writer, ur *bufio.Reader) ([]byte, error) {
+	if len(args) < 3 {
+		return errorLine("ERR wrong number of arguments for 'hscan' command"), nil
+	}
+	cursor, err := strconv.ParseUint(args[2], 10, 64)
+	if err != nil {
+		return errorLine("ERR invalid cursor"), nil
+	}
+	count, err := parseHscanOptions(args[3:])
+	if err != nil {
+		return errorLine(err.Error()), nil
+	}
+	var last string
+	if cursor != 0 {
+		p.mu.Lock()
+		resume, ok := p.cursors[cursor]
+		p.mu.Unlock()
+		if !ok {
+			return errorLine("ERR pager: unknown cursor"), nil
+		}
+		last = resume
+	}
+	if _, err := fmt.Fprintf(up, "*2\r\n$7\r\nHGETALL\r\n$%d\r\n%s\r\n", len(args[1]), args[1]); err != nil {
+		return nil, err
+	}
+	fields, err := readFlatArray(ur)
+	if err != nil {
+		var se serverError
+		if errors.As(err, &se) {
+			return []byte(se), nil
+		}
+		return nil, err
+	}
+	vals := make(map[string]string, len(fields)/2)
+	keys := make([]string, 0, len(fields)/2)
+	for i := 0; i+1 < len(fields); i += 2 {
+		keys = append(keys, fields[i])
+		vals[fields[i]] = fields[i+1]
+	}
+	sort.Strings(keys)
+	start := 0
+	var page []string
+	if cursor != 0 {
+		start = sort.Search(len(keys), func(i int) bool { return keys[i] > last })
+		if cfg.Duplicate {
+			if i := sort.SearchStrings(keys, last); i < len(keys) && keys[i] == last {
+				page = append(page, last)
+			}
+		}
+	}
+	size := count
+	if cfg.Page > 0 && cfg.Page < size {
+		size = cfg.Page
+	}
+	end := min(start+size, len(keys))
+	page = append(page, keys[start:end]...)
+	var next uint64
+	if end < len(keys) {
+		p.mu.Lock()
+		p.nextCursor++
+		next = p.nextCursor
+		p.cursors[next] = keys[end-1]
+		p.mu.Unlock()
+	}
+	cur := strconv.FormatUint(next, 10)
+	var b strings.Builder
+	fmt.Fprintf(&b, "*2\r\n$%d\r\n%s\r\n*%d\r\n", len(cur), cur, 2*len(page))
+	for _, k := range page {
+		v := vals[k]
+		fmt.Fprintf(&b, "$%d\r\n%s\r\n$%d\r\n%s\r\n", len(k), k, len(v), v)
+	}
+	return []byte(b.String()), nil
+}
+
+func parseHscanOptions(opts []string) (int, error) {
+	count := 10
+	match := ""
+	hasMatch := false
+	for i := 0; i < len(opts); i += 2 {
+		if i+1 >= len(opts) {
+			return 0, errors.New("ERR syntax error")
+		}
+		switch strings.ToUpper(opts[i]) {
+		case "MATCH":
+			match, hasMatch = opts[i+1], true
+		case "COUNT":
+			n, err := strconv.Atoi(opts[i+1])
+			if err != nil || n < 1 {
+				return 0, errors.New("ERR value is not an integer or out of range")
+			}
+			count = n
+		default:
+			return 0, errors.New("ERR syntax error")
+		}
+	}
+	if hasMatch && match != "*" {
+		return 0, errors.New("ERR pager: unsupported MATCH")
+	}
+	return count, nil
+}
+
+func errorLine(msg string) []byte {
+	return []byte("-" + msg + "\r\n")
+}
+
+// readFlatArray reads one RESP2 array of bulk strings. An error reply is returned as a serverError holding its raw line.
+func readFlatArray(r *bufio.Reader) ([]string, error) {
+	line, err := r.ReadBytes('\n')
+	if err != nil {
+		return nil, err
+	}
+	if len(line) < 3 {
+		return nil, errors.New("short RESP reply")
+	}
+	if line[0] == '-' {
+		return nil, serverError(line)
+	}
+	n, err := parseHeader(line, '*')
+	if err != nil {
+		return nil, err
+	}
+	if n < 0 {
+		return nil, errors.New("nil array reply")
+	}
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		lenLine, err := r.ReadBytes('\n')
+		if err != nil {
+			return nil, err
+		}
+		size, err := parseHeader(lenLine, '$')
+		if err != nil {
+			return nil, err
+		}
+		if size < 0 {
+			return nil, errors.New("nil bulk string in array reply")
+		}
+		body := make([]byte, size+2)
+		if _, err := io.ReadFull(r, body); err != nil {
+			return nil, err
+		}
+		out = append(out, string(body[:size]))
+	}
+	return out, nil
 }
 
 // blackhole listens on a loopback address, signals each accepted connection
