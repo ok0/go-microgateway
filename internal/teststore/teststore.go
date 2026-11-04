@@ -12,6 +12,9 @@
 // set of entries, purges and call log, and support the same injection. Its
 // entry deadlines are read from the clock given to NewSharedCache, which is
 // independent of any gateway clock.
+//
+// A Spy wraps rate-limit and cache handles of any backend, records every call
+// made through its handles in one log, and fails or parks calls on command.
 package teststore
 
 import (

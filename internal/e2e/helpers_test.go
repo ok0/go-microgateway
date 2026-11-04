@@ -39,8 +39,10 @@ import (
 	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/hooks"
 	"github.com/ok0/go-microgateway/internal/httperr"
+	"github.com/ok0/go-microgateway/internal/teststore"
 	"github.com/ok0/go-microgateway/internal/testwait"
 	"github.com/ok0/go-microgateway/internal/upstream"
+	"github.com/ok0/go-microgateway/store"
 )
 
 func withClock(c clock.Clock) microgateway.Option { return hooks.WithClock(c).(microgateway.Option) }
@@ -511,6 +513,39 @@ const (
 	miRR       = "    load_balancer:\n      algorithm: round_robin\n"
 	miPassive  = "    passive_health:\n      consecutive_failures: 2\n      base_ejection_time: 30s\n      max_ejection_time: 120s\n"
 )
+
+func miInstances(t *testing.T, n *memNetwork, count int, doc string, start time.Time, step time.Duration, opts ...microgateway.Option) ([]*microgateway.Gateway, []*clock.Fake) {
+	t.Helper()
+	gs := make([]*microgateway.Gateway, 0, count)
+	fakes := make([]*clock.Fake, 0, count)
+	for i := 0; i < count; i++ {
+		fake := clock.NewFake(start.Add(time.Duration(i) * step))
+		gs = append(gs, n.gateway(t, doc, append(append([]microgateway.Option{}, opts...), withClock(fake))...))
+		fakes = append(fakes, fake)
+	}
+	return gs, fakes
+}
+
+func miSpyOption(spy *teststore.Spy, caps store.Capabilities, rl *teststore.Shared, c *teststore.SharedCache, calls *atomic.Int64) microgateway.Option {
+	return microgateway.WithStoreType("test", caps, func(p microgateway.StoreParams) (store.Backend, error) {
+		if calls != nil {
+			calls.Add(1)
+		}
+		var rlh store.RateLimiter
+		if rl != nil {
+			rlh = rl.Handle()
+		}
+		var ch store.Cache
+		if c != nil {
+			ch = c.Handle()
+		}
+		return spy.Wrap(rlh, ch), nil
+	})
+}
+
+func miSpyDelta(spy *teststore.Spy, before int) []teststore.SpyCall {
+	return spy.Calls()[before:]
+}
 
 const (
 	auIssuer   = "https://idp.example"
