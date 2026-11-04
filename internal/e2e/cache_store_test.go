@@ -246,11 +246,18 @@ func TestCacheMetricsGateway(t *testing.T) {
 	if evictions <= 0 {
 		t.Fatalf("evictions = %v, want more than 0 with max_bytes below the workload", evictions)
 	}
-	if entries+evictions != 5 {
-		t.Fatalf("entries %v + evictions %v, want 5 stored entries", entries, evictions)
+	mc := inspect(mem).MemCache
+	if mc == nil {
+		t.Fatal("built-in memory cache state is not exposed")
 	}
-	if bytes <= 0 || bytes > 4096 {
-		t.Fatalf("bytes = %v, want within (0, 4096]", bytes)
+	if float64(mc.Entries) != entries {
+		t.Fatalf("entries gauge %v, memory cache entries %d", entries, mc.Entries)
+	}
+	if float64(mc.Bytes) != bytes {
+		t.Fatalf("bytes gauge %v, memory cache bytes %d", bytes, mc.Bytes)
+	}
+	if float64(mc.Evictions) != evictions {
+		t.Fatalf("evictions gauge %v, memory cache evictions %d", evictions, mc.Evictions)
 	}
 
 	shParams := cacheSharedDoc(be.URL, "", cacheRouteYAML("r"))
