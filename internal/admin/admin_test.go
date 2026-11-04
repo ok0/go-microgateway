@@ -1,6 +1,7 @@
 package admin_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/admin"
+	"github.com/ok0/go-microgateway/internal/cache"
 	"github.com/ok0/go-microgateway/internal/metrics"
 	"github.com/ok0/go-microgateway/internal/upstream"
 )
@@ -31,6 +33,10 @@ func (f *fakeSource) Ready() bool                    { return f.ready }
 func (f *fakeSource) RedactedConfig() *config.Config { return f.cfg.Redacted() }
 func (f *fakeSource) Upstreams() []upstream.Status   { return f.statuses }
 func (f *fakeSource) Metrics() *metrics.Registry     { return f.reg }
+func (f *fakeSource) PurgeAccess() admin.PurgeAccess { return admin.PurgeAccess{} }
+func (f *fakeSource) Purge(ctx context.Context, req cache.PurgeRequest, keyID string) (cache.PurgeResult, error) {
+	return cache.PurgeResult{}, nil
+}
 
 func newFake(t *testing.T) *fakeSource {
 	t.Helper()
@@ -95,7 +101,7 @@ func decodeStatus(t *testing.T, rec *httptest.ResponseRecorder) string {
 
 func TestEndpoints(t *testing.T) {
 	src := newFake(t)
-	h := admin.Handler(src)
+	h := admin.Handler(src, nil)
 
 	if rec := serve(t, h, http.MethodGet, "/livez"); rec.Code != http.StatusOK {
 		t.Fatalf("/livez status = %d, want 200", rec.Code)
@@ -171,7 +177,7 @@ func TestEndpoints(t *testing.T) {
 }
 
 func TestMethods(t *testing.T) {
-	h := admin.Handler(newFake(t))
+	h := admin.Handler(newFake(t), nil)
 
 	if rec := serve(t, h, http.MethodHead, "/livez"); rec.Code != http.StatusOK {
 		t.Errorf("HEAD /livez status = %d, want 200", rec.Code)

@@ -1,11 +1,14 @@
-// Package admin serves the gateway's operational endpoints: liveness, readiness, configuration, upstream state and metrics.
+// Package admin serves the gateway's operational endpoints: liveness, readiness, configuration, upstream state, metrics, and the authenticated cache purge endpoint.
 package admin
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/cache"
 	"github.com/ok0/go-microgateway/internal/httperr"
 	"github.com/ok0/go-microgateway/internal/metrics"
 	"github.com/ok0/go-microgateway/internal/upstream"
@@ -17,14 +20,29 @@ type Source interface {
 	RedactedConfig() *config.Config
 	Upstreams() []upstream.Status
 	Metrics() *metrics.Registry
+	// PurgeAccess reports the admin keys and whether a cache is configured, from the active configuration.
+	PurgeAccess() PurgeAccess
+	// Purge runs req on behalf of the admin key keyID.
+	Purge(ctx context.Context, req cache.PurgeRequest, keyID string) (cache.PurgeResult, error)
+}
+
+// PurgeAccess is the purge configuration of the active generation. Hashes[i] is the sha256 digest of the token of key KeyIDs[i].
+type PurgeAccess struct {
+	KeyIDs []string
+	Hashes [][32]byte
+	Cache  bool
 }
 
 type statusBody struct {
 	Status string `json:"status"`
 }
 
-// Handler returns the admin handler that serves /livez, /readyz, /config, /upstreams and /metrics from src.
-func Handler(src Source) http.Handler {
+// Handler returns the admin handler that serves /livez, /readyz, /config, /upstreams, /metrics and POST /cache/purge from src.
+// A nil logger discards log output.
+func Handler(src Source, logger *slog.Logger) http.Handler {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
 	routes := map[string]http.HandlerFunc{
 		"/livez": func(w http.ResponseWriter, r *http.Request) {
 			writeStatus(w, http.StatusOK, "ok")
@@ -52,6 +70,10 @@ func Handler(src Source) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
+		if r.URL.Path == purgePath {
+			servePurge(src, logger, w, r)
+			return
+		}
 		serve, ok := routes[r.URL.Path]
 		if !ok {
 			httperr.Write(w, r, http.StatusNotFound, httperr.CodeNotFound, httperr.Message(httperr.CodeNotFound))
