@@ -42,12 +42,25 @@ var (
 	statusPattern = regexp.MustCompile(`^\d{3}(-\d{3})?$`)
 )
 
+// msgCacheBeforeAuth is reported at the first "cache" entry of a pipeline that lists "auth" after it.
+const msgCacheBeforeAuth = `stage "cache" must come after "auth": cache hits would be served without authentication`
+
 type checker struct {
 	errs []FieldError
 }
 
 func (ck *checker) add(path, msg string) {
 	ck.errs = append(ck.errs, FieldError{Path: path, Msg: msg})
+}
+
+// reported reports whether an error was already added at path or at a path nested under it.
+func (ck *checker) reported(path string) bool {
+	for _, fe := range ck.errs {
+		if fe.Path == path || strings.HasPrefix(fe.Path, path+".") || strings.HasPrefix(fe.Path, path+"[") {
+			return true
+		}
+	}
+	return false
 }
 
 // validate collects every problem in c without stopping at the first one. It expects defaults to be applied.
@@ -497,6 +510,7 @@ func checkRoutes(ck *checker, c *Config, kinds map[string]string, storeNames map
 			usedMws[m] = true
 		}
 		checkPipeline(ck, p+".pipeline", r.Pipeline, mws)
+		checkPipelineOrder(ck, p+".pipeline", r.Pipeline)
 		if r.Auth != nil && r.Auth.Mode != "none" && len(r.Pipeline) > 0 && !slices.Contains(r.Pipeline, "auth") {
 			ck.add(p+".pipeline", `must include "auth" when auth mode is not none`)
 		}
@@ -719,6 +733,21 @@ func checkPipeline(ck *checker, p string, stages []string, mws map[string]bool) 
 			}
 		}
 	}
+}
+
+// checkPipelineOrder rejects a pipeline at path p that lists "cache" before "auth", since the cache stage would
+// then answer hits before authentication runs. The error goes on the first "cache" entry unless that entry already
+// has an error of its own. A pipeline without "auth" or without "cache" is accepted.
+func checkPipelineOrder(ck *checker, p string, stages []string) {
+	ci := slices.Index(stages, "cache")
+	if ci < 0 || !slices.Contains(stages[ci+1:], "auth") {
+		return
+	}
+	sp := fmt.Sprintf("%s[%d]", p, ci)
+	if ck.reported(sp) {
+		return
+	}
+	ck.add(sp, msgCacheBeforeAuth)
 }
 
 // routeKey identifies the match a route makes; two routes with the same key conflict.

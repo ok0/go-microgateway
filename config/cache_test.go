@@ -200,6 +200,44 @@ func cacheRows() []cacheRow {
 		}},
 		{name: "pipeline cache first", route: "cache:\n  enabled: true\npipeline:\n  - cache\n  - circuit_breaker\n  - retry\n"},
 		{name: "pipeline cache on route without cache block", route: "pipeline:\n  - cache\n"},
+		{name: "pipeline cache before auth", route: "pipeline:\n  - cache\n  - auth\n", want: []cacheWant{
+			{"routes[0].pipeline[0]", msgCacheBeforeAuth, "- cache"},
+		}},
+		{name: "pipeline cache between stages before auth", route: "pipeline:\n  - timeout\n  - cache\n  - auth\n", want: []cacheWant{
+			{"routes[0].pipeline[1]", msgCacheBeforeAuth, "- cache"},
+		}},
+		{name: "pipeline stages between cache and auth", route: "pipeline:\n  - cache\n  - rate_limit\n  - timeout\n  - auth\n", want: []cacheWant{
+			{"routes[0].pipeline[0]", msgCacheBeforeAuth, "- cache"},
+		}},
+		{name: "pipeline cache after rate_limit before auth", route: "pipeline:\n  - rate_limit\n  - cache\n  - auth\n", want: []cacheWant{
+			{"routes[0].pipeline[1]", msgCacheBeforeAuth, "- cache"},
+		}},
+		{name: "pipeline cache before auth with auth and cache blocks", route: "auth:\n  mode: none\ncache:\n  enabled: true\npipeline:\n  - cache\n  - auth\n", want: []cacheWant{
+			{"routes[0].pipeline[0]", msgCacheBeforeAuth, "- cache"},
+		}},
+		{name: "pipeline cache before auth and after circuit_breaker", route: "pipeline:\n  - circuit_breaker\n  - cache\n  - auth\n", want: []cacheWant{
+			{"routes[0].pipeline", `"cache" must come before "circuit_breaker" and "retry"`, "pipeline:"},
+			{"routes[0].pipeline[1]", msgCacheBeforeAuth, "- cache"},
+		}},
+		{name: "pipeline duplicate cache before auth", route: "pipeline: [cache, cache, auth]\n", want: []cacheWant{
+			{"routes[0].pipeline[0]", msgCacheBeforeAuth, "pipeline: ["},
+			{"routes[0].pipeline[1]", `duplicate stage "cache"`, "pipeline: ["},
+		}},
+		{name: "pipeline cache before auth with another error", global: "cache:\n  store_timeout: 0s\n", route: "pipeline:\n  - cache\n  - auth\n", want: []cacheWant{
+			{"cache.store_timeout", "must be positive", "store_timeout: 0s"},
+			{"routes[0].pipeline[0]", msgCacheBeforeAuth, "- cache"},
+		}},
+		{name: "pipeline cache before auth on two routes", route: "pipeline:\n  - cache\n  - auth\n", extra: "  - name: second\n    match:\n      path: /second\n    upstream: users\n    pipeline: [cache, auth]\n", want: []cacheWant{
+			{"routes[0].pipeline[0]", msgCacheBeforeAuth, "- cache"},
+			{"routes[1].pipeline[0]", msgCacheBeforeAuth, "pipeline: [cache, auth]"},
+		}},
+		{name: "pipeline auth before cache", route: "pipeline:\n  - auth\n  - cache\n"},
+		{name: "pipeline cache before rate_limit", route: "pipeline:\n  - cache\n  - rate_limit\n"},
+		{name: "pipeline cache before rate_limit after auth", route: "pipeline:\n  - auth\n  - cache\n  - rate_limit\n"},
+		{name: "pipeline auth without cache", route: "pipeline:\n  - timeout\n  - auth\n"},
+		{name: "pipeline default order", route: "auth:\n  mode: none\ncache:\n  enabled: true\npipeline:\n  - timeout\n  - auth\n  - rate_limit\n  - cache\n  - circuit_breaker\n  - retry\n"},
+		{name: "pipeline user middleware and timeout around cache", global: "middlewares:\n  - name: mw1\n    type: custom\n", route: "middlewares: [mw1]\npipeline:\n  - mw1\n  - auth\n  - cache\n  - timeout\n"},
+		{name: "cache and auth blocks without pipeline", route: "auth:\n  mode: none\ncache:\n  enabled: true\n"},
 		{name: "unknown global key", global: "cache:\n  bogus: 1\n", unknown: true, want: []cacheWant{
 			{"cache.bogus", `unknown field "bogus"`, "bogus: 1"},
 		}},
