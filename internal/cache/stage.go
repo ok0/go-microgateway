@@ -46,6 +46,7 @@ const (
 	detailOnlyIfCache     = "only-if-cached"
 	detailCoalesceTimeout = "coalesce-timeout"
 	detailSWR             = "stale-while-revalidate"
+	detailSIE             = "stale-if-error"
 
 	bgRevalidated = "revalidated"
 	bgReplaced    = "replaced"
@@ -299,7 +300,7 @@ func (s *stage) handle(next http.Handler, w http.ResponseWriter, r *http.Request
 		case len(lk.VaryNames) > 0:
 			fwd = httpcache.FwdVaryMiss
 		}
-		s.fetch(next, w, r, fillInput{primary: primary, lk: lk, e: e, fwd: fwd, key: key}, primary+"\x00"+selected)
+		s.fetch(next, w, r, fillInput{primary: primary, lk: lk, e: e, fwd: fwd, key: key, age: age, sie: httpcache.StaleOnError(e, age, s.opts)}, primary+"\x00"+selected)
 	}
 }
 

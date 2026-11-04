@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/ok0/go-microgateway/internal/clock"
@@ -17,6 +18,14 @@ import (
 
 // errNotShared completes a call whose response cannot be shared; its waiters forward on their own.
 var errNotShared = errors.New("cache: response not shared")
+
+// fetchFailure completes a call whose upstream response is a failure status; a waiter may answer it from a stored
+// entry under stale-if-error.
+type fetchFailure struct{ status int }
+
+func (f *fetchFailure) Error() string {
+	return "cache: upstream failed with status " + strconv.Itoa(f.status)
+}
 
 // sharedResponse is the response a leader shares with its waiters. header is the leader's response header without
 // hop-by-hop fields and without fields set by outer stages. merged is non-nil when a 304 was merged into the stored
@@ -117,6 +126,7 @@ func (s *stage) leaderPanic(w http.ResponseWriter, r *http.Request, in fillInput
 func (s *stage) await(c *coalesce.Call, next http.Handler, w http.ResponseWriter, r *http.Request, in fillInput) {
 	v, err := c.Wait(r.Context(), s.waitTimeout)
 	var pe *coalesce.PanicError
+	var ff *fetchFailure
 	switch {
 	case err == nil:
 		sh := v.(*sharedResponse)
@@ -139,6 +149,9 @@ func (s *stage) await(c *coalesce.Call, next http.Handler, w http.ResponseWriter
 		appendCacheStatus(w.Header(), s.member(httpcache.Status{Fwd: in.fwd, Key: in.key, Collapsed: true}))
 		httperr.Write(w, r, http.StatusInternalServerError, httperr.CodeInternal, httperr.Message(httperr.CodeInternal))
 		s.count(resultMiss)
+	case errors.As(err, &ff) && in.sie:
+		s.serve(w, r, in.e, in.age, staleIfError(in, ff.status))
+		s.count(resultStale)
 	default:
 		s.forwardAlone(next, w, r, in)
 	}
@@ -148,6 +161,9 @@ func (s *stage) await(c *coalesce.Call, next http.Handler, w http.ResponseWriter
 func (o outcome) completion() (any, error) {
 	if o.shared != nil {
 		return o.shared, nil
+	}
+	if o.failure != 0 {
+		return nil, &fetchFailure{status: o.failure}
 	}
 	return nil, errNotShared
 }

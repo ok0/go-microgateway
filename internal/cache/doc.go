@@ -33,6 +33,12 @@
 // cache.max_background refreshes per instance; a refresh is skipped, never
 // queued, when either bound is reached. A refresh is a conditional request
 // derived from the triggering request without its Cache-Control, Pragma and
-// precondition fields; it forwards that request's credentials. Stale-if-error
-// is not applied yet.
+// precondition fields; it forwards that request's credentials.
+//
+// When a forward for a stored entry fails with 500, 502, 503 or 504 (including
+// the gateway's own errors for connection failures, header timeouts and open
+// circuit breakers) and the entry is inside its stale-if-error window, the
+// failed response is discarded before any of it reaches the client and the
+// stored entry is served; Age and ttl are those of the lookup. Soft-purged
+// entries are never served stale; they are revalidated.
 package cache

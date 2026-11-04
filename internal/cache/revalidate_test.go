@@ -111,7 +111,7 @@ func TestRevalidationOrigin200Replaces(t *testing.T) {
 }
 
 func TestRevalidationOrigin500LeavesEntry(t *testing.T) {
-	rg := newRig(t, rigOpts{route: "stale_if_error: 1h"})
+	rg := newRig(t, rigOpts{route: "keep: 1h"})
 	rg.orig.script(http.StatusOK, http.Header{"Cache-Control": {"max-age=60"}, "Etag": {`"v1"`}}, "old")
 	rg.get("/r500", nil)
 	rg.clk.Advance(61 * time.Second)

@@ -21,6 +21,8 @@ type fillInput struct {
 	key     string
 	forced  bool
 	detail  string
+	age     time.Duration
+	sie     bool
 }
 
 // fetch describes how one forward runs. ctx is the upstream request context: the request context unless the forward
@@ -62,6 +64,7 @@ type fillWriter struct {
 	responseTime time.Time
 	final        bool
 	swallowed    bool
+	held         bool
 	failed       bool
 	writeErr     error
 	code         int
@@ -119,6 +122,13 @@ func (s *stage) forward(next http.Handler, w http.ResponseWriter, r *http.Reques
 		}
 		return s.forward(next, w, r, in, false, f)
 	}
+	if fw.held {
+		fw.buf = nil
+		s.countStore(storeNotStorable)
+		f.sent = true
+		s.serve(w, r, in.e, in.age, staleIfError(in, fw.code))
+		return outcome{result: resultStale, failure: fw.code, responded: ex.Responded()}
+	}
 	o := outcome{result: resultMiss, responded: ex.Responded(), failure: failureStatus(fw.code)}
 	if fw.shareable && !fw.tooLarge && fw.complete(ex) {
 		o.shared = s.share(r, &sharedResponse{status: fw.code, header: fw.shareHdr, body: fw.buf, result: resultMiss, st: fw.member})
@@ -165,6 +175,15 @@ func (fw *fillWriter) WriteHeader(code int) {
 		fw.h304 = fw.hdr.Clone()
 		dropOuter(fw.h304, fw.outer)
 		return
+	}
+	if failureStatus(code) != 0 {
+		if fw.f.call != nil {
+			fw.f.call.Complete(nil, &fetchFailure{status: code})
+		}
+		if fw.in.sie {
+			fw.held = true
+			return
+		}
 	}
 	fw.commit()
 	if fw.f.call != nil && !fw.shareable {
@@ -237,7 +256,7 @@ func (fw *fillWriter) Write(p []byte) (int, error) {
 	if !fw.final {
 		fw.WriteHeader(http.StatusOK)
 	}
-	if fw.swallowed {
+	if fw.swallowed || fw.held {
 		return len(p), nil
 	}
 	if fw.failed {
@@ -289,7 +308,7 @@ func (fw *fillWriter) Flush() {
 	if !fw.final {
 		fw.WriteHeader(http.StatusOK)
 	}
-	if fw.swallowed || fw.clientGone {
+	if fw.swallowed || fw.held || fw.clientGone {
 		return
 	}
 	_ = http.NewResponseController(fw.w).Flush()
@@ -408,6 +427,11 @@ func failureStatus(code int) int {
 		return code
 	}
 	return 0
+}
+
+// staleIfError returns the status of a stored entry served in place of a failed forward with status code.
+func staleIfError(in fillInput, code int) httpcache.Status {
+	return httpcache.Status{Hit: true, Fwd: httpcache.FwdStale, FwdStatus: code, HasFwdStatus: true, Detail: detailSIE, Key: in.key}
 }
 
 func replaceHeader(dst, src http.Header) {
