@@ -265,3 +265,46 @@ func TestSharedCachePurgeSoftMarksStale(t *testing.T) {
 		}
 	}
 }
+
+func TestSharedCachePurgeFailAfter(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newSharedCache(t)
+	a := s.Handle()
+	b := s.Handle()
+	fillEntry(t, a, "p", "s", "body")
+	fillEntry(t, a, "q", "s", "body")
+
+	s.SetPurgeFailAfter(1, errBoom)
+	if res, err := a.Purge(ctx, store.Purge{Kind: store.PurgeKeys, Keys: []string{"p"}, Retain: time.Hour}); err != nil || res.Affected != 1 {
+		t.Fatalf("first handle Purge = (%+v, %v), want one affected entry and nil error", res, err)
+	}
+	if res, err := a.Purge(ctx, store.Purge{Kind: store.PurgeKeys, Keys: []string{"q"}, Retain: time.Hour}); !errors.Is(err, errBoom) || res != (store.PurgeResult{}) {
+		t.Fatalf("second handle Purge = (%+v, %v), want zero result and errBoom", res, err)
+	}
+	l, err := b.Get(ctx, "q", onlySecondary("s"))
+	if err != nil || l.Entry == nil {
+		t.Fatalf("Get(q) after failed purge = (%+v, %v), want the entry still present", l.Entry, err)
+	}
+
+	s.SetPurgeFailAfter(-1, nil)
+	if res, err := a.Purge(ctx, store.Purge{Kind: store.PurgeKeys, Keys: []string{"q"}, Retain: time.Hour}); err != nil || res.Affected != 1 {
+		t.Fatalf("handle Purge after turning mode off = (%+v, %v), want one affected entry and nil error", res, err)
+	}
+}
+
+func TestSharedCacheAffectedUnknown(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newSharedCache(t)
+	a := s.Handle()
+	b := s.Handle()
+	fillEntry(t, a, "p", "s", "body")
+
+	s.SetAffectedUnknown(true)
+	res, err := a.Purge(ctx, store.Purge{Kind: store.PurgeKeys, Keys: []string{"p"}, Retain: time.Hour})
+	if err != nil || res.AffectedKnown || res.Affected != 0 {
+		t.Fatalf("handle Purge = (%+v, %v), want AffectedKnown false, Affected 0 and nil error", res, err)
+	}
+	if l, err := b.Get(ctx, "p", onlySecondary("s")); err != nil || l.Entry != nil {
+		t.Fatalf("Get(p) after unknown-affected purge = (%+v, %v), want the entry removed", l.Entry, err)
+	}
+}

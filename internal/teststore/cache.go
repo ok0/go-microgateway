@@ -44,15 +44,21 @@ type SharedCache struct {
 	mode    Mode
 	err     error
 	ops     map[string]opMode
+
+	purgeFailAfter  int
+	purgeSeen       int
+	purgeErr        error
+	affectedUnknown bool
 }
 
 // NewSharedCache returns a SharedCache whose entry deadlines are read from clk
 // and whose byte budget is maxBytes. Its default mode is Healthy.
 func NewSharedCache(clk clock.Clock, maxBytes int64) *SharedCache {
 	s := &SharedCache{
-		mem:  memstore.NewCache(memstore.CacheOptions{MaxBytes: maxBytes, Clock: clk}),
-		mode: Healthy,
-		ops:  make(map[string]opMode),
+		mem:            memstore.NewCache(memstore.CacheOptions{MaxBytes: maxBytes, Clock: clk}),
+		mode:           Healthy,
+		ops:            make(map[string]opMode),
+		purgeFailAfter: -1,
 	}
 	s.cond = sync.NewCond(&s.mu)
 	return s
@@ -98,6 +104,24 @@ func (s *SharedCache) SetOpMode(op string, m Mode, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ops[op] = opMode{mode: m, err: err}
+}
+
+// SetPurgeFailAfter makes handle purge calls fail with err once n further purge
+// calls have succeeded; n < 0 turns it off. It resets the count.
+func (s *SharedCache) SetPurgeFailAfter(n int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.purgeFailAfter = n
+	s.purgeSeen = 0
+	s.purgeErr = err
+}
+
+// SetAffectedUnknown makes handle purge calls report AffectedKnown false and
+// Affected 0 after applying the purge.
+func (s *SharedCache) SetAffectedUnknown(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.affectedUnknown = on
 }
 
 // Purge applies p directly to the shared cache. It ignores the modes and is
@@ -234,7 +258,21 @@ func (h *CacheHandle) Put(ctx context.Context, tok store.FillToken, primary, sec
 // Purge applies p through this handle.
 func (h *CacheHandle) Purge(ctx context.Context, p store.Purge) (store.PurgeResult, error) {
 	return invoke(ctx, h, CacheCall{Op: "purge", Purge: p}, func(int) (store.PurgeResult, error) {
-		return h.s.mem.Purge(ctx, p)
+		s := h.s
+		s.mu.Lock()
+		if s.purgeFailAfter >= 0 && s.purgeSeen >= s.purgeFailAfter {
+			err := s.purgeErr
+			s.mu.Unlock()
+			return store.PurgeResult{}, err
+		}
+		s.purgeSeen++
+		unknown := s.affectedUnknown
+		s.mu.Unlock()
+		r, err := s.mem.Purge(ctx, p)
+		if err != nil || !unknown {
+			return r, err
+		}
+		return store.PurgeResult{Accepted: r.Accepted}, nil
 	})
 }
 
