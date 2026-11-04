@@ -22,7 +22,14 @@ func TestIntegrationTwoInstances(t *testing.T) {
 	if !serverAtLeast(t, c, 6, 2) {
 		t.Fatal("Redis 6.2 or later is required")
 	}
-	runTwoInstances(t, redisTarget{addr: addr, db: 14})
+	target := redisTarget{addr: addr, db: 14}
+	runTwoInstances(t, target)
+	t.Run("cache/hard", func(t *testing.T) {
+		twoInstancesCache(t, target, false)
+	})
+	t.Run("cache/soft", func(t *testing.T) {
+		twoInstancesCache(t, target, true)
+	})
 }
 
 func serverAtLeast(t *testing.T, c goredis.UniversalClient, major, minor int) bool {
