@@ -1235,8 +1235,18 @@ func TestIntegrationSuite(t *testing.T) {
 		checkCacheTwoGateways(t, addr)
 	})
 
+	serverAdvance := func(t *testing.T, d time.Duration) {
+		target := serverMs(t, c) + int64((d+time.Millisecond-1)/time.Millisecond)
+		testwait.Until(t, "server clock to advance "+d.String(), func() bool {
+			return serverMs(t, c) >= target
+		}, func() string {
+			return fmt.Sprintf("server %d ms, target %d ms", serverMs(t, c), target)
+		})
+	}
+	serverNow := func(t *testing.T) time.Time { return time.UnixMilli(serverMs(t, c)) }
+
 	t.Run("MultiInstance", func(t *testing.T) {
-		runMultiInstance(t, redisServer{addr: addr, db: 15, exact: false, advance: time.Sleep, now: func(t *testing.T) time.Time { return time.UnixMilli(serverMs(t, c)) }})
+		runMultiInstance(t, redisServer{addr: addr, db: 15, exact: false, advance: serverAdvance, now: serverNow})
 	})
 
 	t.Run("Sentinel", func(t *testing.T) {

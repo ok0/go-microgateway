@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
+	"github.com/ok0/go-microgateway/internal/testwait"
 	"github.com/ok0/go-microgateway/store"
 )
 
@@ -510,8 +512,8 @@ return string.format('%.17g', estimate(tonumber(ARGV[2]), tonumber(ARGV[3]), ton
 		}
 		deadlineUs := deadlineMs * 1000
 		sample := goredis.NewScript("local t = redis.call('TIME'); return {t[1], t[2], redis.call('EXISTS', KEYS[1])}")
-		limit := time.Now().Add(10 * time.Second)
-		for {
+		var lastUs int64
+		testwait.Until(t, "server clock to pass the key deadline by 2 ms", func() bool {
 			reply, err := sample.Run(ctx, c, []string{key}).Slice()
 			if err != nil {
 				t.Fatal(err)
@@ -534,6 +536,7 @@ return string.format('%.17g', estimate(tonumber(ARGV[2]), tonumber(ARGV[3]), ton
 				t.Fatal(err)
 			}
 			nowUs := sec*1_000_000 + usec
+			lastUs = nowUs
 			if nowUs < deadlineUs && exists != 1 {
 				t.Fatalf("key absent at server time %d µs, before its deadline %d µs", nowUs, deadlineUs)
 			}
@@ -541,14 +544,12 @@ return string.format('%.17g', estimate(tonumber(ARGV[2]), tonumber(ARGV[3]), ton
 				if exists != 0 {
 					t.Fatalf("key present at server time %d µs, 2 ms after its deadline %d µs", nowUs, deadlineUs)
 				}
-				return
+				return true
 			}
-			if time.Now().After(limit) {
-				t.Fatal("server clock did not pass the deadline in 10 s")
-			}
-			wait := time.NewTimer(time.Millisecond)
-			<-wait.C
-		}
+			return false
+		}, func() string {
+			return fmt.Sprintf("server time %d µs, deadline %d µs", lastUs, deadlineUs)
+		})
 	})
 
 	t.Run("HdelLastFieldDeletesKey", func(t *testing.T) {

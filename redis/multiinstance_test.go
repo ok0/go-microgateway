@@ -27,7 +27,7 @@ type redisServer struct {
 	addr    string
 	db      int
 	exact   bool
-	advance func(time.Duration)
+	advance func(t *testing.T, d time.Duration)
 	now     func(t *testing.T) time.Time
 }
 
@@ -165,7 +165,7 @@ func runElapsed(t *testing.T, srv redisServer, n int) {
 	var admitted, sent int
 	for round := 0; round < 4; round++ {
 		if round > 0 {
-			srv.advance(250 * time.Millisecond)
+			srv.advance(t, 250*time.Millisecond)
 		}
 		a, s := multiSum(tallyRecorders(t, fire(gws, n*10)))
 		admitted += a
@@ -215,7 +215,7 @@ func runMultiInstance(t *testing.T, srv redisServer) {
 func TestMultiInstance(t *testing.T) {
 	m := newMini(t)
 	mc := &miniClock{m: m, now: miniStart}
-	runMultiInstance(t, redisServer{addr: m.Addr(), exact: true, advance: mc.Advance, now: func(*testing.T) time.Time { return mc.now }})
+	runMultiInstance(t, redisServer{addr: m.Addr(), exact: true, advance: func(_ *testing.T, d time.Duration) { mc.Advance(d) }, now: func(*testing.T) time.Time { return mc.now }})
 }
 
 type gcValidator struct {
