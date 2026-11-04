@@ -330,6 +330,7 @@ type rigOpts struct {
 	logger       *slog.Logger
 	wrap         func(http.Handler) http.Handler
 	noBackground bool
+	retention    *Retention
 }
 
 // rig is one cache stage in front of a scripted origin.
@@ -364,6 +365,7 @@ func newRig(tb testing.TB, o rigOpts) *rig {
 		Route:        testRoute,
 		Store:        sp,
 		Retain:       30 * 24 * time.Hour,
+		Retention:    o.retention,
 		Credential:   o.credential,
 		OnStoreError: o.onStoreError,
 		Errors:       o.errs,

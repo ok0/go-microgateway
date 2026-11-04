@@ -41,4 +41,12 @@
 // failed response is discarded before any of it reaches the client and the
 // stored entry is served; Age and ttl are those of the lookup. Soft-purged
 // entries are never served stale; they are revalidated.
+//
+// The purge service (Purger) purges by URL, by tag or everything, hard or soft.
+// A URL purge removes the GET and HEAD entries and every Vary variant of the
+// URL, with the key derivation of requests, so behind a TLS-terminating load
+// balancer a purge names http URLs. Markers that refuse older fills live for
+// the gateway's retention high-water mark. A purge of the built-in memory cache
+// reaches only the instance that receives it (scope instance); a purge of a
+// named store has that store's reach (scope store).
 package cache

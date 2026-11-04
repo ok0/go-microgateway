@@ -85,8 +85,10 @@ type Deps struct {
 	StoreName string
 	// Credential reports whether a request carries credentials. It may be nil.
 	Credential func(*http.Request) bool
-	// Retain is the Purge.Retain used for unsafe-method invalidation.
+	// Retain is the longest storage TTL of the route configuration; it is the purge marker lifetime of unsafe-method invalidation unless Retention is higher.
 	Retain time.Duration
+	// Retention, if set, raises Retain to the high-water shared by every stage and the purge service of the gateway.
+	Retention *Retention
 	// OnStoreError, if set, is called once for every counted store failure with the operation name.
 	OnStoreError func(op string)
 	// Errors rate-limits the store failure log. Nil creates one from Logger and Clock.
@@ -108,6 +110,7 @@ type stage struct {
 	maxBody      int
 	timeout      time.Duration
 	retain       time.Duration
+	retention    *Retention
 	store        store.Cache
 	guard        *storeguard.Guard
 	storeName    string
@@ -189,6 +192,7 @@ func NewStage(rc config.RouteCache, gc config.Cache, d Deps) (middleware.Middlew
 		maxBody:      int(*gc.MaxBodyBytes),
 		timeout:      gc.StoreTimeout.Std(),
 		retain:       d.Retain,
+		retention:    d.Retention,
 		store:        d.Store,
 		guard:        d.Guard,
 		storeName:    d.StoreName,
@@ -322,7 +326,7 @@ func (s *stage) purgeUnsafe(r *http.Request) {
 	p := store.Purge{
 		Kind:   store.PurgeKeys,
 		Keys:   []string{httpcache.PrimaryKey(&get), httpcache.PrimaryKey(&head)},
-		Retain: s.retain,
+		Retain: s.retention.At(s.retain),
 	}
 	if _, err := s.purge(ctx, p); err != nil {
 		s.fail(ctx, opPurge, err)
