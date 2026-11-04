@@ -39,6 +39,7 @@ var cacheFamilies = []string{
 	"microgateway_cache_entries",
 	"microgateway_cache_coalesced_total",
 	"microgateway_cache_background_revalidations_total",
+	"microgateway_cache_purges_total",
 }
 
 // cacheScript is an origin whose response is set by the test and which counts and records its requests.
