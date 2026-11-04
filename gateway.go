@@ -278,7 +278,7 @@ func (g *Gateway) AdminHandler() http.Handler {
 	return g.admin
 }
 
-// Close stops reloads and releases the gateway's resources once requests in flight finish. Requests that arrive after Close receive 503. Close is idempotent.
+// Close stops reloads, cancels background cache refreshes and releases the gateway's resources once requests in flight and those refreshes finish. Requests that arrive after Close receive 503. Close is idempotent.
 func (g *Gateway) Close() error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -288,6 +288,11 @@ func (g *Gateway) Close() error {
 	g.closed = true
 	g.isClosed.Store(true)
 	g.state.Close()
+	g.seriesMu.Lock()
+	for gen := range g.liveGens {
+		gen.snap.CancelBackground()
+	}
+	g.seriesMu.Unlock()
 	g.closeErr = g.cur.Load().retire()
 	return g.closeErr
 }

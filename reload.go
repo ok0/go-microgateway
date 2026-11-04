@@ -195,11 +195,23 @@ func (g *Gateway) build(cfg *config.Config, fp string) (*generation, error) {
 		fingerprint: fp,
 		logger:      g.logger,
 	}
-	gen.release = func() error {
+	// A generation's components stay open until its requests and its background cache refreshes have ended; the last
+	// refresh releases them.
+	finish := func() error {
 		err := lease.Release()
 		g.dropGeneration(gen)
 		g.live.Add(-1)
 		return err
+	}
+	gen.release = func() error {
+		if snap.RetireBackground(func() {
+			if err := finish(); err != nil {
+				g.logger.Warn("releasing retired configuration failed", "error", err)
+			}
+		}) {
+			return nil
+		}
+		return finish()
 	}
 	return gen, nil
 }

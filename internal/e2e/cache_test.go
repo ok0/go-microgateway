@@ -37,6 +37,8 @@ var cacheFamilies = []string{
 	"microgateway_cache_evictions_total",
 	"microgateway_cache_bytes",
 	"microgateway_cache_entries",
+	"microgateway_cache_coalesced_total",
+	"microgateway_cache_background_revalidations_total",
 }
 
 // cacheScript is an origin whose response is set by the test and which counts and records its requests.
@@ -975,7 +977,7 @@ func TestCacheStreamingGateway(t *testing.T) {
 			_, _ = io.WriteString(w, "second")
 		})
 		be := n.serve(t, scr)
-		g := n.gateway(t, cacheGatewayDoc(be.URL, "", cacheRouteYAML("r")), withClock(clock.NewFake(cacheStart)))
+		g := n.gateway(t, cacheGatewayDoc(be.URL, "cache:\n  coalescing:\n    enabled: false\n", cacheRouteYAML("r")), withClock(clock.NewFake(cacheStart)))
 		client := &cancelOnFirstWrite{ResponseRecorder: httptest.NewRecorder(), cancel: cancel, release: closeReleased}
 		req := httptest.NewRequest(http.MethodGet, "http://example.com/cc", nil).WithContext(ctx)
 		g.ServeHTTP(client, req)
@@ -992,6 +994,47 @@ func TestCacheStreamingGateway(t *testing.T) {
 		scr.set(http.StatusOK, http.Header{"Cache-Control": {"max-age=60"}}, "x")
 		if st := cacheLast(t, cacheDo(g, http.MethodGet, "http://example.com/cc", nil)); st.Hit {
 			t.Fatal("cancelled fill was served")
+		}
+	})
+
+	t.Run("client cancel while leading still stores", func(t *testing.T) {
+		n := newMemNetwork()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		released := make(chan struct{})
+		var releaseOnce sync.Once
+		closeReleased := func() { releaseOnce.Do(func() { close(released) }) }
+		t.Cleanup(closeReleased)
+		scr := &cacheScript{}
+		scr.setHandle(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Cache-Control", "max-age=60")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "first")
+			_ = http.NewResponseController(w).Flush()
+			<-released
+			_, _ = io.WriteString(w, "second")
+		})
+		be := n.serve(t, scr)
+		g := n.gateway(t, cacheGatewayDoc(be.URL, "", cacheRouteYAML("r")), withClock(clock.NewFake(cacheStart)))
+		client := &cancelOnFirstWrite{ResponseRecorder: httptest.NewRecorder(), cancel: cancel, release: closeReleased}
+		req := httptest.NewRequest(http.MethodGet, "http://example.com/cl", nil).WithContext(ctx)
+		g.ServeHTTP(client, req)
+		if !strings.Contains(client.Body.String(), "first") {
+			t.Fatalf("client body %q, want the first bytes", client.Body.String())
+		}
+		m := metricsText(t, g)
+		if v := metricValue(t, m, series("microgateway_cache_stores_total", "route", "r", "result", "stored")); v != 1 {
+			t.Fatalf("stored = %v, want 1", v)
+		}
+		if v := metricValue(t, m, series("microgateway_cache_stores_total", "route", "r", "result", "aborted")); v != 0 {
+			t.Fatalf("aborted = %v, want 0", v)
+		}
+		hit := cacheDo(g, http.MethodGet, "http://example.com/cl", nil)
+		if st := cacheLast(t, hit); !st.Hit {
+			t.Fatal("stored fill was not served from the cache")
+		}
+		if hit.Body.String() != "firstsecond" {
+			t.Fatalf("cached body %q, want firstsecond", hit.Body.String())
 		}
 	})
 }
@@ -1058,16 +1101,128 @@ func TestCacheRevalidationGateway(t *testing.T) {
 		fake.Advance(61 * time.Second)
 		scr.set(http.StatusNotModified, http.Header{"Cache-Control": {"max-age=60"}, "Etag": {`"v1"`}}, "")
 		rec := cacheDo(g, http.MethodGet, "http://example.com/swr", nil)
-		if got := scr.lastHeader().Get("If-None-Match"); got != `"v1"` {
-			t.Fatalf("origin If-None-Match %q, want \"v1\"", got)
-		}
 		if rec.Body.String() != "old" {
 			t.Fatalf("body %q, want old", rec.Body.String())
 		}
+		if st := cacheLast(t, rec); !st.Hit || st.Fwd != httpcache.FwdStale || st.Detail != "stale-while-revalidate" || !st.HasTTL || st.TTL != -1 {
+			t.Fatalf("status %+v, want hit fwd=stale detail=stale-while-revalidate ttl=-1", st)
+		}
+		revalidated := func() bool {
+			return strings.Contains(metricsText(t, g), series("microgateway_cache_background_revalidations_total", "route", "r", "result", "revalidated")+" 1\n")
+		}
+		eventually(t, "background revalidation completes", revalidated, nil)
+		if got := scr.lastHeader().Get("If-None-Match"); got != `"v1"` {
+			t.Fatalf("origin If-None-Match %q, want \"v1\"", got)
+		}
 		m := metricsText(t, g)
-		if v := metricValue(t, m, series("microgateway_cache_requests_total", "route", "r", "result", "revalidated")); v != 1 {
+		if v := metricValue(t, m, series("microgateway_cache_requests_total", "route", "r", "result", "stale")); v != 1 {
+			t.Fatalf("stale = %v, want 1", v)
+		}
+		if v := metricValue(t, m, series("microgateway_cache_requests_total", "route", "r", "result", "revalidated")); v != 0 {
+			t.Fatalf("revalidated = %v, want 0", v)
+		}
+	})
+}
+
+func TestCacheBackgroundRefreshRelease(t *testing.T) {
+	t.Parallel()
+	const target = "http://example.com/bg"
+	const cc = "max-age=60, stale-while-revalidate=30"
+	setup := func(t *testing.T, n *memNetwork) (*cacheScript, chan struct{}, func()) {
+		t.Helper()
+		arrived := make(chan struct{}, 4)
+		gate := make(chan struct{})
+		var once sync.Once
+		release := func() { once.Do(func() { close(gate) }) }
+		t.Cleanup(release)
+		var calls atomic.Int32
+		scr := &cacheScript{}
+		scr.setHandle(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Cache-Control", cc)
+			w.Header().Set("Etag", `"v1"`)
+			if calls.Add(1) == 1 {
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, "old")
+				return
+			}
+			arrived <- struct{}{}
+			select {
+			case <-gate:
+				w.WriteHeader(http.StatusNotModified)
+			case <-r.Context().Done():
+			}
+		})
+		return scr, arrived, release
+	}
+
+	t.Run("close with a refresh in flight", func(t *testing.T) {
+		n := newMemNetwork()
+		pre := snapGoroutines()
+		fake := clock.NewFake(cacheStart)
+		scr, arrived, release := setup(t, n)
+		be := n.serve(t, scr)
+		g := n.gateway(t, cacheGatewayDoc(be.URL, "", cacheRouteYAML("r")), withClock(fake))
+		cacheDo(g, http.MethodGet, target, nil)
+		base := snapGoroutines()
+		fake.Advance(61 * time.Second)
+		rec := cacheDo(g, http.MethodGet, target, nil)
+		if rec.Body.String() != "old" {
+			t.Fatalf("body %q, want old", rec.Body.String())
+		}
+		if st := cacheLast(t, rec); st.Detail != "stale-while-revalidate" {
+			t.Fatalf("status %+v, want detail stale-while-revalidate", st)
+		}
+		testwait.Recv(t, "refresh parked at the origin", arrived, nil)
+		if err := g.Close(); err != nil {
+			t.Fatal(err)
+		}
+		eventually(t, "no live generation after close", func() bool { return inspect(g).LiveGenerations == 0 }, func() string {
+			return fmt.Sprintf("LiveGenerations=%d", inspect(g).LiveGenerations)
+		})
+		release()
+		awaitGoroutinesSettled(t, "background refresh goroutines after close", pre, base)
+	})
+
+	t.Run("reload replacing the runner with a refresh in flight", func(t *testing.T) {
+		n := newMemNetwork()
+		pre := snapGoroutines()
+		fake := clock.NewFake(cacheStart)
+		scr, arrived, release := setup(t, n)
+		be := n.serve(t, scr)
+		doc := func(top string) string { return cacheGatewayDoc(be.URL, top, cacheRouteYAML("r")) }
+		g := n.gateway(t, doc(""), withClock(fake))
+		cacheDo(g, http.MethodGet, target, nil)
+		base := snapGoroutines()
+		fake.Advance(61 * time.Second)
+		rec := cacheDo(g, http.MethodGet, target, nil)
+		if rec.Body.String() != "old" {
+			t.Fatalf("body %q, want old", rec.Body.String())
+		}
+		if st := cacheLast(t, rec); st.Detail != "stale-while-revalidate" {
+			t.Fatalf("status %+v, want detail stale-while-revalidate", st)
+		}
+		testwait.Recv(t, "refresh parked at the origin", arrived, nil)
+		if err := g.ReloadYAML([]byte(doc("cache:\n  max_background: 2\n"))); err != nil {
+			t.Fatal(err)
+		}
+		if live := inspect(g).LiveGenerations; live != 2 {
+			t.Fatalf("live generations %d, want 2 while the refresh runs", live)
+		}
+		release()
+		eventually(t, "old generation released after its refresh", func() bool { return inspect(g).LiveGenerations == 1 }, func() string {
+			return fmt.Sprintf("LiveGenerations=%d", inspect(g).LiveGenerations)
+		})
+		m := metricsText(t, g)
+		if v := metricValue(t, m, series("microgateway_cache_background_revalidations_total", "route", "r", "result", "revalidated")); v != 1 {
 			t.Fatalf("revalidated = %v, want 1", v)
 		}
+		if st := cacheLast(t, cacheDo(g, http.MethodGet, target, nil)); !st.Hit || !st.HasTTL || st.TTL != 60 {
+			t.Fatalf("status %+v, want fresh hit with ttl=60", st)
+		}
+		if err := g.Close(); err != nil {
+			t.Fatal(err)
+		}
+		awaitGoroutinesSettled(t, "background refresh goroutines after reload and close", pre, base)
 	})
 }
 

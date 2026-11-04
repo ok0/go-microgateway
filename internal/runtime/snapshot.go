@@ -11,7 +11,9 @@ import (
 
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/auth"
+	"github.com/ok0/go-microgateway/internal/cache"
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/coalesce"
 	"github.com/ok0/go-microgateway/internal/httperr"
 	"github.com/ok0/go-microgateway/internal/memstore"
 	"github.com/ok0/go-microgateway/internal/metrics"
@@ -52,6 +54,9 @@ type Snapshot struct {
 	cacheSeries *CacheSeries
 	cacheRoutes []string
 	memCache    *memstore.Cache
+	coalesce    *coalesce.Group
+	runner      *cache.Runner
+	background  *cache.Scope
 }
 
 type routeEntry struct {
@@ -287,8 +292,14 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 	}
 
 	var memCache *memstore.Cache
+	var group *coalesce.Group
+	var runner *cache.Runner
+	var background *cache.Scope
 	if cw != nil {
 		memCache = cw.mem
+		group = cw.group
+		runner = cw.runner
+		background = cw.scope
 	}
 	s := &Snapshot{
 		Config:      cfg,
@@ -304,6 +315,9 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 		cacheSeries: cs,
 		cacheRoutes: cacheRoutes,
 		memCache:    memCache,
+		coalesce:    group,
+		runner:      runner,
+		background:  background,
 	}
 	root := []middleware.Middleware{
 		middleware.RequestID(cfg.Global.RequestIDHeader),
@@ -421,6 +435,38 @@ func (s *Snapshot) MemCacheStats() (memstore.CacheStats, bool) {
 		return memstore.CacheStats{}, false
 	}
 	return s.memCache.Stats(), true
+}
+
+// CoalesceStats reports the in-flight coalescing state of the snapshot's group. It reports false when the snapshot has none.
+func (s *Snapshot) CoalesceStats() (coalesce.Stats, bool) {
+	if s.coalesce == nil {
+		return coalesce.Stats{}, false
+	}
+	return s.coalesce.Stats(), true
+}
+
+// BackgroundRunning reports the background refreshes running in the snapshot's runner. It is 0 when the snapshot has none.
+func (s *Snapshot) BackgroundRunning() int {
+	if s.runner == nil {
+		return 0
+	}
+	return s.runner.Running()
+}
+
+// CancelBackground ends the background refreshes started by this snapshot; later ones are not started.
+func (s *Snapshot) CancelBackground() {
+	if s.background != nil {
+		s.background.Cancel()
+	}
+}
+
+// RetireBackground stops new background refreshes of the snapshot. It reports true when some still run, and then calls
+// onIdle once after the last one ended. It reports false, without calling onIdle, when none runs.
+func (s *Snapshot) RetireBackground(onIdle func()) bool {
+	if s.background == nil {
+		return false
+	}
+	return s.background.Retire(onIdle)
 }
 
 // RefreshRateLimitKeys sets the key-count gauge of every rate-limited route that has an in-memory store.

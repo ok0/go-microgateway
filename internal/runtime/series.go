@@ -121,6 +121,10 @@ type CacheSeries struct {
 	Bytes *metrics.GaugeVec
 	// Entries is the number of entries in the built-in memory cache.
 	Entries *metrics.GaugeVec
+	// Coalesced counts requests served by a response another request fetched, by route.
+	Coalesced *metrics.CounterVec
+	// Background counts background revalidations by route and result.
+	Background *metrics.CounterVec
 }
 
 // RegisterCacheSeries registers (or, for an identical earlier registration, reuses) the cache series in r.
@@ -149,5 +153,13 @@ func RegisterCacheSeries(r *metrics.Registry) (*CacheSeries, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &CacheSeries{Requests: requests, Stores: stores, StoreErrors: storeErrors, Evictions: evictions, Bytes: bytes, Entries: entries}, nil
+	coalesced, err := r.Counter("microgateway_cache_coalesced_total", "Requests served by a response the response cache stage shared from another request's upstream fetch, by route.", "route")
+	if err != nil {
+		return nil, err
+	}
+	background, err := r.Counter("microgateway_cache_background_revalidations_total", "Background revalidations of stale response cache entries, by route and result.", "route", "result")
+	if err != nil {
+		return nil, err
+	}
+	return &CacheSeries{Requests: requests, Stores: stores, StoreErrors: storeErrors, Evictions: evictions, Bytes: bytes, Entries: entries, Coalesced: coalesced, Background: background}, nil
 }

@@ -109,12 +109,13 @@ func TestCacheTTLGateway(t *testing.T) {
 
 	t.Run("storage boundary", func(t *testing.T) {
 		cases := []struct {
-			name  string
-			route string
-			keep  time.Duration
+			name       string
+			route      string
+			keep       time.Duration
+			background bool
 		}{
 			{name: "keep", route: "keep: 30s", keep: 30 * time.Second},
-			{name: "stale_while_revalidate", route: "stale_while_revalidate: 40s", keep: 40 * time.Second},
+			{name: "stale_while_revalidate", route: "stale_while_revalidate: 40s", keep: 40 * time.Second, background: true},
 			{name: "stale_if_error", route: "stale_if_error: 50s", keep: 50 * time.Second},
 		}
 		for _, c := range cases {
@@ -129,11 +130,25 @@ func TestCacheTTLGateway(t *testing.T) {
 				}
 				g, scr := probe(s - time.Nanosecond)
 				rec := cacheDo(g, http.MethodGet, "http://example.com/s", nil)
-				if st := cacheLast(t, rec); st.Fwd != httpcache.FwdStale {
+				st := cacheLast(t, rec)
+				if c.background {
+					if !st.Hit || st.Fwd != httpcache.FwdStale || st.Detail != "stale-while-revalidate" || !st.HasTTL || st.TTL != -40 {
+						t.Fatalf("at S-1ns: %+v, want stale-while-revalidate hit with ttl=-40", st)
+					}
+					if age := rec.Header().Get("Age"); age != "99" {
+						t.Fatalf("at S-1ns: Age %q, want 99", age)
+					}
+					eventually(t, "background refresh at S-1ns", func() bool {
+						return strings.Contains(metricsText(t, g), series("microgateway_cache_background_revalidations_total", "route", "r", "result", "replaced")+" 1\n")
+					}, nil)
+				} else if st.Fwd != httpcache.FwdStale {
 					t.Fatalf("at S-1ns: %+v, want conditional forward", st)
 				}
 				if got := scr.lastHeader().Get("If-None-Match"); got != `"v1"` {
 					t.Fatalf("at S-1ns: origin If-None-Match %q, want \"v1\"", got)
+				}
+				if scr.count() != 2 {
+					t.Fatalf("at S-1ns: origin calls %d, want 2", scr.count())
 				}
 				for _, at := range []time.Duration{s, s + time.Nanosecond} {
 					g, scr := probe(at)

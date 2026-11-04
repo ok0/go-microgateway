@@ -16,6 +16,7 @@ import (
 
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/coalesce"
 	"github.com/ok0/go-microgateway/internal/metrics"
 	"github.com/ok0/go-microgateway/internal/middleware"
 	"github.com/ok0/go-microgateway/internal/reqctx"
@@ -626,4 +627,36 @@ routes:
 	if requests, _ := b3.Stats(); requests != 0 {
 		t.Errorf("requests = %d for a new budget, want 0", requests)
 	}
+}
+
+func TestSnapshotBackgroundScope(t *testing.T) {
+	cached, _, err := build(t, mustParse(t, cacheHead+cacheRouteBlock), Deps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, ok := cached.CoalesceStats(); !ok || st != (coalesce.Stats{}) {
+		t.Fatalf("CoalesceStats = %+v, %v; want an idle group", st, ok)
+	}
+	if n := cached.BackgroundRunning(); n != 0 {
+		t.Fatalf("BackgroundRunning = %d on an idle snapshot", n)
+	}
+	if cached.RetireBackground(func() { t.Error("onIdle called without a running refresh") }) {
+		t.Fatal("RetireBackground reported a running refresh on an idle snapshot")
+	}
+	cached.CancelBackground()
+
+	plain, _, err := build(t, mustParse(t, cacheHead+"routes:\n"+plainRouteBlock), Deps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.RetireBackground(func() { t.Error("onIdle called for a snapshot without a scope") }) {
+		t.Fatal("RetireBackground reported a refresh for a snapshot without a scope")
+	}
+	if n := plain.BackgroundRunning(); n != 0 {
+		t.Fatalf("BackgroundRunning = %d without a runner", n)
+	}
+	if _, ok := plain.CoalesceStats(); ok {
+		t.Fatal("CoalesceStats reported a group for a snapshot without cache")
+	}
+	plain.CancelBackground()
 }

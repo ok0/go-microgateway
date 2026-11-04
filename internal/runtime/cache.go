@@ -10,6 +10,7 @@ import (
 	"github.com/ok0/go-microgateway/internal/auth"
 	"github.com/ok0/go-microgateway/internal/cache"
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/coalesce"
 	"github.com/ok0/go-microgateway/internal/memstore"
 	"github.com/ok0/go-microgateway/internal/middleware"
 	"github.com/ok0/go-microgateway/internal/state"
@@ -39,6 +40,9 @@ type cacheWiring struct {
 	errs         *cache.ErrorLog
 	retain       time.Duration
 	onStoreError func(op string)
+	group        *coalesce.Group
+	runner       *cache.Runner
+	scope        *cache.Scope
 }
 
 func buildCacheWiring(cfg *config.Config, tx *state.Tx, clk clock.Clock, logger *slog.Logger, cs *CacheSeries, s *Series, built map[string]*builtStore) (*cacheWiring, error) {
@@ -47,6 +51,24 @@ func buildCacheWiring(cfg *config.Config, tx *state.Tx, clk clock.Clock, logger 
 		errs:   cache.NewErrorLog(logger, clk),
 		retain: cfg.Cache.MaxStorageTTL(cfg.Routes),
 	}
+	if *cfg.Cache.Coalescing.Enabled {
+		co := cfg.Cache.Coalescing
+		g, err := state.Get(tx, KindCache, "coalescing", fp([]int{*co.MaxKeys, *co.MaxWaiters}), func() (*coalesce.Group, error) {
+			return coalesce.New(*co.MaxKeys, *co.MaxWaiters, clk), nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		w.group = g
+	}
+	rn, err := state.Get(tx, KindCache, "background", fp(*cfg.Cache.MaxBackground), func() (*cache.Runner, error) {
+		return cache.NewRunner(*cfg.Cache.MaxBackground), nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	w.runner = rn
+	w.scope = rn.Scope()
 	if cfg.Cache.Store == "" {
 		mc := cfg.Cache.Memory
 		m, err := state.Get(tx, KindCache, "memory", fp(mc), func() (*memstore.Cache, error) {
@@ -94,7 +116,9 @@ func buildCacheStage(r *config.Route, cfg *config.Config, w *cacheWiring, provid
 		OnStoreError: w.onStoreError,
 		Errors:       w.errs,
 		Clock:        clk,
-		Metrics:      &cache.Metrics{Requests: w.series.Requests, Stores: w.series.Stores, StoreErrors: w.series.StoreErrors},
+		Group:        w.group,
+		Background:   w.scope,
+		Metrics:      &cache.Metrics{Requests: w.series.Requests, Stores: w.series.Stores, StoreErrors: w.series.StoreErrors, Coalesced: w.series.Coalesced, Background: w.series.Background},
 		Logger:       logger,
 	})
 }
