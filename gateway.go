@@ -86,7 +86,7 @@ func init() {
 	}
 	hooks.Inspect = func(gw any) hooks.Stats {
 		g := gw.(*Gateway)
-		return hooks.Stats{
+		st := hooks.Stats{
 			StateEntries:    g.state.Len(),
 			LiveGenerations: g.live.Load(),
 			Generation:      g.cur.Load(),
@@ -94,6 +94,10 @@ func init() {
 			ReloadFailure:   g.reloads.failure.Value(),
 			ReloadUnchanged: g.reloads.unchanged.Value(),
 		}
+		if mc, ok := g.cur.Load().snap.MemCacheStats(); ok {
+			st.MemCache = &mc
+		}
+		return st
 	}
 	hooks.StoreClock = func(p any) clock.Clock {
 		if c := p.(StoreParams).clk; c != nil {

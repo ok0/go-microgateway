@@ -7,6 +7,7 @@ import (
 
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/memstore"
 )
 
 // Participant takes part in every configuration load of a gateway, the initial one and every reload.
@@ -50,6 +51,7 @@ type Stats struct {
 	LiveGenerations                               int64   // generations whose resources are not yet released
 	Generation                                    any     // identity of the active generation; equal values mean the same generation
 	ReloadSuccess, ReloadFailure, ReloadUnchanged float64 // configuration reload attempts, by result
+	MemCache                                      *memstore.CacheStats
 }
 
 // Inspect returns the Stats of gw, which must be a *microgateway.Gateway; it panics for any other value. Package
