@@ -225,3 +225,103 @@ func TestScopeCancel(t *testing.T) {
 		t.Fatal("Retire of a cancelled idle scope reported running refreshes")
 	}
 }
+
+func TestScopeIdleClosesRunner(t *testing.T) {
+	settled := func(t *testing.T, r *Runner, s *Scope, base int) {
+		t.Helper()
+		if n := r.Running(); n != 0 {
+			t.Fatalf("runner running %d, want 0", n)
+		}
+		if r.Go("x", noop) {
+			t.Fatal("Go started a refresh on a closed runner")
+		}
+		if s.Go("y", noop) {
+			t.Fatal("Go started a refresh on a retired scope")
+		}
+		testwait.Until(t, "goroutines settled", func() bool { return runtime.NumGoroutine() <= base }, nil)
+	}
+	t.Run("retire then release", func(t *testing.T) {
+		base := runtime.NumGoroutine()
+		r := NewRunner(1)
+		s := r.Scope()
+		started := make(chan struct{})
+		gate := make(chan struct{})
+		closed := make(chan error, 1)
+		if !s.Go("k", func(context.Context) {
+			close(started)
+			<-gate
+		}) {
+			t.Fatal("Go refused")
+		}
+		testwait.Done(t, "refresh started", started, nil)
+		if !s.Retire(func() { closed <- r.Close() }) {
+			t.Fatal("Retire reported no running refresh")
+		}
+		close(gate)
+		err, _ := testwait.Recv(t, "idle callback closed the runner", closed, nil)
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		settled(t, r, s, base)
+	})
+	t.Run("cancel then retire", func(t *testing.T) {
+		base := runtime.NumGoroutine()
+		r := NewRunner(1)
+		s := r.Scope()
+		started := make(chan struct{})
+		gate := make(chan struct{})
+		cancelled := make(chan error, 1)
+		closed := make(chan error, 1)
+		if !s.Go("k", func(ctx context.Context) {
+			close(started)
+			<-ctx.Done()
+			cancelled <- ctx.Err()
+			<-gate
+		}) {
+			t.Fatal("Go refused")
+		}
+		testwait.Done(t, "refresh started", started, nil)
+		s.Cancel()
+		err, _ := testwait.Recv(t, "refresh context cancelled", cancelled, nil)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("refresh context ended with %v, want canceled", err)
+		}
+		if !s.Retire(func() { closed <- r.Close() }) {
+			t.Fatal("Retire reported no running refresh")
+		}
+		close(gate)
+		err, _ = testwait.Recv(t, "idle callback closed the runner", closed, nil)
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		settled(t, r, s, base)
+	})
+	t.Run("runner closed from outside", func(t *testing.T) {
+		base := runtime.NumGoroutine()
+		r := NewRunner(1)
+		s := r.Scope()
+		started := make(chan struct{})
+		closed := make(chan error, 1)
+		if !s.Go("k", func(ctx context.Context) {
+			close(started)
+			<-ctx.Done()
+		}) {
+			t.Fatal("Go refused")
+		}
+		testwait.Done(t, "refresh started", started, nil)
+		if !s.Retire(func() { closed <- r.Close() }) {
+			t.Fatal("Retire reported no running refresh")
+		}
+		ext := make(chan error, 1)
+		go func() { ext <- r.Close() }()
+		err, _ := testwait.Recv(t, "external Close returned", ext, nil)
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		err, _ = testwait.Recv(t, "idle callback closed the runner", closed, nil)
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		settled(t, r, s, base)
+	})
+}

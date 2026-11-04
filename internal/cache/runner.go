@@ -31,6 +31,13 @@ func NewRunner(max int) *Runner {
 // is closed, when max refreshes are running or when key is already in flight. It never queues. The context passed to
 // fn ends when the runner is closed.
 func (r *Runner) Go(key string, fn func(ctx context.Context)) bool {
+	return r.start(key, fn, nil)
+}
+
+// start is Go with an after callback. Like Go, it runs fn in its own goroutine under key. after runs in that goroutine
+// once the refresh has left the runner (slot, key and join released), so after may close the runner without waiting
+// on itself.
+func (r *Runner) start(key string, fn func(ctx context.Context), after func()) bool {
 	r.mu.Lock()
 	if r.closed || r.running >= r.max {
 		r.mu.Unlock()
@@ -51,6 +58,9 @@ func (r *Runner) Go(key string, fn func(ctx context.Context)) bool {
 			r.running--
 			r.mu.Unlock()
 			r.wg.Done()
+			if after != nil {
+				after()
+			}
 		}()
 		fn(r.ctx)
 	}()
@@ -64,7 +74,8 @@ func (r *Runner) Running() int {
 	return r.running
 }
 
-// Close cancels and joins every refresh; later Go calls start nothing. It is idempotent and always returns nil.
+// Close cancels and joins every refresh function; later Go calls start nothing. A scope's idle callback runs after its
+// refresh left the runner, so it may call Close. It is idempotent and always returns nil.
 func (r *Runner) Close() error {
 	r.mu.Lock()
 	r.closed = true
@@ -103,14 +114,13 @@ func (s *Scope) Go(key string, fn func(ctx context.Context)) bool {
 	}
 	s.n++
 	s.mu.Unlock()
-	ok := s.r.Go(key, func(rctx context.Context) {
-		defer s.done()
+	ok := s.r.start(key, func(rctx context.Context) {
 		ctx, cancel := context.WithCancel(s.ctx)
 		defer cancel()
 		stop := context.AfterFunc(rctx, cancel)
 		defer stop()
 		fn(ctx)
-	})
+	}, s.done)
 	if !ok {
 		s.done()
 	}
@@ -148,8 +158,8 @@ func (s *Scope) Cancel() {
 }
 
 // Retire stops the scope from starting refreshes. It reports true when refreshes are running; then onIdle, when non-nil,
-// runs once in the goroutine of the last refresh after its function returned. It reports false, without calling onIdle,
-// when no refresh runs or Retire was called before.
+// runs once in the goroutine of the last refresh after its function returned and after it left the runner, so onIdle
+// may close the runner. It reports false, without calling onIdle, when no refresh runs or Retire was called before.
 func (s *Scope) Retire(onIdle func()) bool {
 	s.mu.Lock()
 	if s.retired {
