@@ -21,8 +21,11 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/httperr"
+	"github.com/ok0/go-microgateway/internal/teststore"
 	"github.com/ok0/go-microgateway/internal/testwait"
+	"github.com/ok0/go-microgateway/store"
 )
 
 // auPEM returns pub as a PKIX "PUBLIC KEY" PEM document.
@@ -764,6 +767,18 @@ func auJWKSDoc(backendURL, jwksURL, jwksExtra, rev string, withJWT bool) string 
 	return auDoc(backendURL, authYAML, routes)
 }
 
+func auSpyDoc(backendURL, ttl, minRefresh string) string {
+	authYAML := "auth:\n  jwt:\n    - name: idp\n      issuer: " + auIssuer + "\n      audiences:\n        - " + auAudience + "\n" +
+		"      jwks:\n        url: " + strconv.Quote(jwksTestURL) + "\n        algorithms:\n          - RS256\n          - ES256\n" +
+		"        ttl: " + ttl + "\n        min_refresh_interval: " + minRefresh + "\n"
+	routes := "  - name: jwt\n    match:\n      path: /jwt\n    upstream: be\n    auth:\n      mode: jwt\n      providers:\n        - idp\n" +
+		"  - name: jwtrl\n    match:\n      path: /jwtrl\n    upstream: be\n    auth:\n      mode: jwt\n      providers:\n        - idp\n" +
+		smRate("spy", 1000, 1000)
+	return "version: 1\nstores:\n" + stStore("spy", "") + listenersYAML +
+		fmt.Sprintf("upstreams:\n  - name: be\n    hosts:\n      - url: %q\n", backendURL) +
+		authYAML + "routes:\n" + routes
+}
+
 // auHungFetcher blocks until the context of the fetch is done and records that the cancellation was seen.
 type auHungFetcher struct {
 	cancelled chan struct{}
@@ -1109,6 +1124,182 @@ func TestAuthJWKSPerInstance(t *testing.T) {
 	if n := f.count(); n != 2 {
 		t.Fatalf("fetches after instance 2 = %d, want 2", n)
 	}
+}
+
+func TestInstancesIsolateJWKSKeySets(t *testing.T) {
+	e := newAuEnv(t)
+	k := auTestKeys(t)
+	be, _ := auBackend(e)
+	k1 := auJWK("k1", "RS256", &k.rsa1.PublicKey)
+	fa, fb := &auFetcher{}, &auFetcher{}
+	fa.set(auJWKS(k1), nil)
+	fb.set(auJWKS(k1), nil)
+	spy := teststore.NewSpy()
+	shared := stShared(t, rlFake())
+	opt := miSpyOption(spy, store.CapRateLimit, shared, nil, nil)
+	doc := auSpyDoc(be.URL, "5m", "1s")
+	fakeA, fakeB := clock.NewFake(auStart), clock.NewFake(auStart)
+	gA := e.n.gateway(t, doc, microgateway.WithLogger(e.logger()), withClock(fakeA),
+		microgateway.WithKeySetFetcher(fa), microgateway.WithHTTPClient(auFailingClient(t)), opt)
+	gB := e.n.gateway(t, doc, microgateway.WithLogger(e.logger()), withClock(fakeB),
+		microgateway.WithKeySetFetcher(fb), microgateway.WithHTTPClient(auFailingClient(t)), opt)
+	tok1 := e.mint("RS256", "k1", k.rsa1, e.claims(nil))
+	tok2 := e.mint("RS256", "k2", k.rsa2, e.claims(nil))
+	get := func(g *microgateway.Gateway, target, tok string) *httptest.ResponseRecorder {
+		return e.get(g, target, http.Header{"Authorization": []string{"Bearer " + tok}})
+	}
+
+	if rr := get(gA, "/jwt", tok1); rr.Code != http.StatusOK {
+		t.Fatalf("A k1 status = %d, want 200", rr.Code)
+	}
+	if fa.count() != 1 || fb.count() != 0 {
+		t.Fatalf("fetches after A = %d and %d, want 1 and 0", fa.count(), fb.count())
+	}
+	if rr := get(gB, "/jwt", tok1); rr.Code != http.StatusOK {
+		t.Fatalf("B k1 status = %d, want 200", rr.Code)
+	}
+	if fb.count() != 1 || fa.count() != 1 {
+		t.Fatalf("fetches after B = %d and %d, want 1 and 1", fa.count(), fb.count())
+	}
+
+	fakeA.Advance(5*time.Minute - time.Nanosecond)
+	if rr := get(gA, "/jwt", tok1); rr.Code != http.StatusOK {
+		t.Fatalf("A status before ttl = %d, want 200", rr.Code)
+	}
+	if n := fa.count(); n != 1 {
+		t.Fatalf("A fetches before ttl = %d, want 1", n)
+	}
+	if rr := get(gB, "/jwt", tok1); rr.Code != http.StatusOK {
+		t.Fatalf("B status = %d, want 200", rr.Code)
+	}
+	if n := fb.count(); n != 1 {
+		t.Fatalf("B fetches = %d, want 1", n)
+	}
+
+	fakeA.Advance(time.Nanosecond)
+	if rr := get(gA, "/jwt", tok1); rr.Code != http.StatusOK {
+		t.Fatalf("A status at ttl = %d, want 200", rr.Code)
+	}
+	eventually(t, "A key set refetched at its ttl", func() bool { return fa.count() == 2 },
+		func() string { return fmt.Sprintf("A fetches = %d, want 2", fa.count()) })
+
+	fakeA.Advance(5*time.Minute + time.Nanosecond)
+	if rr := get(gA, "/jwt", tok1); rr.Code != http.StatusOK {
+		t.Fatalf("A status after second ttl = %d, want 200", rr.Code)
+	}
+	if n := fa.count(); n != 3 {
+		t.Fatalf("A fetches after second ttl = %d, want 3", n)
+	}
+	if n := fb.count(); n != 1 {
+		t.Fatalf("B fetches during A ttl = %d, want 1", n)
+	}
+
+	fa.set(auJWKS(k1, auJWK("k2", "RS256", &k.rsa2.PublicKey)), nil)
+	fakeA.Advance(time.Second)
+	if rr := get(gA, "/jwt", tok2); rr.Code != http.StatusOK {
+		t.Fatalf("A k2 status = %d, want 200", rr.Code)
+	}
+	if n := fa.count(); n != 4 {
+		t.Fatalf("A fetches after unknown kid = %d, want 4", n)
+	}
+
+	fakeB.Advance(time.Second)
+	rr := get(gB, "/jwt", tok2)
+	auAssert401(t, rr, "Bearer")
+	if got := auFailures(t, gB, "jwt", "unknown_kid"); got != 1 {
+		t.Errorf("B unknown_kid failures = %v, want 1", got)
+	}
+	if n := fb.count(); n != 2 {
+		t.Fatalf("B fetches after unknown kid = %d, want 2", n)
+	}
+
+	fa.set(nil, errors.New("idp down"))
+	fakeA.Advance(5 * time.Minute)
+	if rr := get(gA, "/jwt", tok1); rr.Code != http.StatusOK {
+		t.Fatalf("A status after failed refresh = %d, want 200 (last-good keys)", rr.Code)
+	}
+	if n := fa.count(); n != 5 {
+		t.Fatalf("A fetches after failed refresh = %d, want 5", n)
+	}
+	if rr := get(gB, "/jwt", tok1); rr.Code != http.StatusOK {
+		t.Fatalf("B status = %d, want 200", rr.Code)
+	}
+	if n := fb.count(); n != 2 {
+		t.Fatalf("B fetches after A failure = %d, want 2", n)
+	}
+
+	if n := spy.Count(""); n != 0 {
+		t.Fatalf("store calls for /jwt requests = %d, want 0", n)
+	}
+	before := len(spy.Calls())
+	for range 3 {
+		if rr := get(gA, "/jwtrl", tok1); rr.Code != http.StatusOK {
+			t.Fatalf("A /jwtrl status = %d, want 200", rr.Code)
+		}
+	}
+	for range 2 {
+		if rr := get(gB, "/jwtrl", tok1); rr.Code != http.StatusOK {
+			t.Fatalf("B /jwtrl status = %d, want 200", rr.Code)
+		}
+	}
+	delta := miSpyDelta(spy, before)
+	if len(delta) != 5 {
+		t.Fatalf("store calls for /jwtrl requests = %d, want 5", len(delta))
+	}
+	for _, c := range delta {
+		if c.Op != "take" {
+			t.Errorf("store call op = %q, want take", c.Op)
+		}
+	}
+}
+
+func TestKeySetFetcherOnlySource(t *testing.T) {
+	e := newAuEnv(t)
+	k := auTestKeys(t)
+	be, _ := auBackend(e)
+	f := &auFetcher{}
+	f.set(auJWKS(auJWK("k1", "RS256", &k.rsa1.PublicKey)), nil)
+	g := e.gateway(auJWKSDoc(be.URL, jwksTestURL, "        ttl: 5m\n", "1", true),
+		microgateway.WithKeySetFetcher(f), microgateway.WithHTTPClient(auFailingClient(t)))
+	hdr := func(tok string) http.Header {
+		return http.Header{"Authorization": []string{"Bearer " + tok}}
+	}
+	tok1 := e.mint("RS256", "k1", k.rsa1, e.claims(nil))
+	tok2 := e.mint("RS256", "k2", k.rsa2, e.claims(nil))
+
+	if rr := e.get(g, "/jwt", hdr(tok1)); rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	if n := f.count(); n != 1 {
+		t.Fatalf("fetches = %d, want 1", n)
+	}
+
+	f.set(nil, errors.New("idp down"))
+	e.clk.Advance(5 * time.Minute)
+	if rr := e.get(g, "/jwt", hdr(tok1)); rr.Code != http.StatusOK {
+		t.Fatalf("status after failed fetch = %d, want 200 (last-good keys)", rr.Code)
+	}
+	if n := f.count(); n != 2 {
+		t.Fatalf("fetches after failed fetch = %d, want 2", n)
+	}
+
+	f.setPanic(true)
+	e.clk.Advance(5 * time.Minute)
+	if rr := e.get(g, "/jwt", hdr(tok1)); rr.Code != http.StatusOK {
+		t.Fatalf("status after panicking fetch = %d, want 200 (last-good keys)", rr.Code)
+	}
+	if n := f.count(); n != 3 {
+		t.Fatalf("fetches after panicking fetch = %d, want 3", n)
+	}
+
+	if got := rsMetricOr0(t, g, "microgateway_auth_jwks_refreshes_total", "provider", "idp", "result", "failure"); got != 2 {
+		t.Errorf("failed refreshes = %v, want 2", got)
+	}
+	if got := rsMetricOr0(t, g, "microgateway_auth_jwks_refreshes_total", "provider", "idp", "result", "success"); got != 1 {
+		t.Errorf("successful refreshes = %v, want 1", got)
+	}
+
+	auAssert401(t, e.get(g, "/jwt", hdr(tok2)), "Bearer")
 }
 
 func TestAuthJWKSReloadState(t *testing.T) {
