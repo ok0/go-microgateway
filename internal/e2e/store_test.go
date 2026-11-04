@@ -295,7 +295,7 @@ func TestStoreRegistrationErrors(t *testing.T) {
 		{name: "empty name", opts: []microgateway.Option{microgateway.WithStoreType("", store.CapRateLimit, f)}, want: "empty type name"},
 		{name: "nil factory", opts: []microgateway.Option{microgateway.WithStoreType("nilf", store.CapRateLimit, nil)}, want: `WithStoreType("nilf"): nil factory`},
 		{name: "zero caps", opts: []microgateway.Option{microgateway.WithStoreType("zero", 0, f)}, want: `WithStoreType("zero"): capabilities must not be zero`},
-		{name: "unknown caps", opts: []microgateway.Option{microgateway.WithStoreType("unk", store.CapRateLimit|1<<1, f)}, want: `WithStoreType("unk"): unknown capability bits`},
+		{name: "unknown caps", opts: []microgateway.Option{microgateway.WithStoreType("unk", store.CapRateLimit|1<<2, f)}, want: `WithStoreType("unk"): unknown capability bits`},
 		{name: "duplicate", opts: []microgateway.Option{microgateway.WithStoreType("dup", store.CapRateLimit, f), microgateway.WithStoreType("dup", store.CapRateLimit, f)}, want: `WithStoreType("dup"): type registered twice`},
 	}
 	for _, tc := range cases {
@@ -314,6 +314,32 @@ func TestStoreRegistrationErrors(t *testing.T) {
 				t.Errorf("Validate() error = %v, want it to contain %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestStoreRegistrationAcceptsCache(t *testing.T) {
+	shared := teststore.NewSharedCache(clock.NewFake(cacheStart), 1<<20)
+	t.Cleanup(func() { _ = shared.Close() })
+	opt := microgateway.WithStoreType("cachestore", store.CapCache, func(microgateway.StoreParams) (store.Backend, error) {
+		return shared.Handle(), nil
+	})
+	const doc = "version: 1\n" + listenersYAML + "upstreams:\n  - name: up\n    hosts:\n      - url: \"http://127.0.0.1:1\"\nstores:\n  - name: sc\n    type: cachestore\ncache:\n  store: sc\nroutes:\n  - name: cached\n    match:\n      path: /cached\n    upstream: up\n    cache:\n      enabled: true\n"
+	cfg, err := config.Parse([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := newGateway(cfg, opt)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = g.Close() })
+	g2, err := newGatewayFromYAML([]byte(doc), opt)
+	if err != nil {
+		t.Fatalf("NewFromYAML() error = %v", err)
+	}
+	t.Cleanup(func() { _ = g2.Close() })
+	if err := microgateway.Validate(cfg, opt); err != nil {
+		t.Fatalf("Validate() error = %v", err)
 	}
 }
 
