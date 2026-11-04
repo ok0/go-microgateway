@@ -23,6 +23,7 @@ import (
 	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/httpcache"
 	"github.com/ok0/go-microgateway/internal/httperr"
+	"github.com/ok0/go-microgateway/internal/teststore"
 	"github.com/ok0/go-microgateway/internal/testwait"
 	"github.com/ok0/go-microgateway/store"
 )
@@ -107,6 +108,39 @@ func cacheGatewayDoc(backendURL, top, routes string) string {
 func cacheRouteYAML(name string, extra ...string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "  - name: %s\n    match:\n      path: /\n    upstream: up\n    cache:\n      enabled: true\n", name)
+	for _, line := range extra {
+		if line != "" {
+			b.WriteString("      " + line + "\n")
+		}
+	}
+	return b.String()
+}
+
+type cancelOnFirstWrite struct {
+	*httptest.ResponseRecorder
+	cancel  context.CancelFunc
+	release func()
+	fired   bool
+}
+
+func (w *cancelOnFirstWrite) Write(p []byte) (int, error) {
+	if !w.fired && strings.Contains(string(p), "first") {
+		w.fired = true
+		w.cancel()
+		w.release()
+	}
+	return w.ResponseRecorder.Write(p)
+}
+
+const cacheAPIKey = "cache-api-key-1"
+
+func cacheAPIKeyTop() string {
+	return fmt.Sprintf("auth:\n  api_keys:\n    - name: keys1\n      query: api_key\n      keys:\n        - id: k1\n          hash: %q\n          consumer: alice\n", auHash(cacheAPIKey))
+}
+
+func cacheAPIKeyRouteYAML(name string, extra ...string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "  - name: %s\n    match:\n      path: /\n    upstream: up\n    auth:\n      mode: apikey\n      providers: [keys1]\n    cache:\n      enabled: true\n", name)
 	for _, line := range extra {
 		if line != "" {
 			b.WriteString("      " + line + "\n")
@@ -605,14 +639,19 @@ func TestCacheEligibilityGateway(t *testing.T) {
 	scr := &cacheScript{}
 	scr.set(http.StatusOK, http.Header{"Cache-Control": {"max-age=60"}, "Etag": {`"v1"`}}, "body")
 	be := n.serve(t, scr)
-	g := n.gateway(t, cacheGatewayDoc(be.URL, "", cacheRouteYAML("r")), withClock(clock.NewFake(cacheStart)))
+	fake := clock.NewFake(cacheStart)
+	shared := teststore.NewSharedCache(fake, 1<<20)
+	t.Cleanup(func() { _ = shared.Close() })
+	g := n.gateway(t, cacheSharedDoc(be.URL, "", cacheRouteYAML("r")), withClock(fake), cacheSharedOption("shared", shared))
 
 	cases := []struct {
-		name   string
-		method string
-		hdr    http.Header
-		fwd    string
-		detail string
+		name      string
+		method    string
+		hdr       http.Header
+		fwd       string
+		detail    string
+		generated bool
+		code      int
 	}{
 		{name: "post", method: http.MethodPost, fwd: httpcache.FwdMethod},
 		{name: "put", method: http.MethodPut, fwd: httpcache.FwdMethod},
@@ -624,6 +663,10 @@ func TestCacheEligibilityGateway(t *testing.T) {
 		{name: "if-match", method: http.MethodGet, fwd: httpcache.FwdBypass, detail: "precondition", hdr: http.Header{"If-Match": {`"v1"`}}},
 		{name: "if-unmodified-since", method: http.MethodGet, fwd: httpcache.FwdBypass, detail: "precondition",
 			hdr: http.Header{"If-Unmodified-Since": {cacheStart.Format(http.TimeFormat)}}},
+		{name: "websocket upgrade", method: http.MethodGet, fwd: httpcache.FwdBypass, detail: "upgrade",
+			hdr: http.Header{"Connection": {"Upgrade"}, "Upgrade": {"websocket"}}},
+		{name: "only-if-cached miss", method: http.MethodGet, fwd: "", detail: "only-if-cached", generated: true,
+			code: http.StatusGatewayTimeout, hdr: http.Header{"Cache-Control": {"only-if-cached"}}},
 	}
 	for i, c := range cases {
 		before := scr.count()
@@ -632,11 +675,26 @@ func TestCacheEligibilityGateway(t *testing.T) {
 		if st.Fwd != c.fwd || st.Detail != c.detail || st.Hit {
 			t.Fatalf("%s: status %+v, want fwd=%q detail=%q and no hit", c.name, st, c.fwd, c.detail)
 		}
-		if rec.Code != http.StatusOK {
-			t.Fatalf("%s: code %d, want 200", c.name, rec.Code)
+		wantCode, wantCalls := c.code, 1
+		if wantCode == 0 {
+			wantCode = http.StatusOK
 		}
-		if d := scr.count() - before; d != 1 {
-			t.Fatalf("%s: origin requests = %d, want 1", c.name, d)
+		if c.generated {
+			wantCalls = 0
+		}
+		if rec.Code != wantCode {
+			t.Fatalf("%s: code %d, want %d", c.name, rec.Code, wantCode)
+		}
+		if d := scr.count() - before; d != wantCalls {
+			t.Fatalf("%s: origin requests = %d, want %d", c.name, d, wantCalls)
+		}
+		if c.generated {
+			continue
+		}
+		for _, call := range shared.Calls() {
+			if call.Op == "get" || call.Op == "put" {
+				t.Fatalf("%s: store %s call, want no store lookup or fill", c.name, call.Op)
+			}
 		}
 	}
 }
@@ -648,9 +706,12 @@ func TestCacheRulesGateway(t *testing.T) {
 		query   string
 		hdr     http.Header
 	}
+	keyHdr := http.Header{"X-Api-Key": {cacheAPIKey}}
+	keyQuery := "?api_key=" + cacheAPIKey
 	cases := []struct {
 		name   string
 		route  []string
+		apiKey string
 		origin http.Header
 		steps  []step
 		hit    bool
@@ -686,6 +747,22 @@ func TestCacheRulesGateway(t *testing.T) {
 			steps: []step{{hdr: http.Header{"Authorization": {"Bearer t"}}}, {hdr: http.Header{"Authorization": {"Bearer t"}}}}, hit: true, calls: 1},
 		{name: "authorization with must-revalidate", origin: http.Header{"Cache-Control": {"must-revalidate, max-age=60"}},
 			steps: []step{{hdr: http.Header{"Authorization": {"Bearer t"}}}, {hdr: http.Header{"Authorization": {"Bearer t"}}}}, hit: true, calls: 1},
+		{name: "api key header without public", apiKey: "header", origin: http.Header{"Cache-Control": {"max-age=60"}},
+			steps: []step{{hdr: keyHdr}, {hdr: keyHdr}}, fwd: "uri-miss", calls: 2},
+		{name: "api key header with public", apiKey: "header", origin: http.Header{"Cache-Control": {"public, max-age=60"}},
+			steps: []step{{hdr: keyHdr}, {hdr: keyHdr}}, hit: true, calls: 1},
+		{name: "api key header with s-maxage", apiKey: "header", origin: http.Header{"Cache-Control": {"s-maxage=60"}},
+			steps: []step{{hdr: keyHdr}, {hdr: keyHdr}}, hit: true, calls: 1},
+		{name: "api key header with must-revalidate", apiKey: "header", origin: http.Header{"Cache-Control": {"must-revalidate, max-age=60"}},
+			steps: []step{{hdr: keyHdr}, {hdr: keyHdr}}, hit: true, calls: 1},
+		{name: "api key query without public", apiKey: "query", origin: http.Header{"Cache-Control": {"max-age=60"}},
+			steps: []step{{query: keyQuery}, {query: keyQuery}}, fwd: "uri-miss", calls: 2},
+		{name: "api key query with public", apiKey: "query", origin: http.Header{"Cache-Control": {"public, max-age=60"}},
+			steps: []step{{query: keyQuery}, {query: keyQuery}}, hit: true, calls: 1},
+		{name: "api key query with s-maxage", apiKey: "query", origin: http.Header{"Cache-Control": {"s-maxage=60"}},
+			steps: []step{{query: keyQuery}, {query: keyQuery}}, hit: true, calls: 1},
+		{name: "api key query with must-revalidate", apiKey: "query", origin: http.Header{"Cache-Control": {"must-revalidate, max-age=60"}},
+			steps: []step{{query: keyQuery}, {query: keyQuery}}, hit: true, calls: 1},
 		{name: "request no-cache revalidates", origin: http.Header{"Cache-Control": {"max-age=60"}},
 			steps: []step{{}, {hdr: http.Header{"Cache-Control": {"no-cache"}}}}, fwd: "stale", calls: 2},
 		{name: "request max-age zero revalidates", origin: http.Header{"Cache-Control": {"max-age=60"}},
@@ -702,7 +779,11 @@ func TestCacheRulesGateway(t *testing.T) {
 			scr.set(http.StatusOK, c.origin, "body")
 			be := n.serve(t, scr)
 			fake := clock.NewFake(cacheStart)
-			g := n.gateway(t, cacheGatewayDoc(be.URL, "", cacheRouteYAML("r", c.route...)), withClock(fake))
+			top, routes := "", cacheRouteYAML("r", c.route...)
+			if c.apiKey != "" {
+				top, routes = cacheAPIKeyTop(), cacheAPIKeyRouteYAML("r", c.route...)
+			}
+			g := n.gateway(t, cacheGatewayDoc(be.URL, top, routes), withClock(fake))
 			target := fmt.Sprintf("http://example.com/r%d", i)
 			var rec *httptest.ResponseRecorder
 			for _, s := range c.steps {
@@ -880,22 +961,32 @@ func TestCacheStreamingGateway(t *testing.T) {
 		n := newMemNetwork()
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
+		released := make(chan struct{})
+		var releaseOnce sync.Once
+		closeReleased := func() { releaseOnce.Do(func() { close(released) }) }
+		t.Cleanup(closeReleased)
 		scr := &cacheScript{}
 		scr.setHandle(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Cache-Control", "max-age=60")
 			w.WriteHeader(http.StatusOK)
 			_, _ = io.WriteString(w, "first")
 			_ = http.NewResponseController(w).Flush()
-			cancel()
+			<-released
 			_, _ = io.WriteString(w, "second")
 		})
 		be := n.serve(t, scr)
 		g := n.gateway(t, cacheGatewayDoc(be.URL, "", cacheRouteYAML("r")), withClock(clock.NewFake(cacheStart)))
+		client := &cancelOnFirstWrite{ResponseRecorder: httptest.NewRecorder(), cancel: cancel, release: closeReleased}
 		req := httptest.NewRequest(http.MethodGet, "http://example.com/cc", nil).WithContext(ctx)
-		g.ServeHTTP(httptest.NewRecorder(), req)
+		g.ServeHTTP(client, req)
+		if !strings.Contains(client.Body.String(), "first") {
+			t.Fatalf("client body %q, want the first bytes", client.Body.String())
+		}
 		m := metricsText(t, g)
-		if v := metricValue(t, m, series("microgateway_cache_stores_total", "route", "r", "result", "stored")); v != 0 {
-			t.Fatalf("stored = %v, want 0", v)
+		for result, want := range map[string]float64{"aborted": 1, "stored": 0, "not_storable": 0} {
+			if got := metricValue(t, m, series("microgateway_cache_stores_total", "route", "r", "result", result)); got != want {
+				t.Fatalf("stores_total result=%s = %v, want %v", result, got, want)
+			}
 		}
 		scr.setHandle(nil)
 		scr.set(http.StatusOK, http.Header{"Cache-Control": {"max-age=60"}}, "x")
