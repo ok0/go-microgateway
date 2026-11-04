@@ -28,6 +28,9 @@ const (
 	CodeMethodNotAllowed     = "method_not_allowed"
 	CodeUnavailable          = "service_unavailable"
 	CodeNotCached            = "not_cached"
+	CodeBadRequest           = "bad_request"
+	CodeStoreUnavailable     = "store_unavailable"
+	CodeCacheNotConfigured   = "cache_not_configured"
 )
 
 const StatusClientClosed = 499
@@ -122,6 +125,12 @@ func Message(code string) string {
 		return "the gateway is not accepting requests"
 	case CodeNotCached:
 		return "response not available from cache"
+	case CodeBadRequest:
+		return "invalid request"
+	case CodeStoreUnavailable:
+		return "the cache store is unavailable"
+	case CodeCacheNotConfigured:
+		return "no response cache is configured"
 	default:
 		return "error"
 	}

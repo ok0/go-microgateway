@@ -128,6 +128,26 @@ func TestMessages(t *testing.T) {
 	}
 }
 
+func TestNewCodeMessages(t *testing.T) {
+	codes := []string{
+		CodeBadRequest,
+		CodeStoreUnavailable,
+		CodeCacheNotConfigured,
+	}
+	for _, code := range codes {
+		msg := Message(code)
+		if msg == "" || msg == "error" {
+			t.Errorf("Message(%q) = %q, want a specific message", code, msg)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		rec := httptest.NewRecorder()
+		Write(rec, req, http.StatusBadRequest, code, msg)
+		if !strings.Contains(rec.Body.String(), `"code":"`+code+`"`) {
+			t.Errorf("body = %q, want code %q", rec.Body.String(), code)
+		}
+	}
+}
+
 func TestFromError(t *testing.T) {
 	tests := []struct {
 		name       string
