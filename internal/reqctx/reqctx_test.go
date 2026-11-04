@@ -46,6 +46,23 @@ func TestInfo(t *testing.T) {
 	}
 }
 
+func TestExchangeResponded(t *testing.T) {
+	var e Exchange
+	if e.Responded() || e.Complete() {
+		t.Fatalf("zero Exchange: Responded = %v, Complete = %v, want false, false", e.Responded(), e.Complete())
+	}
+
+	e.Begin()
+	if !e.Responded() || e.Complete() {
+		t.Errorf("after Begin: Responded = %v, Complete = %v, want true, false", e.Responded(), e.Complete())
+	}
+
+	e.Finish()
+	if !e.Responded() || !e.Complete() {
+		t.Errorf("after Finish: Responded = %v, Complete = %v, want true, true", e.Responded(), e.Complete())
+	}
+}
+
 func TestContextValues(t *testing.T) {
 	bg := context.Background()
 	if RequestID(bg) != "" || Route(bg) != "" || len(Params(bg)) != 0 ||

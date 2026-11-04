@@ -66,9 +66,10 @@ func InfoFrom(ctx context.Context) *Info {
 	return v
 }
 
-// Exchange records whether the last upstream response body forwarded for the request was read to its end.
+// Exchange records whether an upstream response was received for the request and whether the last forwarded upstream response body was read to its end.
 type Exchange struct {
-	done atomic.Bool
+	responded atomic.Bool
+	done      atomic.Bool
 }
 
 // WithExchange returns a context carrying the upstream exchange record e.
@@ -84,7 +85,13 @@ func ExchangeFrom(ctx context.Context) *Exchange {
 
 // Begin clears the completion flag before an upstream response body is forwarded.
 func (e *Exchange) Begin() {
+	e.responded.Store(true)
 	e.done.Store(false)
+}
+
+// Responded reports whether an upstream response was received for the request (Begin was called), as opposed to an error produced by the gateway.
+func (e *Exchange) Responded() bool {
+	return e.responded.Load()
 }
 
 // Finish marks the forwarded upstream response body as read to its end.
