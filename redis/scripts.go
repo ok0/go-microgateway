@@ -119,13 +119,31 @@ return {allowed and 1 or 0, remaining, retry, reset}
 `
 
 type scriptSet struct {
-	tb, sw *goredis.Script
+	tb, sw                                        *goredis.Script
+	cGet, cPend, cJoin, cCommit, cAbandon         *goredis.Script
+	cPurgeKey, cPurgeAll, cTagCounter, cTagBucket *goredis.Script
+	cTagMark, cTagPrimary, cTagPrune              *goredis.Script
 }
 
 func newScriptSet(clock string) scriptSet {
+	cache := func(body string) *goredis.Script {
+		return goredis.NewScript(clock + luaLib + luaCacheLib + body)
+	}
 	return scriptSet{
-		tb: goredis.NewScript(clock + luaLib + luaTokenBucket),
-		sw: goredis.NewScript(clock + luaLib + luaSlidingWindow),
+		tb:          goredis.NewScript(clock + luaLib + luaTokenBucket),
+		sw:          goredis.NewScript(clock + luaLib + luaSlidingWindow),
+		cGet:        cache(luaCacheGet),
+		cPend:       cache(luaCachePend),
+		cJoin:       cache(luaCacheJoin),
+		cCommit:     cache(luaCacheCommit),
+		cAbandon:    cache(luaCacheAbandon),
+		cPurgeKey:   cache(luaCachePurgeKey),
+		cPurgeAll:   cache(luaCachePurgeAll),
+		cTagCounter: cache(luaCacheTagCounter),
+		cTagBucket:  cache(luaCacheTagBucket),
+		cTagMark:    cache(luaCacheTagMark),
+		cTagPrimary: cache(luaCacheTagPrimary),
+		cTagPrune:   cache(luaCacheTagPrune),
 	}
 }
 
