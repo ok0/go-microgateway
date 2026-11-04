@@ -334,8 +334,11 @@ func TestPublicTypesNeverRevealSecrets(t *testing.T) {
 	}
 
 	registry := map[string]reflect.Type{
-		"Gateway":           reflect.TypeFor[Gateway](),
-		"Option":            reflect.TypeFor[Option](),
+		"Gateway": reflect.TypeFor[Gateway](),
+		"Option":  reflect.TypeFor[Option](),
+		// Caller-owned purge values: they reach no config secret type and the purge service never renders them.
+		"PurgeRequest":      reflect.TypeFor[PurgeRequest](),
+		"PurgeResult":       reflect.TypeFor[PurgeResult](),
 		"KeySetFetcher":     reflect.TypeFor[KeySetFetcher](),
 		"Identity":          reflect.TypeFor[Identity](),
 		"Middleware":        reflect.TypeFor[Middleware](),
@@ -429,6 +432,51 @@ func TestPublicTypesNeverRevealSecrets(t *testing.T) {
 			t.Errorf("leak matrix sample %s is stale", k)
 		}
 	}
+}
+
+func TestPurgeErrorsNeverEchoRequest(t *testing.T) {
+	const (
+		pu = "pur-ui-LEAK-6b1"
+		pq = "pur-q-LEAK-0e4"
+		pp = "pur-p-LEAK-2c8"
+		pt = "pur-t-LEAK-7f5"
+	)
+	be := backend(t, "b")
+	g := gwWith(t, routeDoc(be.URL, "    cache:\n      enabled: true\n"))
+
+	cases := []struct {
+		name string
+		req  PurgeRequest
+	}{
+		{"userinfo", PurgeRequest{URLs: []string{"http://" + pu + ":x@h/" + pp + "?k=" + pq}}},
+		{"scheme", PurgeRequest{URLs: []string{"ftp://h/" + pp + "?k=" + pq}}},
+		{"key too long", PurgeRequest{URLs: []string{"http://h/" + pp + strings.Repeat("a", 8<<10) + "?k=" + pq}}},
+		{"two selectors", PurgeRequest{URLs: []string{"http://h/" + pp + "?k=" + pq}, Tags: []string{pt}}},
+		{"control tag", PurgeRequest{Tags: []string{pt + "\x01"}}},
+		{"long tag", PurgeRequest{Tags: []string{pt + strings.Repeat("x", 1024)}}},
+	}
+	for _, c := range cases {
+		res, err := g.Purge(context.Background(), c.req)
+		if !errors.Is(err, ErrInvalidPurgeRequest) {
+			t.Fatalf("%s: err = %v, want ErrInvalidPurgeRequest", c.name, err)
+		}
+		leakcheck.Check(t, c.name, err, pu, pq, pp, pt)
+		leakcheck.Check(t, c.name+" result", res, pu, pq, pp, pt)
+	}
+
+	g2 := gwWith(t, routeDoc(be.URL, ""))
+	res, err := g2.Purge(context.Background(), PurgeRequest{URLs: []string{"http://h/" + pp + "?k=" + pq}})
+	if !errors.Is(err, ErrCacheDisabled) {
+		t.Fatalf("cache disabled: err = %v, want ErrCacheDisabled", err)
+	}
+	leakcheck.Check(t, "cache disabled", err, pu, pq, pp, pt)
+	leakcheck.Check(t, "cache disabled result", res, pu, pq, pp, pt)
+
+	res, err = g.Purge(context.Background(), PurgeRequest{URLs: []string{"http://h/" + pp + "?k=" + pq}, Soft: true})
+	if err != nil {
+		t.Fatalf("soft purge: unexpected error %v", err)
+	}
+	leakcheck.Check(t, "result", res, pu, pq, pp, pt)
 }
 
 func TestUserMiddlewareParamsSecret(t *testing.T) {
