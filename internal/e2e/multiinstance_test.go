@@ -1,14 +1,33 @@
+// Shared-vs-per-instance state contract. instanceContract lists every row; each "contract:" line below maps one
+// row to the test that proves it, and TestInstanceStateContract fails when a row has no test, a line names an
+// unknown row, or a line names a missing test.
+//
+// contract: Rate-limit state -> TestInstancesShareRateLimitState
+// contract: Cache entries -> TestInstancesShareCacheEntries
+// contract: Purge state -> TestInstancesSharePurgeState
+// contract: JWKS key sets -> TestInstancesIsolateJWKSKeySets
+// contract: Circuit breaker state -> TestInstancesIsolateBreakerState
+// contract: Passive outlier ejection -> TestInstancesIsolatePassiveEjection
+// contract: Active health state -> TestInstancesIsolateActiveHealthState
+// contract: Config watch and reload -> TestInstancesIsolateReload
+// contract: In-flight request coalescing -> TestInstancesIsolateCoalescing
+
 package e2e
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -682,4 +701,140 @@ func TestInstancesIsolateCoalescing(t *testing.T) {
 	if calls, _, _ := origin.counts(); calls != 2 {
 		t.Fatalf("origin calls after release = %d, want 2", calls)
 	}
+}
+
+type contractRow struct{ Scope, State string }
+
+var instanceContract = []contractRow{
+	{"shared", "Rate-limit state"},
+	{"shared", "Cache entries"},
+	{"shared", "Purge state"},
+	{"per-instance", "JWKS key sets"},
+	{"per-instance", "Circuit breaker state"},
+	{"per-instance", "Passive outlier ejection"},
+	{"per-instance", "Active health state"},
+	{"per-instance", "Config watch and reload"},
+	{"per-instance", "In-flight request coalescing"},
+}
+
+type contractLink struct{ State, Test string }
+
+var contractLinkPattern = regexp.MustCompile(`^// contract: (.+) -> (Test[A-Za-z0-9_]+)$`)
+
+func parseContractLinks(src []byte) []contractLink {
+	var links []contractLink
+	for _, line := range strings.Split(string(src), "\n") {
+		if m := contractLinkPattern.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+			links = append(links, contractLink{State: m[1], Test: m[2]})
+		}
+	}
+	return links
+}
+
+func contractProblems(rows []contractRow, links []contractLink, tests map[string]bool) []string {
+	var problems []string
+	known := map[string]bool{}
+	for _, r := range rows {
+		if known[r.State] {
+			problems = append(problems, fmt.Sprintf("row %q listed twice", r.State))
+		}
+		known[r.State] = true
+	}
+	linked := map[string]bool{}
+	for _, l := range links {
+		linked[l.State] = true
+		if !known[l.State] {
+			problems = append(problems, fmt.Sprintf("%q maps to unknown row %q", l.Test, l.State))
+		}
+		if !tests[l.Test] {
+			problems = append(problems, fmt.Sprintf("row %q maps to missing test %s", l.State, l.Test))
+		}
+	}
+	unlinked := map[string]bool{}
+	for _, r := range rows {
+		if !linked[r.State] {
+			unlinked[r.State] = true
+		}
+	}
+	for state := range unlinked {
+		problems = append(problems, fmt.Sprintf("row %q has no test", state))
+	}
+	sort.Strings(problems)
+	return problems
+}
+
+func packageTests(t *testing.T) map[string]bool {
+	files, err := filepath.Glob("*_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := map[string]bool{}
+	for _, f := range files {
+		file, err := parser.ParseFile(token.NewFileSet(), f, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range file.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if ok && fn.Recv == nil && strings.HasPrefix(fn.Name.Name, "Test") {
+				tests[fn.Name.Name] = true
+			}
+		}
+	}
+	return tests
+}
+
+func TestInstanceStateContract(t *testing.T) {
+	if len(instanceContract) != 9 {
+		t.Fatalf("instanceContract has %d rows, want 9", len(instanceContract))
+	}
+	shared, perInstance := 0, 0
+	for _, r := range instanceContract {
+		switch r.Scope {
+		case "shared":
+			shared++
+		case "per-instance":
+			perInstance++
+		}
+	}
+	if shared != 3 || perInstance != 6 {
+		t.Fatalf("instanceContract has %d shared and %d per-instance rows, want 3 and 6", shared, perInstance)
+	}
+	src, err := os.ReadFile("multiinstance_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if problems := contractProblems(instanceContract, parseContractLinks(src), packageTests(t)); len(problems) > 0 {
+		t.Fatalf("contract problems:\n%s", strings.Join(problems, "\n"))
+	}
+}
+
+func TestInstanceStateContractCheck(t *testing.T) {
+	src, err := os.ReadFile("multiinstance_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	links := parseContractLinks(src)
+	tests := packageTests(t)
+	expectOne := func(name string, problems []string, want string) {
+		t.Helper()
+		if len(problems) != 1 || !strings.Contains(problems[0], want) {
+			t.Errorf("%s: problems = %q, want exactly one containing %q", name, problems, want)
+		}
+	}
+
+	rows := append(slices.Clone(instanceContract), contractRow{"shared", "Extra state"})
+	expectOne("extra row", contractProblems(rows, links, tests), `"Extra state" has no test`)
+
+	unknown := append(slices.Clone(links), contractLink{"Unknown row", "TestInstancesIsolateReload"})
+	expectOne("unknown row", contractProblems(instanceContract, unknown, tests), `unknown row "Unknown row"`)
+
+	missing := slices.Clone(links)
+	missing[0].Test = "TestDoesNotExist"
+	expectOne("missing test", contractProblems(instanceContract, missing, tests), "missing test TestDoesNotExist")
+
+	expectOne("no link", contractProblems(instanceContract, links[:len(links)-1], tests), `"In-flight request coalescing" has no test`)
+
+	duplicate := append(slices.Clone(instanceContract), instanceContract[0])
+	expectOne("duplicate row", contractProblems(duplicate, links, tests), "listed twice")
 }
