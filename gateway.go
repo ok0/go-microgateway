@@ -15,6 +15,7 @@ import (
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/admin"
 	"github.com/ok0/go-microgateway/internal/auth"
+	"github.com/ok0/go-microgateway/internal/cache"
 	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/hooks"
 	"github.com/ok0/go-microgateway/internal/httperr"
@@ -25,7 +26,7 @@ import (
 	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
-// ErrClosed is returned by Reload, ReloadYAML, ReloadFile and WatchFile after Close.
+// ErrClosed is returned by Reload, ReloadYAML, ReloadFile, WatchFile and Purge after Close.
 var ErrClosed = errors.New("microgateway: gateway closed")
 
 type Gateway struct {
@@ -204,7 +205,7 @@ func New(cfg *config.Config, opts ...Option) (*Gateway, error) {
 	}
 	g := &Gateway{
 		state:    state.NewRegistry(o.logger),
-		deps:     runtime.Deps{Logger: o.logger, Clock: o.clk, Rand: rnd, Metrics: mreg, Middlewares: reg, Dial: o.dial, Resolver: o.resolver, KeySetFetcher: fetcher, Stores: set},
+		deps:     runtime.Deps{Logger: o.logger, Clock: o.clk, Rand: rnd, Metrics: mreg, Middlewares: reg, Dial: o.dial, Resolver: o.resolver, KeySetFetcher: fetcher, Stores: set, Retention: new(cache.Retention)},
 		parts:    o.participants,
 		lookup:   o.lookup,
 		logger:   o.logger,
@@ -224,7 +225,7 @@ func New(cfg *config.Config, opts ...Option) (*Gateway, error) {
 	g.install(gen, applies)
 	rs.lastSuccess.Set(float64(g.clk.Now().Unix()))
 	g.ready.Store(true)
-	g.admin = admin.Handler(adminSource{g})
+	g.admin = admin.Handler(adminSource{g}, o.logger)
 	return g, nil
 }
 
