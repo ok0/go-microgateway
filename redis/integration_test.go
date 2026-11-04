@@ -1249,6 +1249,27 @@ func TestIntegrationSuite(t *testing.T) {
 		runMultiInstance(t, redisServer{addr: addr, db: 15, exact: false, advance: serverAdvance, now: serverNow})
 	})
 
+	t.Run("MixedMultiInstance", func(t *testing.T) {
+		runMixed(t, redisServer{addr: addr, db: 15, exact: false, advance: serverAdvance, now: serverNow}, 3)
+	})
+
+	t.Run("MixedRestartLoad", func(t *testing.T) {
+		if os.Getenv("MICROGATEWAY_LOAD") == "" {
+			t.Skip("load check: set MICROGATEWAY_LOAD=1 to run")
+		}
+		srv := redisServer{addr: addr, db: 15, exact: false, advance: serverAdvance, now: serverNow}
+		for range 100 {
+			runMixed(t, srv, 3)
+			if err := c.Do(context.Background(), "CLIENT", "KILL", "TYPE", "normal", "SKIPME", "yes").Err(); err != nil {
+				t.Fatalf("CLIENT KILL: %v", err)
+			}
+			if err := c.FlushDB(context.Background()).Err(); err != nil {
+				t.Fatalf("FLUSHDB: %v", err)
+			}
+			runMixed(t, srv, 3)
+		}
+	})
+
 	t.Run("Sentinel", func(t *testing.T) {
 		v := os.Getenv("MICROGATEWAY_REDIS_SENTINEL")
 		if v == "" {

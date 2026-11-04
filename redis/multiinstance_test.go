@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strconv"
 	"sync"
@@ -216,6 +217,154 @@ func TestMultiInstance(t *testing.T) {
 	m := newMini(t)
 	mc := &miniClock{m: m, now: miniStart}
 	runMultiInstance(t, redisServer{addr: m.Addr(), exact: true, advance: func(_ *testing.T, d time.Duration) { mc.Advance(d) }, now: func(*testing.T) time.Time { return mc.now }})
+}
+
+const multiCrlBody = "rate: 1\nper: 1s\nburst: 1\n"
+
+// mixedMissRound sends GET e to a and b at once while the origin holds them. Both must reach the origin and neither may be a hit.
+func mixedMissRound(t *testing.T, o *gcOrigin, e gcEntry, a, b *microgateway.Gateway) {
+	t.Helper()
+	calls0, _ := o.counts()
+	o.hold()
+	out := make(chan *httptest.ResponseRecorder, 2)
+	for _, g := range []*microgateway.Gateway{a, b} {
+		go func(g *microgateway.Gateway) {
+			out <- gcRequest(g, e.method, e.url(), e.header())
+		}(g)
+	}
+	testwait.Recv(t, "first request at origin", o.arrived, nil)
+	testwait.Recv(t, "second request at origin", o.arrived, nil)
+	o.release()
+	for range 2 {
+		rec, _ := testwait.Recv(t, "concurrent response", out, nil)
+		if st := gcStatus(t, rec); rec.Code != http.StatusOK || st.Hit {
+			t.Errorf("concurrent response %d %+v, want 200 miss", rec.Code, st)
+		}
+	}
+	if calls, _ := o.counts(); calls-calls0 != 2 {
+		t.Fatalf("origin requests for two concurrent misses = +%d, want +2", calls-calls0)
+	}
+}
+
+// runMixed runs rate limiting, caching and purging together across n gateways that share one Redis store. /rl is
+// rate limited, /c is cached and /crl is both with a burst of one.
+func runMixed(t *testing.T, srv redisServer, n int) {
+	t.Helper()
+	prefix := uniquePrefix(t)
+	c := newTestClient(t, srv.addr, srv.db)
+	t.Cleanup(func() { deletePrefix(t, c, prefix) })
+	stores := redisStoreYAML("shared", []string{srv.addr}, fmt.Sprintf("db: %d\nkey_prefix: %s\n", srv.db, prefix), "")
+	origin := newGCOrigin(t)
+	origin.set(http.StatusOK, http.Header{"Cache-Control": {"max-age=60"}}, "v1")
+	origin.tag("/c", "mx1")
+	routes := routeYAML("rl", multiBucketBody+multiStoreTail) +
+		"  - name: c\n    match:\n      path: /c\n      path_type: exact\n    upstream: up\n    cache:\n      enabled: true\n" +
+		"  - name: crl\n    match:\n      path: /crl\n    upstream: up\n    cache:\n      enabled: true\n    rate_limit:\n" +
+		indentLines(multiCrlBody+multiStoreTail, 6)
+	doc := gcDoc(stores, "  store: shared\n", gcAdminYAML(gcToken), routes, origin.url)
+	gws := make([]*microgateway.Gateway, n)
+	for i := range gws {
+		g, err := newGateway(t, doc, true, clock.NewFake(miniStart.Add(time.Duration(i)*3*time.Hour)), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gws[i] = g
+	}
+
+	e := gcEntry{method: http.MethodGet, path: "/c"}
+	if rec, st := gcFetch(t, gws[0], e); rec.Code != http.StatusOK || st.Hit || !st.Stored {
+		t.Fatalf("fill: status %d %+v, want 200 stored miss", rec.Code, st)
+	}
+	for _, g := range gws[1:] {
+		if rec, st := gcFetch(t, g, e); rec.Code != http.StatusOK || !st.Hit {
+			t.Fatalf("GET /c on another gateway: status %d %+v, want 200 hit", rec.Code, st)
+		}
+	}
+	if calls, _ := origin.counts(); calls != 1 {
+		t.Fatalf("origin requests after the fill and the hits = %d, want 1", calls)
+	}
+
+	admitted, sent := multiSum(tallyRecorders(t, fire(gws, 2*multiBurst)))
+	if sent != 2*multiBurst {
+		t.Fatalf("accounted %d requests, sent %d", sent, 2*multiBurst)
+	}
+	if srv.exact && admitted != multiBurst {
+		t.Errorf("admitted %d across %d gateways, want exactly %d", admitted, n, multiBurst)
+	}
+	if !srv.exact && admitted > multiBurst {
+		t.Errorf("admitted %d across %d gateways, want at most %d", admitted, n, multiBurst)
+	}
+
+	if rep := gcPurgeOK(t, gcPurge(t, gws[0], gcToken, `{"urls":["http://example.com/c"],"soft":false}`)); !reflect.DeepEqual(rep, gcReplyOf("url", false, 1)) {
+		t.Fatalf("url purge reply %+v, want %+v", rep, gcReplyOf("url", false, 1))
+	}
+	mixedMissRound(t, origin, e, gws[1], gws[2])
+
+	res, err := gws[1].Purge(context.Background(), microgateway.PurgeRequest{Tags: []string{"mx1"}})
+	if err != nil {
+		t.Fatalf("Purge(tag): %v", err)
+	}
+	if got := gcLibraryReply(res); got.Type != "tag" || got.Accepted != 1 || got.Scope != "store" {
+		t.Fatalf("tag purge reply %+v, want type tag, accepted 1, scope store", got)
+	}
+	mixedMissRound(t, origin, e, gws[0], gws[2])
+
+	res, err = gws[1].Purge(context.Background(), microgateway.PurgeRequest{All: true})
+	if err != nil {
+		t.Fatalf("Purge(all): %v", err)
+	}
+	if got := gcLibraryReply(res); !reflect.DeepEqual(got, gcWant("all", false)) {
+		t.Fatalf("all purge reply %+v, want %+v", got, gcWant("all", false))
+	}
+	mixedMissRound(t, origin, e, gws[0], gws[2])
+
+	for i, g := range gws {
+		if rec := doGet(g, "/rl", multiClientAddr); rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("gateway %d: /rl after the purges: status %d, want 429", i, rec.Code)
+		}
+	}
+
+	crl := gcEntry{method: http.MethodGet, path: "/crl"}
+	if rec, st := gcFetch(t, gws[0], crl); rec.Code != http.StatusOK || !st.Stored {
+		t.Fatalf("/crl fill: status %d %+v, want 200 stored", rec.Code, st)
+	}
+	if rep := gcPurgeOK(t, gcPurge(t, gws[0], gcToken, `{"all":true,"soft":false}`)); !reflect.DeepEqual(rep, gcWant("all", false)) {
+		t.Fatalf("/crl all purge reply %+v, want %+v", rep, gcWant("all", false))
+	}
+	if rec := gcRequest(gws[1], crl.method, crl.url(), nil); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("/crl on the second gateway after the purge: status %d, want 429", rec.Code)
+	}
+	srv.advance(t, time.Second)
+	if rec, st := gcFetch(t, gws[2], crl); rec.Code != http.StatusOK || st.Hit {
+		t.Fatalf("/crl on the third gateway after the refill: status %d %+v, want 200 miss", rec.Code, st)
+	}
+
+	for i, g := range gws {
+		if err := g.Close(); err != nil {
+			t.Fatalf("gateway %d: Close: %v", i, err)
+		}
+	}
+}
+
+func TestMixedMultiInstance(t *testing.T) {
+	m := newMini(t)
+	mc := &miniClock{m: m, now: miniStart}
+	srv := redisServer{addr: m.Addr(), exact: true, advance: func(_ *testing.T, d time.Duration) { mc.Advance(d) }, now: func(*testing.T) time.Time { return mc.now }}
+	t.Run("gateways=3", func(t *testing.T) {
+		runMixed(t, srv, 3)
+	})
+}
+
+func TestMixedMultiInstanceLoad(t *testing.T) {
+	if os.Getenv("MICROGATEWAY_LOAD") == "" {
+		t.Skip("load check: set MICROGATEWAY_LOAD=1 to run")
+	}
+	m := newMini(t)
+	mc := &miniClock{m: m, now: miniStart}
+	srv := redisServer{addr: m.Addr(), exact: true, advance: func(_ *testing.T, d time.Duration) { mc.Advance(d) }, now: func(*testing.T) time.Time { return mc.now }}
+	for range 100 {
+		runMixed(t, srv, 3)
+	}
 }
 
 type gcValidator struct {
