@@ -1,0 +1,143 @@
+# N identical gateway replicas behind a load balancer, all sharing one Redis server. The rate limit
+# counters and the response cache are kept in Redis, so every replica sees the same state. Circuit
+# breakers, health checks and the admin listener remain per replica. See docs/multi-instance.md.
+#
+# Requires the environment variables REDIS_ADDR (host:port) and REDIS_PASSWORD. For a local run:
+#   export REDIS_ADDR=127.0.0.1:6379
+#   export REDIS_PASSWORD=example-redis-password
+# Validate it with: cd redis && go run ./cmd/microgateway validate -config ../examples/redis.yaml
+# Run it with:      cd redis && go run ./cmd/microgateway run -config ../examples/redis.yaml
+# The validate and run commands above come from the redis module because it registers the Redis store.
+# The core binary alone rejects this file, because the Redis store type is not registered there.
+#
+# The upstream base URLs come from CATALOG_URL and ORDERS_URL and default to local test backends.
+#
+# Every credential in this file is fake and exists only for this example:
+#   admin token             example-admin-token (cache purge, admin listener only)
+#   API key                 example-api-key-alice (consumer alice, orders route)
+#   JWT                     HS256, kid example-hs256, secret example-jwt-secret-for-hs256-signing-only,
+#                           issuer https://auth.example.com, audience example-api (orders route)
+#   Redis password          example-redis-password
+#
+# Calls once a replica is running:
+#   curl -i http://127.0.0.1:8080/catalog/items
+#   curl -i -H 'X-API-Key: example-api-key-alice' http://127.0.0.1:8080/orders/1
+#   curl -i -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/orders/1
+#     ($TOKEN is an HS256 token signed with the secret above)
+#   curl -i -X POST -H 'Authorization: Bearer example-admin-token' -H 'Content-Type: application/json' \
+#     -d '{"urls":["http://127.0.0.1:8080/catalog/items"]}' http://127.0.0.1:9901/cache/purge
+version: 1
+
+listeners:
+  # The public listener serves client traffic.
+  - name: public
+    address: ":8080"
+
+# The admin endpoint listens on loopback only. Cache purge is available because a bearer token is configured.
+admin:
+  address: "127.0.0.1:9901"
+  auth:
+    keys:
+      - id: example-admin
+        hash: "sha256:d2eadfb6e52d65b4bbf254e5046c0c495328b4d208f8b1591c229e62c5c6362f"
+
+# Named stores are referenced by rate limits and by the cache. The first store is shared Redis.
+stores:
+  - name: shared
+    type: redis
+    redis:
+      mode: standalone
+      addresses: ["${REDIS_ADDR}"]
+      password: "${REDIS_PASSWORD}"
+      key_prefix: example-gateway
+      dial_timeout: 1s
+      read_timeout: 500ms
+      write_timeout: 500ms
+    # After 3 consecutive failures the store is bypassed for 2s, so requests do not wait on a dead Redis.
+    guard:
+      consecutive_failures: 3
+      open_timeout: 2s
+
+# Cached entries are stored in the shared store. A store call that exceeds 100ms is treated as a miss.
+cache:
+  store: shared
+  store_timeout: 100ms
+
+upstreams:
+  # Catalog backend. The circuit breaker opens after 5 consecutive failures and probes again after 30s.
+  - name: catalog
+    hosts:
+      - url: "${CATALOG_URL:-http://127.0.0.1:9001}"
+    circuit_breaker:
+      consecutive_failures: 5
+      open_timeout: 30s
+    passive_health:
+      consecutive_failures: 5
+
+  # Orders backend.
+  - name: orders
+    hosts:
+      - url: "${ORDERS_URL:-http://127.0.0.1:9101}"
+
+auth:
+  # Accepts HS256 tokens from one issuer and audience.
+  jwt:
+    - name: example-jwt
+      issuer: "https://auth.example.com"
+      audiences:
+        - example-api
+      keys:
+        - kid: example-hs256
+          algorithm: HS256
+          secret: "example-jwt-secret-for-hs256-signing-only"
+
+  # Accepts the API key of one consumer, sent in the X-API-Key header by default.
+  api_keys:
+    - name: example-keys
+      keys:
+        - id: example-alice
+          hash: "sha256:9771189e33ad49531f98873eb4e4458ce1c96f313fe15c6d753f4c7b6ad4eba5"
+          consumer: alice
+
+routes:
+  # Public catalog reads: no authentication, 10 requests per second per client IP, cached for 30s.
+  # When Redis is unreachable the limit falls back to the replica's own counters.
+  - name: catalog
+    match:
+      path: /catalog/
+      methods: [GET, HEAD]
+    upstream: catalog
+    rate_limit:
+      rate: 10
+      per: 1s
+      burst: 10
+      store: shared
+      on_store_error: local
+      store_timeout: 50ms
+    cache:
+      enabled: true
+      default_ttl: 30s
+      max_ttl: 5m
+    retry:
+      attempts: 2
+
+  # Orders accept either a JWT or an API key, and are limited per authenticated consumer.
+  # When Redis is unreachable the request is rejected with 503 instead of being admitted without a limit.
+  - name: orders
+    match:
+      path: /orders/
+    upstream: orders
+    auth:
+      mode: any
+      providers:
+        - example-jwt
+        - example-keys
+    rate_limit:
+      rate: 20
+      per: 1s
+      burst: 20
+      key:
+        source: consumer
+      store: shared
+      on_store_error: deny
+      store_timeout: 50ms

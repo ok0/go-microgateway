@@ -1,0 +1,109 @@
+# A single-instance gateway that keeps every state in memory: the response cache, the rate limit
+# counters and the circuit breakers live inside this process and are not shared with other instances.
+# Validate it with: cd redis && go run ./cmd/microgateway validate -config ../examples/memory.yaml
+# Run it with:      cd redis && go run ./cmd/microgateway run -config ../examples/memory.yaml
+# The upstream base URLs come from CATALOG_URL and ORDERS_URL and default to local test backends.
+#
+# Every credential in this file is fake and exists only for this example:
+#   admin token             example-admin-token (cache purge, admin listener only)
+#   API key                 example-api-key-alice (consumer alice, orders route)
+#   JWT                     HS256, kid example-hs256, secret example-jwt-secret-for-hs256-signing-only,
+#                           issuer https://auth.example.com, audience example-api (orders route)
+#
+# Calls once the gateway is running:
+#   curl -i http://127.0.0.1:8080/catalog/items
+#   curl -i -H 'X-API-Key: example-api-key-alice' http://127.0.0.1:8080/orders/1
+#   curl -i -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/orders/1
+#     ($TOKEN is an HS256 token signed with the secret above)
+#   curl -i -X POST -H 'Authorization: Bearer example-admin-token' -H 'Content-Type: application/json' \
+#     -d '{"urls":["http://127.0.0.1:8080/catalog/items"]}' http://127.0.0.1:9901/cache/purge
+version: 1
+
+listeners:
+  # The public listener serves client traffic.
+  - name: public
+    address: ":8080"
+
+# The admin endpoint listens on loopback only. Cache purge is available because a bearer token is configured.
+admin:
+  address: "127.0.0.1:9901"
+  auth:
+    keys:
+      - id: example-admin
+        hash: "sha256:d2eadfb6e52d65b4bbf254e5046c0c495328b4d208f8b1591c229e62c5c6362f"
+
+# Responses are cached in process memory, capped at 32 MiB.
+cache:
+  memory:
+    max_bytes: 33554432
+
+upstreams:
+  # Catalog backend. The circuit breaker opens after 5 consecutive failures and probes again after 30s.
+  - name: catalog
+    hosts:
+      - url: "${CATALOG_URL:-http://127.0.0.1:9001}"
+    circuit_breaker:
+      consecutive_failures: 5
+      open_timeout: 30s
+    passive_health:
+      consecutive_failures: 5
+
+  # Orders backend.
+  - name: orders
+    hosts:
+      - url: "${ORDERS_URL:-http://127.0.0.1:9101}"
+
+auth:
+  # Accepts HS256 tokens from one issuer and audience.
+  jwt:
+    - name: example-jwt
+      issuer: "https://auth.example.com"
+      audiences:
+        - example-api
+      keys:
+        - kid: example-hs256
+          algorithm: HS256
+          secret: "example-jwt-secret-for-hs256-signing-only"
+
+  # Accepts the API key of one consumer, sent in the X-API-Key header by default.
+  api_keys:
+    - name: example-keys
+      keys:
+        - id: example-alice
+          hash: "sha256:9771189e33ad49531f98873eb4e4458ce1c96f313fe15c6d753f4c7b6ad4eba5"
+          consumer: alice
+
+routes:
+  # Public catalog reads: no authentication, 10 requests per second per client IP, cached for 30s.
+  - name: catalog
+    match:
+      path: /catalog/
+      methods: [GET, HEAD]
+    upstream: catalog
+    rate_limit:
+      rate: 10
+      per: 1s
+      burst: 10
+    cache:
+      enabled: true
+      default_ttl: 30s
+      max_ttl: 5m
+    retry:
+      attempts: 2
+
+  # Orders accept either a JWT or an API key, and are limited per authenticated consumer.
+  - name: orders
+    match:
+      path: /orders/
+    upstream: orders
+    auth:
+      mode: any
+      providers:
+        - example-jwt
+        - example-keys
+    rate_limit:
+      rate: 20
+      per: 1s
+      burst: 20
+      key:
+        source: consumer
