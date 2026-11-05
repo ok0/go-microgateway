@@ -155,7 +155,7 @@ func copiedProblems(root string) ([]string, error) {
 	return problems, nil
 }
 
-func TestCopiedSourceConfined(t *testing.T) {
+func TestNoCopiedSource(t *testing.T) {
 	root, err := Root()
 	if err != nil {
 		t.Fatal(err)
@@ -164,21 +164,64 @@ func TestCopiedSourceConfined(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dirMarks := 0
 	for _, p := range problems {
-		path, _, _ := strings.Cut(p, ":")
-		if path != "internal/h2server" && !strings.HasPrefix(path, "internal/h2server/") {
-			t.Errorf("copied source outside internal/h2server: %s", p)
+		t.Errorf("copied source: %s", p)
+	}
+}
+
+func writeTree(t *testing.T, root string, files map[string]string) {
+	t.Helper()
+	for name, body := range files {
+		p := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
 		}
-		if p == "internal/h2server:0: copied HTTP/2 server directory" {
-			dirMarks++
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if dirMarks != 1 {
-		t.Errorf("directory mark for internal/h2server found %d times, want 1", dirMarks)
+}
+
+func hasProblemWithPrefix(problems []string, prefix string) bool {
+	for _, p := range problems {
+		if strings.HasPrefix(p, prefix) {
+			return true
+		}
 	}
-	if len(problems) == 0 {
-		t.Errorf("no copied source findings; the internal/h2server tree should produce some")
+	return false
+}
+
+func TestNoCopiedSourceCatchesSeededTree(t *testing.T) {
+	seeded := t.TempDir()
+	writeTree(t, seeded, map[string]string{
+		"go.mod":                      "module example.com/seeded\n\ngo 1.27\n\nrequire golang.org/x/net v0.1.0\n",
+		"internal/h2server/server.go": "package server\n",
+		"vendor/x/x.go":               "package x\n",
+	})
+	problems, err := copiedProblems(seeded)
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Logf("copied source findings: %d", len(problems))
+	if !hasProblemWithPrefix(problems, "internal/h2server:") {
+		t.Errorf("seeded tree problems %q lack the internal/h2server path", problems)
+	}
+	if !hasProblemWithPrefix(problems, "vendor:") && !hasProblemWithPrefix(problems, "vendor/") {
+		t.Errorf("seeded tree problems %q lack the vendor path", problems)
+	}
+	if !slices.Contains(problems, "go.mod: requires golang.org/x/net") {
+		t.Errorf("seeded tree problems %q lack the golang.org/x/net require", problems)
+	}
+
+	clean := t.TempDir()
+	writeTree(t, clean, map[string]string{
+		"go.mod": "module example.com/clean\n\ngo 1.27\n",
+		"a.go":   "package clean\n",
+	})
+	problems, err = copiedProblems(clean)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(problems) != 0 {
+		t.Errorf("clean tree problems %q, want none", problems)
+	}
 }

@@ -75,9 +75,9 @@ func DirectRequires(gomod []byte) []string {
 	return out
 }
 
-// directRequire parses one require spec such as `example.com/m v1.0.0 // indirect` and reports its module path and whether it is a direct requirement.
-func directRequire(spec string) (string, bool) {
-	body, comment, hasComment := strings.Cut(spec, "//")
+// directRequire parses one require entry such as `example.com/m v1.0.0 // indirect` and reports its module path and whether it is a direct requirement.
+func directRequire(entry string) (string, bool) {
+	body, comment, hasComment := strings.Cut(entry, "//")
 	fields := strings.Fields(body)
 	if len(fields) == 0 {
 		return "", false
