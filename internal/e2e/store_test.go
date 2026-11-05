@@ -856,6 +856,19 @@ func TestStoresSeededViaValidate(t *testing.T) {
 	}
 }
 
+// examplesEnv resolves the variables the example files reference to the local values the examples document.
+// The examples are loaded with this fixed environment, so the result does not depend on the caller's environment.
+func examplesEnv(name string) (string, bool) {
+	switch name {
+	case "REDIS_ADDR":
+		return "127.0.0.1:6379", true
+	case "REDIS_PASSWORD":
+		return "example-redis-password", true
+	}
+	return "", false
+}
+
+// This module registers no redis store; the redis module validates these files with its store registered.
 func TestExamplesValidate(t *testing.T) {
 	paths, err := filepath.Glob("../../examples/*.yaml")
 	if err != nil {
@@ -865,12 +878,37 @@ func TestExamplesValidate(t *testing.T) {
 		t.Fatal("no examples/*.yaml files")
 	}
 	for _, path := range paths {
-		cfg, err := config.LoadFile(path)
+		cfg, err := config.LoadFile(path, config.WithEnvLookup(examplesEnv))
 		if err != nil {
 			t.Fatalf("LoadFile(%s) = %v", path, err)
 		}
-		if err := microgateway.Validate(cfg); err != nil {
-			t.Errorf("Validate(%s) = %v", path, err)
+		var want []config.FieldError
+		for i, s := range cfg.Stores {
+			if s.Type == "redis" {
+				want = append(want, config.FieldError{Path: fmt.Sprintf("stores[%d].type", i), Msg: `store type "redis" is not registered`})
+			}
+		}
+		err = microgateway.Validate(cfg)
+		if len(want) == 0 {
+			if err != nil {
+				t.Errorf("Validate(%s) = %v", path, err)
+			}
+			continue
+		}
+		var ve *config.ValidationError
+		if !errors.As(err, &ve) {
+			t.Errorf("Validate(%s) = %v, want a validation error", path, err)
+			continue
+		}
+		got := slices.Clone(ve.Errors)
+		for j := range got {
+			if got[j].Line <= 0 {
+				t.Errorf("Validate(%s) error %q has no line", path, got[j].Msg)
+			}
+			got[j].Line = 0
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("Validate(%s) errors = %v, want %v", path, got, want)
 		}
 	}
 }
