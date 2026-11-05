@@ -7,10 +7,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"log/slog"
-	"maps"
 	"net"
 	"net/http"
 	"reflect"
@@ -22,7 +20,6 @@ import (
 
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
-	"github.com/ok0/go-microgateway/internal/h2server"
 	"github.com/ok0/go-microgateway/internal/testcert"
 	"github.com/ok0/go-microgateway/internal/testwait"
 )
@@ -40,90 +37,6 @@ var errUnsettled = errors.New("attempt did not settle")
 func unsettled(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", errUnsettled, fmt.Sprintf(format, args...))
 }
-
-// h2outcome is what one side of an HTTP/2 limit comparison did, in the terms the comparison checks. Stream events
-// are "HEADERS <status|trailer> [ES]", "DATA" once per stream, "DATA ES" once per stream when a DATA frame ends it,
-// and "RST_STREAM <code>". PING, SETTINGS and WINDOW_UPDATE frames are left out unless a scenario records them.
-type h2outcome struct {
-	Streams  map[uint32][]string
-	Data     map[uint32]int
-	GoAway   []string
-	Settings string
-	Pinged   bool
-	End      string
-	Handler  string
-}
-
-// outcomeOf summarises frames in arrival order.
-func outcomeOf(fs []h2frame) h2outcome {
-	o := h2outcome{Streams: map[uint32][]string{}, Data: map[uint32]int{}}
-	dataSeen := map[uint32]bool{}
-	dataEnded := map[uint32]bool{}
-	for _, f := range fs {
-		switch f.Type {
-		case h2server.FrameHeaders:
-			ev := "HEADERS " + statusOf(f)
-			if f.EndStream {
-				ev += " ES"
-			}
-			o.Streams[f.Stream] = append(o.Streams[f.Stream], ev)
-		case h2server.FrameData:
-			o.Data[f.Stream] += f.DataLen
-			if !dataSeen[f.Stream] {
-				dataSeen[f.Stream] = true
-				o.Streams[f.Stream] = append(o.Streams[f.Stream], "DATA")
-			}
-			if f.EndStream && !dataEnded[f.Stream] {
-				dataEnded[f.Stream] = true
-				o.Streams[f.Stream] = append(o.Streams[f.Stream], "DATA ES")
-			}
-		case h2server.FrameRSTStream:
-			o.Streams[f.Stream] = append(o.Streams[f.Stream], "RST_STREAM "+f.Code.String())
-		case h2server.FrameGoAway:
-			o.GoAway = append(o.GoAway, fmt.Sprintf("%v last=%d", f.Code, f.LastStream))
-		}
-	}
-	return o
-}
-
-// peerEnd reports how the connection of c ended, or "open" while the reader is still running.
-func peerEnd(c *h2peer) string {
-	select {
-	case <-c.done:
-		return endKind(c.endErr())
-	default:
-		return "open"
-	}
-}
-
-// finish summarises fs and records whether the connection of c is still open.
-func finish(c *h2peer, fs []h2frame) h2outcome {
-	o := outcomeOf(fs)
-	o.End = peerEnd(c)
-	return o
-}
-
-// finishEnded waits for the server to close the connection of c, then summarises every frame received.
-func finishEnded(c *h2peer, fs []h2frame) h2outcome {
-	// The server closes the connection after its GOAWAY linger.
-	<-c.done
-	end := endKind(c.endErr())
-	o := outcomeOf(append(fs, drain(c)...))
-	o.End = end
-	return o
-}
-
-// settingsLine renders the server SETTINGS in ID order followed by the connection WINDOW_UPDATE increment.
-func settingsLine(s map[h2server.SettingID]uint32, incr uint32) string {
-	var parts []string
-	for _, id := range slices.Sorted(maps.Keys(s)) {
-		parts = append(parts, fmt.Sprintf("%d=%d", id, s[id]))
-	}
-	return strings.Join(append(parts, fmt.Sprintf("WINDOW_UPDATE=%d", incr)), " ")
-}
-
-// pingFrame matches a PING frame that is not an acknowledgement.
-func pingFrame(f h2frame) bool { return f.Type == h2server.FramePing && !f.Ack }
 
 // startStockH2 serves h with a plain net/http server whose limits are lim (header, read, write, idle), over TLS with
 // HTTP/2 when tr is TLS and over prior-knowledge h2c otherwise. It returns the address and a function that stops it.
@@ -177,46 +90,6 @@ func startGatewayH2(cfg *config.Config, h http.Handler, logs *logBuffer) (string
 		cancel()
 		srv.Shutdown(ctx)
 	}, nil
-}
-
-// h2BigProbe writes one 1 MiB response and records whether the write completed.
-func h2BigProbe(p *probe) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, err := w.Write(make([]byte, 1<<20)); err != nil {
-			p.set("write-error")
-			return
-		}
-		p.set("complete")
-	})
-}
-
-// h2TailProbe writes 65535 bytes and then 100 bytes, and records that the handler returned.
-func h2TailProbe(p *probe) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(make([]byte, 65535))
-		w.Write(make([]byte, 100))
-		p.set("returned")
-	})
-}
-
-// h2BlockedProbe serves /a, a 32 MiB response whose write deadline is cleared, and /b, a small response with a
-// trailer. It records when /b has returned and when /a has completed.
-func h2BlockedProbe(p *probe) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/a" {
-			http.NewResponseController(w).SetWriteDeadline(time.Time{})
-			if _, err := w.Write(make([]byte, 32<<20)); err != nil {
-				p.set("a-write-error")
-				return
-			}
-			p.set("a-complete")
-			return
-		}
-		w.Header().Set("Trailer", "X-T")
-		io.WriteString(w, "b")
-		w.Header().Set("X-T", "t")
-		p.set("b-returned")
-	})
 }
 
 // h2scenario is one HTTP/2 limit comparison. drive runs the client of one attempt and reports its outcome, or an error
@@ -319,12 +192,12 @@ func (r *h2run) dial(rcvBuf int) (*h2peer, error) {
 
 // handshake sends the preface with settings, starts the reader of c and waits for the server SETTINGS. The comparison
 // counts no timers, so it sends no barrier.
-func (r *h2run) handshake(c *h2peer, ackPings bool, gate uint32, settings ...h2server.Setting) (h2frame, error) {
+func (r *h2run) handshake(c *h2peer, ackPings bool, gate uint32, settings ...h2Setting) (h2frame, error) {
 	if err := c.writePreface(settings...); err != nil {
 		return h2frame{}, unsettled("preface: %v", err)
 	}
 	c.start(ackPings, gate)
-	fs, ev := c.await(nil, func(f h2frame) bool { return f.Type == h2server.FrameSettings && !f.Ack })
+	fs, ev := c.await(nil, func(f h2frame) bool { return f.Type == h2Settings && !f.Ack })
 	if ev != evFrame {
 		return h2frame{}, unsettled("connection ended before the server SETTINGS: %v", c.endErr())
 	}
@@ -336,22 +209,6 @@ func (r *h2run) close() {
 	for _, p := range r.peers {
 		p.close()
 	}
-}
-
-// dataOrEnd matches the frame that gives stream id n DATA bytes, or the frame that ends stream id.
-func dataOrEnd(id uint32, n int) func(h2frame) bool {
-	total := 0
-	return func(f h2frame) bool {
-		if f.Stream == id && f.Type == h2server.FrameData {
-			total += f.DataLen
-		}
-		return total >= n || streamEnded(id)(f)
-	}
-}
-
-// connWindowUpdate matches a WINDOW_UPDATE frame on stream 0.
-func connWindowUpdate(f h2frame) bool {
-	return f.Type == h2server.FrameWindowUpdate && f.Stream == 0
 }
 
 func driveSettings(r *h2run) (h2outcome, error) {
@@ -477,8 +334,8 @@ func driveBlocked(r *h2run) (h2outcome, error) {
 		return h2outcome{}, err
 	}
 	if _, err := r.handshake(c, true, 1,
-		h2server.Setting{ID: h2server.SettingInitialWindowSize, Val: 1<<31 - 1},
-		h2server.Setting{ID: h2server.SettingMaxFrameSize, Val: 1<<24 - 1},
+		h2Setting{ID: h2SettingInitialWindowSize, Val: 1<<31 - 1},
+		h2Setting{ID: h2SettingMaxFrameSize, Val: 1<<24 - 1},
 	); err != nil {
 		return h2outcome{}, err
 	}
@@ -513,7 +370,7 @@ func driveBlocked(r *h2run) (h2outcome, error) {
 	ended, acked := false, false
 	more, ev := c.await(nil, func(f h2frame) bool {
 		ended = ended || streamEnded(1)(f)
-		acked = acked || (f.Type == h2server.FramePing && f.Ack && f.Ping == token)
+		acked = acked || (f.Type == h2Ping && f.Ack && f.Ping == token)
 		return ended && acked
 	})
 	fs = append(fs, more...)
@@ -522,10 +379,10 @@ func driveBlocked(r *h2run) (h2outcome, error) {
 	}
 	rst, ack := -1, -1
 	for i, f := range fs {
-		if rst < 0 && f.Stream == 3 && f.Type == h2server.FrameRSTStream {
+		if rst < 0 && f.Stream == 3 && f.Type == h2RSTStream {
 			rst = i
 		}
-		if ack < 0 && f.Type == h2server.FramePing && f.Ack && f.Ping == token {
+		if ack < 0 && f.Type == h2Ping && f.Ack && f.Ping == token {
 			ack = i
 		}
 	}
@@ -534,7 +391,7 @@ func driveBlocked(r *h2run) (h2outcome, error) {
 	}
 	// Stream 1 clears its write deadline through the serve loop. When the limit expired first, the stream was reset
 	// behind the blocked write, which says nothing about the sides' handling of a cleared deadline.
-	if i := slices.IndexFunc(fs, func(f h2frame) bool { return f.Stream == 1 && f.Type == h2server.FrameRSTStream }); i >= 0 {
+	if i := slices.IndexFunc(fs, func(f h2frame) bool { return f.Stream == 1 && f.Type == h2RSTStream }); i >= 0 {
 		return h2outcome{}, unsettled("stream 1 was reset before its write deadline was cleared")
 	}
 	if err := r.awaitHandler(c, "/a"); err != nil {

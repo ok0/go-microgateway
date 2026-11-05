@@ -15,7 +15,6 @@ import (
 
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
-	"github.com/ok0/go-microgateway/internal/h2server"
 	"github.com/ok0/go-microgateway/internal/testcert"
 	"github.com/ok0/go-microgateway/internal/testwait"
 )
@@ -68,100 +67,36 @@ func (tr h2Transport) dial(t *testing.T, addr string) *h2peer {
 	return dialH2(t, addr, tr.pool, 0)
 }
 
-// streamEnded matches the frame that ends stream id, by END_STREAM or by RST_STREAM.
-func streamEnded(id uint32) func(h2frame) bool {
-	return func(f h2frame) bool {
-		return f.Stream == id && (f.EndStream || f.Type == h2server.FrameRSTStream)
-	}
-}
-
-// streamRST matches the RST_STREAM frame of stream id.
-func streamRST(id uint32) func(h2frame) bool {
-	return func(f h2frame) bool { return f.Stream == id && f.Type == h2server.FrameRSTStream }
-}
-
-// goAwayFrame matches any GOAWAY frame.
-func goAwayFrame(f h2frame) bool { return f.Type == h2server.FrameGoAway }
-
 // untilDataBytes collects frames until stream id has delivered n DATA bytes.
 func untilDataBytes(p *h2peer, id uint32, n int) []h2frame {
 	total := 0
 	return p.until(fmt.Sprintf("%d DATA bytes on stream %d", n, id), func(f h2frame) bool {
-		if f.Stream == id && f.Type == h2server.FrameData {
+		if f.Stream == id && f.Type == h2Data {
 			total += f.DataLen
 		}
 		return total >= n
 	})
 }
 
-// onStream returns the frames of fs that belong to stream id, in order.
-func onStream(fs []h2frame, id uint32) []h2frame {
-	var out []h2frame
-	for _, f := range fs {
-		if f.Stream == id {
-			out = append(out, f)
-		}
-	}
-	return out
-}
-
-// dataBytes returns the DATA bytes that fs carries on stream id.
-func dataBytes(fs []h2frame, id uint32) int {
-	n := 0
-	for _, f := range fs {
-		if f.Stream == id && f.Type == h2server.FrameData {
-			n += f.DataLen
-		}
-	}
-	return n
-}
-
-// statusOf returns the :status of a response HEADERS frame, or "trailer" for a frame without one.
-func statusOf(f h2frame) string {
-	for _, hf := range f.Header {
-		if hf[0] == ":status" {
-			return hf[1]
-		}
-	}
-	return "trailer"
-}
-
 // requireOKStream fails the test unless the frames of stream id are a 200 HEADERS and a two-byte DATA that ends the stream.
 func requireOKStream(t *testing.T, fs []h2frame, id uint32) {
 	t.Helper()
 	got := onStream(fs, id)
-	if len(got) != 2 || got[0].Type != h2server.FrameHeaders || statusOf(got[0]) != "200" || got[0].EndStream ||
-		got[1].Type != h2server.FrameData || got[1].DataLen != 2 || !got[1].EndStream {
+	if len(got) != 2 || got[0].Type != h2Headers || statusOf(got[0]) != "200" || got[0].EndStream ||
+		got[1].Type != h2Data || got[1].DataLen != 2 || !got[1].EndStream {
 		t.Fatalf("stream %d frames = %+v, want HEADERS 200 then 2 DATA bytes with END_STREAM", id, got)
 	}
 }
 
 // requireRSTCode fails the test unless the last frame of fs is RST_STREAM on stream id with code.
-func requireRSTCode(t *testing.T, fs []h2frame, id uint32, code h2server.ErrCode) {
+func requireRSTCode(t *testing.T, fs []h2frame, id uint32, code h2ErrCode) {
 	t.Helper()
 	if len(fs) == 0 {
 		t.Fatalf("no frames, want RST_STREAM %v on stream %d", code, id)
 	}
 	last := fs[len(fs)-1]
-	if last.Type != h2server.FrameRSTStream || last.Stream != id || last.Code != code {
+	if last.Type != h2RSTStream || last.Stream != id || last.Code != code {
 		t.Fatalf("last frame = type %v stream %d code %v, want RST_STREAM stream %d code %v", last.Type, last.Stream, last.Code, id, code)
-	}
-}
-
-// drain returns the frames p has already received, without waiting.
-func drain(p *h2peer) []h2frame {
-	out := p.pending
-	p.pending = nil
-	for {
-		select {
-		case f, ok := <-p.frames:
-			if !ok {
-				return out
-			}
-			out = append(out, f)
-		default:
-			return out
-		}
 	}
 }
 
@@ -212,8 +147,8 @@ func TestHTTP2StreamReadLimit(t *testing.T) {
 			}
 			s1 := onStream(reset, 1)
 			n := len(s1)
-			if n < 2 || s1[n-2].Type != h2server.FrameHeaders || statusOf(s1[n-2]) != "200" || !s1[n-2].EndStream ||
-				s1[n-1].Type != h2server.FrameRSTStream || s1[n-1].Code != h2server.ErrCodeNo {
+			if n < 2 || s1[n-2].Type != h2Headers || statusOf(s1[n-2]) != "200" || !s1[n-2].EndStream ||
+				s1[n-1].Type != h2RSTStream || s1[n-1].Code != h2ErrNo {
 				t.Fatalf("stream 1 frames = %+v, want HEADERS 200 END_STREAM then RST_STREAM NO_ERROR", s1)
 			}
 		})
@@ -247,7 +182,7 @@ func TestHTTP2StreamWriteLimit(t *testing.T) {
 			p.open()
 			fake.Advance(time.Nanosecond)
 			seen = append(seen, p.until("RST_STREAM on stream 1", streamRST(1))...)
-			requireRSTCode(t, seen, 1, h2server.ErrCodeInternal)
+			requireRSTCode(t, seen, 1, h2ErrInternal)
 			if got := dataBytes(seen, 1); got != 65535 {
 				t.Fatalf("stream 1 DATA bytes = %d, want 65535", got)
 			}
@@ -275,7 +210,7 @@ func TestHTTP2WriteLimitAfterHandlerReturn(t *testing.T) {
 			p.open()
 			fake.Advance(time.Nanosecond)
 			seen = append(seen, p.until("RST_STREAM on stream 1", streamRST(1))...)
-			requireRSTCode(t, seen, 1, h2server.ErrCodeInternal)
+			requireRSTCode(t, seen, 1, h2ErrInternal)
 			for _, f := range onStream(seen, 1) {
 				if f.EndStream {
 					t.Fatalf("stream 1 frame %+v carries END_STREAM, want none", f)
@@ -306,7 +241,7 @@ func TestHTTP2ResponseControllerDeadlines(t *testing.T) {
 				fake.Advance(2*time.Second - time.Nanosecond)
 				p.open()
 				fake.Advance(time.Nanosecond)
-				requireRSTCode(t, p.until("RST_STREAM on stream 1", streamRST(1)), 1, h2server.ErrCodeInternal)
+				requireRSTCode(t, p.until("RST_STREAM on stream 1", streamRST(1)), 1, h2ErrInternal)
 			})
 			t.Run("read", func(t *testing.T) {
 				fake := clock.NewFake(serverStart)
@@ -361,7 +296,7 @@ func TestHTTP2IdleGoAway(t *testing.T) {
 				fake.Advance(time.Nanosecond)
 				fs := p.until("GOAWAY", goAwayFrame)
 				last := fs[len(fs)-1]
-				if last.Code != h2server.ErrCodeNo || last.LastStream != 0 {
+				if last.Code != h2ErrNo || last.LastStream != 0 {
 					t.Fatalf("GOAWAY code = %v last stream = %d, want NO_ERROR, 0", last.Code, last.LastStream)
 				}
 				awaitDue(t, fake, 1, time.Second, "GOAWAY linger timer")
@@ -399,9 +334,9 @@ func TestHTTP2IdleGoAway(t *testing.T) {
 				p.open()
 				fake.Advance(time.Nanosecond)
 				fs := p.until("GOAWAY with last stream 1", func(f h2frame) bool {
-					return f.Type == h2server.FrameGoAway && f.LastStream == 1
+					return f.Type == h2GoAway && f.LastStream == 1
 				})
-				if last := fs[len(fs)-1]; last.Code != h2server.ErrCodeNo {
+				if last := fs[len(fs)-1]; last.Code != h2ErrNo {
 					t.Fatalf("GOAWAY code = %v, want NO_ERROR", last.Code)
 				}
 			})
@@ -436,9 +371,9 @@ func TestHTTP2ReadLimitSendsNoPing(t *testing.T) {
 			}
 			fake.Advance(time.Hour)
 			seen = append(seen, p.until("GOAWAY with last stream 3", func(f h2frame) bool {
-				return f.Type == h2server.FrameGoAway && f.LastStream == 3
+				return f.Type == h2GoAway && f.LastStream == 3
 			})...)
-			if last := seen[len(seen)-1]; last.Code != h2server.ErrCodeNo {
+			if last := seen[len(seen)-1]; last.Code != h2ErrNo {
 				t.Fatalf("GOAWAY code = %v, want NO_ERROR", last.Code)
 			}
 			for _, f := range seen {
@@ -472,7 +407,7 @@ func TestHTTP2FirstSettingsTimeout(t *testing.T) {
 			// A SETTINGS ACK is a frame and would stop the first-SETTINGS timer; the peer must stay silent after the preface.
 			p.holdSettingsAck = true
 			p.mustSend(func() error {
-				_, err := p.conn.Write([]byte(h2server.ClientPreface))
+				_, err := p.conn.Write([]byte(h2Preface))
 				return err
 			})
 			p.start(false, 0)
@@ -492,19 +427,19 @@ func TestHTTP2InitialSettings(t *testing.T) {
 			srv := tr.start(t, fake, okHandler())
 			p := tr.dial(t, srv.Addrs()["public"].String())
 			fs := p.handshake(true)
-			want := map[h2server.SettingID]uint32{
-				h2server.SettingMaxFrameSize:         1048576,
-				h2server.SettingMaxConcurrentStreams: 250,
-				h2server.SettingMaxHeaderListSize:    1048896,
-				h2server.SettingHeaderTableSize:      4096,
-				h2server.SettingInitialWindowSize:    1048576,
-				h2server.SettingNoRFC7540Priorities:  1,
+			want := map[h2SettingID]uint32{
+				h2SettingMaxFrameSize:         1048576,
+				h2SettingMaxConcurrentStreams: 250,
+				h2SettingMaxHeaderListSize:    1048896,
+				h2SettingHeaderTableSize:      4096,
+				h2SettingInitialWindowSize:    1048576,
+				h2SettingNoRFC7540Priorities:  1,
 			}
 			if !reflect.DeepEqual(fs.Settings, want) {
 				t.Fatalf("server SETTINGS = %v, want %v", fs.Settings, want)
 			}
 			wu := p.until("connection WINDOW_UPDATE", func(f h2frame) bool {
-				return f.Type == h2server.FrameWindowUpdate && f.Stream == 0
+				return f.Type == h2WindowUpdate && f.Stream == 0
 			})
 			if got := wu[len(wu)-1].Incr; got != 983041 {
 				t.Fatalf("connection WINDOW_UPDATE increment = %d, want 983041", got)
@@ -533,13 +468,13 @@ func TestHTTP2TwoServersOwnClocks(t *testing.T) {
 	awaitDue(t, f1, 1, 3*time.Second, "server one write timer")
 	awaitDue(t, f2, 1, 3*time.Second, "server two write timer")
 	f1.Advance(3 * time.Second)
-	requireRSTCode(t, p1.until("RST_STREAM on server one", streamRST(1)), 1, h2server.ErrCodeInternal)
+	requireRSTCode(t, p1.until("RST_STREAM on server one", streamRST(1)), 1, h2ErrInternal)
 	if n := f2.Due(3 * time.Second); n != 1 {
 		t.Fatalf("server two timers due = %d, want 1", n)
 	}
 	p2.open()
 	f2.Advance(3 * time.Second)
-	requireRSTCode(t, p2.until("RST_STREAM on server two", streamRST(1)), 1, h2server.ErrCodeInternal)
+	requireRSTCode(t, p2.until("RST_STREAM on server two", streamRST(1)), 1, h2ErrInternal)
 }
 
 func TestHTTP2ShutdownStopsTimers(t *testing.T) {

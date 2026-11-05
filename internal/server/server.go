@@ -90,6 +90,8 @@ type Server struct {
 	addrs     map[string]net.Addr
 	adminAddr net.Addr
 	clk       clock.Clock
+	// listen binds a listener; tests replace it to serve on in-memory listeners.
+	listen func(network, address string) (net.Listener, error)
 	// shutdownDelay and drainTimeout are guarded by mu.
 	shutdownDelay time.Duration
 	drainTimeout  time.Duration
@@ -155,6 +157,7 @@ func New(cfg *config.Config, h http.Handler, admin http.Handler, ready func(bool
 		shutdownDelay: cfg.Global.ShutdownDelay.Std(),
 		drainTimeout:  cfg.Global.DrainTimeout.Std(),
 		clk:           clk,
+		listen:        net.Listen,
 	}
 	s.base, s.cancel = context.WithCancel(context.Background())
 	errLog := slog.NewLogLogger(logger.Handler(), slog.LevelWarn)
@@ -250,7 +253,7 @@ func (s *Server) Start() error {
 	all := s.listeners()
 	lns := make([]net.Listener, 0, len(all))
 	for _, l := range all {
-		ln, err := net.Listen("tcp", l.address)
+		ln, err := s.listen("tcp", l.address)
 		if err != nil {
 			for _, open := range lns {
 				open.Close()

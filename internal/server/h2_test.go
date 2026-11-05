@@ -16,7 +16,6 @@ import (
 
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
-	"github.com/ok0/go-microgateway/internal/h2server"
 	"github.com/ok0/go-microgateway/internal/testcert"
 	"github.com/ok0/go-microgateway/internal/testwait"
 )
@@ -120,27 +119,38 @@ func TestHTTP2ServedInRepo(t *testing.T) {
 	})
 }
 
+// h2optsWant holds the HTTP/2 option values that a listener's server is expected to carry.
+type h2optsWant struct {
+	MaxHeaderBytes        int
+	MaxHeaderValueCount   int
+	ReadTimeout           time.Duration
+	WriteTimeout          time.Duration
+	IdleTimeout           time.Duration
+	SendPingTimeout       time.Duration
+	DisableClientPriority bool
+}
+
 func TestHTTP2OptionsMatchNetHTTP(t *testing.T) {
 	certFile, keyFile, _ := testcert.Write(t, t.TempDir())
 	cases := []struct {
 		name string
 		muts []func(*config.Listener)
-		want h2server.Options
+		want h2optsWant
 	}{
 		{
 			name: "tls-h2",
 			muts: []func(*config.Listener){limits(3*time.Second, 4*time.Second, 5*time.Second, 6*time.Second), tlsOn(certFile, keyFile, true)},
-			want: h2server.Options{MaxHeaderBytes: 1048576, MaxHeaderValueCount: 500, ReadTimeout: 4 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 6 * time.Second, SendPingTimeout: 4 * time.Second},
+			want: h2optsWant{MaxHeaderBytes: 1048576, MaxHeaderValueCount: 500, ReadTimeout: 4 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 6 * time.Second, SendPingTimeout: 4 * time.Second},
 		},
 		{
 			name: "h2c",
 			muts: []func(*config.Listener){limits(3*time.Second, 0, 0, 7*time.Second), h2cOn, func(l *config.Listener) { l.MaxHeaderBytes = 4096 }},
-			want: h2server.Options{MaxHeaderBytes: 4096, MaxHeaderValueCount: 500, IdleTimeout: 7 * time.Second},
+			want: h2optsWant{MaxHeaderBytes: 4096, MaxHeaderValueCount: 500, IdleTimeout: 7 * time.Second},
 		},
 		{
 			name: "tls-h2-defaults",
 			muts: []func(*config.Listener){tlsOn(certFile, keyFile, true)},
-			want: h2server.Options{MaxHeaderBytes: 1048576, MaxHeaderValueCount: 500, IdleTimeout: 120 * time.Second},
+			want: h2optsWant{MaxHeaderBytes: 1048576, MaxHeaderValueCount: 500, IdleTimeout: 120 * time.Second},
 		},
 	}
 	for _, tc := range cases {
@@ -248,8 +258,8 @@ func shutdownSendsGoAway(t *testing.T, cfg *config.Config, pool *x509.CertPool) 
 	p.headers(1, http.MethodGet, "/", true)
 	waitSignal(t, entered, "handler entered")
 	shutdown := shutdownAsync(srv, context.Background())
-	fs := p.until("GOAWAY with last stream 1", func(f h2frame) bool { return f.Type == h2server.FrameGoAway && f.LastStream == 1 })
-	if last := fs[len(fs)-1]; last.Code != h2server.ErrCodeNo {
+	fs := p.until("GOAWAY with last stream 1", func(f h2frame) bool { return f.Type == h2GoAway && f.LastStream == 1 })
+	if last := fs[len(fs)-1]; last.Code != h2ErrNo {
 		t.Fatalf("GOAWAY code = %v, want NO_ERROR", last.Code)
 	}
 	close(release)
