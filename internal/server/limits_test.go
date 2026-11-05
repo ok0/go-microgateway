@@ -18,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/ok0/go-microgateway/config"
@@ -327,18 +328,23 @@ func getVia(t *testing.T, client *http.Client, url string) fetched {
 	return f
 }
 
-// checkNoStdlibTimers fails the test if hs carries a net/http timeout or lacks the connection tracker.
-func checkNoStdlibTimers(t *testing.T, hs *http.Server) {
+// checkLimitFields fails the test unless hs carries the four net/http limits in want, maxHeader as its header limit,
+// and the connection tracker.
+func checkLimitFields(t *testing.T, hs *http.Server, want [4]time.Duration, maxHeader int) {
 	t.Helper()
-	if hs.ReadHeaderTimeout != 0 || hs.ReadTimeout != 0 || hs.WriteTimeout != 0 || hs.IdleTimeout != 0 {
-		t.Errorf("net/http timeouts = %v %v %v %v, want all 0", hs.ReadHeaderTimeout, hs.ReadTimeout, hs.WriteTimeout, hs.IdleTimeout)
+	got := [4]time.Duration{hs.ReadHeaderTimeout, hs.ReadTimeout, hs.WriteTimeout, hs.IdleTimeout}
+	if got != want {
+		t.Errorf("net/http limits = %v, want %v", got, want)
+	}
+	if hs.MaxHeaderBytes != maxHeader {
+		t.Errorf("MaxHeaderBytes = %d, want %d", hs.MaxHeaderBytes, maxHeader)
 	}
 	if hs.ConnState == nil {
 		t.Error("ConnState = nil, want the limit tracker")
 	}
 }
 
-func TestServersHaveNoStdlibTimeouts(t *testing.T) {
+func TestServersCarryLimitFields(t *testing.T) {
 	certFile, keyFile, _ := testcert.Write(t, t.TempDir())
 	all := limits(3*time.Second, 4*time.Second, 5*time.Second, 6*time.Second)
 	cases := []struct {
@@ -366,11 +372,18 @@ func TestServersHaveNoStdlibTimeouts(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				checkNoStdlibTimers(t, srv.data[0].srv)
+				hs := srv.data[0].srv
+				checkLimitFields(t, hs, [4]time.Duration{3 * time.Second, 4 * time.Second, 5 * time.Second, 6 * time.Second}, 1048576)
+				if hs.HTTP2 == nil {
+					t.Error("HTTP2 = nil, want the HTTP/2 configuration")
+				}
+				if hs.TLSNextProto != nil {
+					t.Errorf("TLSNextProto = %v before serving, want nil", hs.TLSNextProto)
+				}
 				if srv.data[0].lim != tc.want {
 					t.Errorf("limits = %+v, want %+v", srv.data[0].lim, tc.want)
 				}
-				checkNoStdlibTimers(t, srv.admin.srv)
+				checkLimitFields(t, srv.admin.srv, [4]time.Duration{10 * time.Second, 0, 0, 120 * time.Second}, 0)
 				if want := (connLimits{header: 10 * time.Second, idle: 120 * time.Second}); srv.admin.lim != want {
 					t.Errorf("admin limits = %+v, want %+v", srv.admin.lim, want)
 				}
@@ -501,49 +514,52 @@ func TestTLSHandshakeLimit(t *testing.T) {
 }
 
 func TestHTTP2StillNegotiatedAndServed(t *testing.T) {
-	certFile, keyFile, pool := testcert.Write(t, t.TempDir())
+	wires := bubbleWires(t)
+	tlsWire, plainWire := wires[0], wires[1]
 	body := strings.Repeat("abcdefgh", 1024)
 	frozen := limits(time.Second, time.Second, time.Second, time.Second)
 	cases := []struct {
 		name   string
+		w      bubbleWire
 		muts   []func(*config.Listener)
 		tlsOn  bool
-		h2c    bool
 		proto  int
 		alpnOK func(string) bool
 	}{
-		{"tls-h2", []func(*config.Listener){frozen, tlsOn(certFile, keyFile, true)}, true, false, 2, func(s string) bool { return s == "h2" }},
-		{"h2c", []func(*config.Listener){frozen, h2cOn}, false, true, 2, func(s string) bool { return s == "" }},
-		{"tls-http1-only", []func(*config.Listener){frozen, tlsOn(certFile, keyFile, false)}, true, false, 1, func(s string) bool { return s == "" || s == "http/1.1" }},
+		{"tls-h2", tlsWire, []func(*config.Listener){frozen, tlsOn(tlsWire.certFile, tlsWire.keyFile, true)}, true, 2, func(s string) bool { return s == "h2" }},
+		{"h2c", plainWire, []func(*config.Listener){frozen, h2cOn}, false, 2, func(s string) bool { return s == "" }},
+		{"tls-http1-only", tlsWire, []func(*config.Listener){frozen, tlsOn(tlsWire.certFile, tlsWire.keyFile, false)}, true, 1, func(s string) bool { return s == "" || s == "http/1.1" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fake := clock.NewFake(serverStart)
-			srv := startServer(t, limitCfg(t, tc.muts...), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				io.WriteString(w, body)
-			}), nil, nil, WithClock(fake))
-			addr := srv.Addrs()["public"].String()
-			scheme := "http://"
-			client := h2Client(t, nil, true)
-			if tc.tlsOn {
-				scheme = "https://"
-				client = h2Client(t, pool, false)
-			}
-			for i := range 2 {
-				got := getVia(t, client, scheme+addr+"/")
-				if got.status != http.StatusOK || got.body != body {
-					t.Fatalf("request %d: status = %d, body length = %d; want 200 and the full body", i+1, got.status, len(got.body))
+			synctest.Test(t, func(t *testing.T) {
+				m := newMemNet(64 << 10)
+				t.Cleanup(m.close)
+				srv := startBubbleGateway(t, m, limitCfg(t, tc.muts...), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					io.WriteString(w, body)
+				}), &logBuffer{}, WithClock(clock.NewFake(serverStart)))
+				addr := srv.Addrs()["public"].String()
+				scheme := "http://"
+				if tc.tlsOn {
+					scheme = "https://"
 				}
-				if got.major != tc.proto {
-					t.Fatalf("request %d: ProtoMajor = %d, want %d", i+1, got.major, tc.proto)
+				client := bubbleClient(t, m, tc.w)
+				for i := range 2 {
+					got := getVia(t, client, scheme+addr+"/")
+					if got.status != http.StatusOK || got.body != body {
+						t.Fatalf("request %d: status = %d, body length = %d; want 200 and the full body", i+1, got.status, len(got.body))
+					}
+					if got.major != tc.proto {
+						t.Fatalf("request %d: ProtoMajor = %d, want %d", i+1, got.major, tc.proto)
+					}
+					if tc.tlsOn && !tc.alpnOK(got.alpn) {
+						t.Fatalf("request %d: negotiated protocol = %q", i+1, got.alpn)
+					}
+					if i == 1 && !got.reused {
+						t.Fatal("second request did not reuse the connection")
+					}
 				}
-				if tc.tlsOn && !tc.alpnOK(got.alpn) {
-					t.Fatalf("request %d: negotiated protocol = %q", i+1, got.alpn)
-				}
-				if i == 1 && !got.reused {
-					t.Fatal("second request did not reuse the connection")
-				}
-			}
+			})
 		})
 	}
 }
@@ -907,10 +923,8 @@ func TestFrozenClockRealStallCutsNothing(t *testing.T) {
 	t.Run("h2", func(t *testing.T) {
 		fake := clock.NewFake(serverStart)
 		got := make(chan string, 16)
-		srv := startServer(t, limitCfg(t, all, tlsOn(certFile, keyFile, true)), stallHandler(got), nil, nil, WithClock(fake))
+		srv := startServer(t, limitCfg(t, limits(time.Millisecond, 0, 0, 0), tlsOn(certFile, keyFile, true)), stallHandler(got), nil, nil, WithClock(fake))
 		base := "https://" + srv.Addrs()["public"].String()
-		client := h2Client(t, pool, false)
-		runH2Stalls(t, client, base, got)
 		t.Run("stall-before-client-hello", func(t *testing.T) {
 			tr := &http.Transport{
 				DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -955,13 +969,6 @@ func TestFrozenClockRealStallCutsNothing(t *testing.T) {
 			}
 		})
 	})
-
-	t.Run("h2c", func(t *testing.T) {
-		fake := clock.NewFake(serverStart)
-		got := make(chan string, 16)
-		srv := startServer(t, limitCfg(t, all, h2cOn), stallHandler(got), nil, nil, WithClock(fake))
-		runH2Stalls(t, h2Client(t, nil, true), "http://"+srv.Addrs()["public"].String(), got)
-	})
 }
 
 // runRawStalls runs the stalled HTTP/1 exchanges on conn, whose TLS handshake (if any) is already complete.
@@ -996,54 +1003,6 @@ func runRawStalls(t *testing.T, conn net.Conn, got <-chan string) {
 	writeString(t, conn, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
 	if status, _ := readResponse(t, br); status != http.StatusOK {
 		t.Fatalf("keep-alive request after stall: status = %d", status)
-	}
-}
-
-// runH2Stalls runs the stalled HTTP/2 exchanges through client.
-func runH2Stalls(t *testing.T, client *http.Client, base string, got <-chan string) {
-	t.Helper()
-	pr, pw := io.Pipe()
-	go func() {
-		pw.Write([]byte("01234"))
-		stall()
-		pw.Write([]byte("56789"))
-		pw.Close()
-	}()
-	req, err := http.NewRequest(http.MethodPost, base+"/", pr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("partial body: %v", err)
-	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK || resp.ProtoMajor != 2 {
-		t.Fatalf("partial body: status = %d, ProtoMajor = %d", resp.StatusCode, resp.ProtoMajor)
-	}
-	if body, _ := testwait.Recv(t, "handler body", got, nil); body != "0123456789" {
-		t.Fatalf("handler body = %q, want the full body", body)
-	}
-	req, err = http.NewRequest(http.MethodGet, base+"/big", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err = client.Do(req)
-	if err != nil {
-		t.Fatalf("big response: %v", err)
-	}
-	stall()
-	n, err := io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	if err != nil || n != 8<<20 || resp.ProtoMajor != 2 {
-		t.Fatalf("big response: %d bytes, ProtoMajor = %d, err = %v; want 8 MiB over HTTP/2", n, resp.ProtoMajor, err)
-	}
-	first := getVia(t, client, base+"/")
-	stall()
-	second := getVia(t, client, base+"/")
-	if first.status != http.StatusOK || second.status != http.StatusOK || !second.reused || second.major != 2 {
-		t.Fatalf("keep-alive: statuses %d, %d; reused = %v; ProtoMajor = %d", first.status, second.status, second.reused, second.major)
 	}
 }
 

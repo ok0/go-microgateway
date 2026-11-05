@@ -102,7 +102,9 @@ type limitTimer struct {
 	fired bool
 }
 
-// limitConn wraps an accepted raw conn beneath TLS and enforces the listener's limits on the server clock.
+// limitConn wraps an accepted raw conn beneath TLS. It enforces the HTTP/1 read-header, read, write, and idle limits
+// and the TLS handshake limit on the server clock. After HTTP/2 entry every deadline call reaches the raw conn
+// unchanged.
 type limitConn struct {
 	net.Conn
 	ln       *limitListener
@@ -118,6 +120,50 @@ type limitConn struct {
 	npre     int
 	tc       *tls.Conn
 	hsDone   chan struct{}
+	reading  atomic.Int32
+	raw      [2]time.Time
+	brR, brW uint8
+	hdr0     bool
+	wDefer   bool
+}
+
+func isPast(t time.Time) bool { return !t.IsZero() && !t.After(past()) }
+
+func (c *limitConn) recordRawLocked(which dir, t time.Time) {
+	if which != dirWrite {
+		c.raw[dirRead] = t
+	}
+	if which != dirRead {
+		c.raw[dirWrite] = t
+	}
+}
+
+func (c *limitConn) rawSetLocked(which dir, t time.Time) {
+	readDiff := which != dirWrite && !c.raw[dirRead].Equal(t)
+	writeDiff := which != dirRead && !c.raw[dirWrite].Equal(t)
+	switch {
+	case readDiff && writeDiff:
+		c.Conn.SetDeadline(t)
+	case readDiff:
+		c.Conn.SetReadDeadline(t)
+	case writeDiff:
+		c.Conn.SetWriteDeadline(t)
+	}
+	c.recordRawLocked(which, t)
+}
+
+func (c *limitConn) forwardLocked(which dir, t time.Time) error {
+	var err error
+	switch which {
+	case dirRead:
+		err = c.Conn.SetReadDeadline(t)
+	case dirWrite:
+		err = c.Conn.SetWriteDeadline(t)
+	case dirBoth:
+		err = c.Conn.SetDeadline(t)
+	}
+	c.recordRawLocked(which, t)
+	return err
 }
 
 func stopLocked(s *limitTimer) {
@@ -140,14 +186,7 @@ func (c *limitConn) armLocked(s *limitTimer, clk clock.Clock, d time.Duration, w
 }
 
 func (c *limitConn) expireLocked(s *limitTimer, which dir) {
-	switch which {
-	case dirRead:
-		c.Conn.SetReadDeadline(past())
-	case dirWrite:
-		c.Conn.SetWriteDeadline(past())
-	case dirBoth:
-		c.Conn.SetDeadline(past())
-	}
+	c.rawSetLocked(which, past())
 	s.t = nil
 	s.fired = true
 }
@@ -155,6 +194,7 @@ func (c *limitConn) expireLocked(s *limitTimer, which dir) {
 func (c *limitConn) beginHeaderLocked() {
 	c.phase = phaseHeader
 	c.wArmed = false
+	c.wDefer = c.ln.lim.write > 0
 	if !c.capture.Load() {
 		c.start = c.ln.clk.Now()
 		c.startSet = true
@@ -175,6 +215,7 @@ func (c *limitConn) stopAllLocked() {
 func (c *limitConn) enterH2Locked() {
 	c.stopAllLocked()
 	c.phase = phaseH2
+	c.brR, c.brW, c.hdr0, c.wDefer = 0, 0, false, false
 }
 
 func (c *limitConn) fire(s *limitTimer, which dir, g uint64) {
@@ -218,18 +259,20 @@ func (c *limitConn) state(st http.ConnState) {
 			c.phase = phaseHandshake
 			if d := lim.handshakeLimit(); d > 0 {
 				c.armLocked(&c.rd, c.ln.clk, d, dirBoth)
+				c.brR, c.brW = 2, 2
 			}
 			if c.tc != nil {
 				go c.handshake()
 			}
 		} else {
 			c.beginHeaderLocked()
+			c.hdr0 = lim.headerLimit() > 0
 		}
 	case http.StateActive:
 		if (c.phase == phaseHeader || c.phase == phaseRequest) && lim.write > 0 && !c.wArmed {
 			c.wArmed = true
 			stopLocked(&c.wr)
-			c.Conn.SetWriteDeadline(time.Time{})
+			c.rawSetLocked(dirWrite, time.Time{})
 			c.armLocked(&c.wr, c.ln.clk, lim.write, dirWrite)
 		}
 	case http.StateIdle:
@@ -260,6 +303,7 @@ func (c *limitConn) handshakeDone(ok bool, proto string) {
 		c.enterH2Locked()
 	} else {
 		c.beginHeaderLocked()
+		c.hdr0 = c.ln.lim.headerLimit() > 0
 	}
 }
 
@@ -267,25 +311,56 @@ func (c *limitConn) SetDeadline(t time.Time) error {
 	c.awaitHandshake()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	err := c.Conn.SetDeadline(t)
+	if c.phase >= phaseH2 {
+		return c.forwardLocked(dirBoth, t)
+	}
 	switch c.phase {
 	case phaseHeader, phaseRequest, phaseIdle:
 		stopLocked(&c.rd)
 		stopLocked(&c.wr)
 	}
-	return err
+	switch {
+	case t.IsZero():
+		c.rawSetLocked(dirBoth, t)
+	case isPast(t):
+		c.rawSetLocked(dirBoth, past())
+	case c.phase == phaseHeader || c.phase == phaseRequest || c.phase == phaseIdle:
+		return c.forwardLocked(dirBoth, t)
+	}
+	return nil
 }
 
 func (c *limitConn) SetReadDeadline(t time.Time) error {
 	c.awaitHandshake()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	err := c.Conn.SetReadDeadline(t)
+	if c.phase >= phaseH2 {
+		return c.forwardLocked(dirRead, t)
+	}
+	if c.brR > 0 {
+		if (c.brR == 2) != t.IsZero() {
+			c.brR--
+			return nil
+		}
+		c.brR = 0
+	}
+	if isPast(t) {
+		if c.phase == phaseRequest {
+			stopLocked(&c.rd)
+		}
+		c.rawSetLocked(dirRead, past())
+		return nil
+	}
 	switch c.phase {
 	case phaseHeader:
+		if c.hdr0 && !t.IsZero() {
+			c.hdr0 = false
+			return nil
+		}
+		c.hdr0 = false
 		if c.ln.lim.h2c && c.npre == len(h2Preface) && string(c.preface[:]) == h2Preface {
 			c.enterH2Locked()
-			break
+			return c.forwardLocked(dirRead, t)
 		}
 		stopLocked(&c.rd)
 		c.capture.Store(false)
@@ -299,6 +374,11 @@ func (c *limitConn) SetReadDeadline(t time.Time) error {
 		}
 	case phaseRequest:
 		stopLocked(&c.rd)
+		if t.IsZero() {
+			c.rawSetLocked(dirRead, t)
+		} else {
+			return c.forwardLocked(dirRead, t)
+		}
 	case phaseIdle:
 		c.idleSets++
 		if c.idleSets == 1 {
@@ -308,24 +388,63 @@ func (c *limitConn) SetReadDeadline(t time.Time) error {
 		} else {
 			c.beginHeaderLocked()
 		}
+	case phaseNew, phaseHandshake:
+		if t.IsZero() {
+			c.rawSetLocked(dirRead, t)
+		}
 	}
-	return err
+	return nil
 }
 
 func (c *limitConn) SetWriteDeadline(t time.Time) error {
 	c.awaitHandshake()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	err := c.Conn.SetWriteDeadline(t)
+	if c.phase >= phaseH2 {
+		return c.forwardLocked(dirWrite, t)
+	}
+	if c.brW > 0 {
+		if (c.brW == 2) != t.IsZero() {
+			c.brW--
+			return nil
+		}
+		c.brW = 0
+	}
 	switch c.phase {
 	case phaseHeader, phaseRequest, phaseIdle:
+		if t.IsZero() {
+			stopLocked(&c.wr)
+			c.rawSetLocked(dirWrite, t)
+			return nil
+		}
+		if c.wDefer && c.phase != phaseIdle && c.reading.Load() == 0 {
+			c.wDefer = false
+			if c.ln.lim.write > 0 && !c.wArmed {
+				c.wArmed = true
+				stopLocked(&c.wr)
+				c.rawSetLocked(dirWrite, time.Time{})
+				c.armLocked(&c.wr, c.ln.clk, c.ln.lim.write, dirWrite)
+			}
+			return nil
+		}
 		stopLocked(&c.wr)
+		if isPast(t) {
+			c.rawSetLocked(dirWrite, past())
+			return nil
+		}
+		return c.forwardLocked(dirWrite, t)
+	case phaseNew, phaseHandshake:
+		if t.IsZero() {
+			c.rawSetLocked(dirWrite, t)
+		}
 	}
-	return err
+	return nil
 }
 
 func (c *limitConn) Read(b []byte) (int, error) {
+	c.reading.Add(1)
 	n, err := c.Conn.Read(b)
+	c.reading.Add(-1)
 	if c.capture.Load() {
 		c.mu.Lock()
 		c.npre += copy(c.preface[c.npre:], b[:n])

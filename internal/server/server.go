@@ -14,7 +14,6 @@ import (
 
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
-	"github.com/ok0/go-microgateway/internal/h2server"
 )
 
 // ErrForcedClose reports that connections were closed because they were still open after the drain timeout.
@@ -31,8 +30,6 @@ type listener struct {
 	srv     *http.Server
 	lim     connLimits
 	ln      net.Listener
-	h2      *h2server.Server
-	h2opts  h2server.Options
 }
 
 type inflight struct {
@@ -110,8 +107,8 @@ func WithCertificates(c *Certificates) Option {
 	return func(o *options) { o.certs = c }
 }
 
-// WithClock makes the server time its shutdown delay, drain timeout, and the listeners' read-header, read, write,
-// and idle limits with c. Without it the server uses the real clock.
+// WithClock makes the server time its shutdown delay, drain timeout, and the listeners' HTTP/1 and TLS handshake
+// limits with c. HTTP/2 connections use net/http's own timers. Without it the server uses the real clock.
 func WithClock(c clock.Clock) Option {
 	return func(o *options) { o.clk = c }
 }
@@ -165,11 +162,16 @@ func New(cfg *config.Config, h http.Handler, admin http.Handler, ready func(bool
 		p := new(http.Protocols)
 		p.SetHTTP1(true)
 		srv := &http.Server{
-			Handler:        s.track(h),
-			MaxHeaderBytes: l.MaxHeaderBytes,
-			BaseContext:    func(net.Listener) context.Context { return s.base },
-			ConnState:      trackConnState,
-			ErrorLog:       errLog,
+			Handler:           s.track(h),
+			MaxHeaderBytes:    l.MaxHeaderBytes,
+			ReadHeaderTimeout: l.ReadHeaderTimeout.Std(),
+			ReadTimeout:       l.ReadTimeout.Std(),
+			WriteTimeout:      l.WriteTimeout.Std(),
+			IdleTimeout:       l.IdleTimeout.Std(),
+			HTTP2:             &http.HTTP2Config{},
+			BaseContext:       func(net.Listener) context.Context { return s.base },
+			ConnState:         trackConnState,
+			ErrorLog:          errLog,
 		}
 		ll := &listener{name: l.Name, address: l.Address, srv: srv}
 		ll.lim = connLimits{
@@ -196,14 +198,6 @@ func New(cfg *config.Config, h http.Handler, admin http.Handler, ready func(bool
 			ll.lim.h2c = l.H2C
 		}
 		srv.Protocols = p
-		if ll.lim.h2 || ll.lim.h2c {
-			// The http.Server below only describes the configured limits for OptionsFor; it is never served.
-			ll.h2opts = h2server.OptionsFor(&http.Server{MaxHeaderBytes: l.MaxHeaderBytes, ReadTimeout: ll.lim.read, WriteTimeout: ll.lim.write, IdleTimeout: ll.lim.idle, ConnState: trackConnState, ErrorLog: errLog})
-			ll.h2 = h2server.New(clk, ll.h2opts)
-			if err := ll.h2.Attach(srv); err != nil {
-				return nil, fmt.Errorf("listener %q: %w", l.Name, err)
-			}
-		}
 		s.data = append(s.data, ll)
 	}
 	if admin != nil && (cfg.Admin.Enabled == nil || *cfg.Admin.Enabled) {
@@ -213,11 +207,13 @@ func New(cfg *config.Config, h http.Handler, admin http.Handler, ready func(bool
 			name:    "admin",
 			address: cfg.Admin.Address,
 			srv: &http.Server{
-				Handler:     admin,
-				BaseContext: func(net.Listener) context.Context { return context.Background() },
-				ConnState:   trackConnState,
-				ErrorLog:    errLog,
-				Protocols:   p,
+				Handler:           admin,
+				ReadHeaderTimeout: adminHeaderLimit,
+				IdleTimeout:       adminIdleLimit,
+				BaseContext:       func(net.Listener) context.Context { return context.Background() },
+				ConnState:         trackConnState,
+				ErrorLog:          errLog,
+				Protocols:         p,
 			},
 			lim: connLimits{header: adminHeaderLimit, idle: adminIdleLimit},
 		}

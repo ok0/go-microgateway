@@ -344,3 +344,54 @@ func TestLimitOutcomesMatchNetHTTP(t *testing.T) {
 		})
 	}
 }
+
+// clientBadRecord sends a record that is not a TLS handshake record and reads until the server closes the connection.
+func clientBadRecord(t *testing.T, addr string, _ *x509.CertPool, _ *probe, logs *logBuffer) outcome {
+	conn := dialRaw(t, addr)
+	writeString(t, conn, "\x16\x03\x01\x00\x05hello")
+	o := collect(t, conn)
+	o.Handshake = awaitHandshakeLog(t, logs)
+	return o
+}
+
+// clientPlaintext sends an HTTP/1.1 request to the TLS listener and reads until the server closes the connection.
+func clientPlaintext(t *testing.T, addr string, _ *x509.CertPool, _ *probe, logs *logBuffer) outcome {
+	conn := dialRaw(t, addr)
+	writeString(t, conn, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+	o := collect(t, conn)
+	o.Handshake = awaitHandshakeLog(t, logs)
+	return o
+}
+
+func TestTLSHandshakeOutcomesMatchNetHTTP(t *testing.T) {
+	certFile, keyFile, pool := testcert.Write(t, t.TempDir())
+	scenarios := []scenario{
+		{
+			name:      "tls/handshake-bad-record",
+			tlsOn:     true,
+			handshake: true,
+			limits:    [4]time.Duration{untestedLimit, untestedLimit, untestedLimit, untestedLimit},
+			handler:   okProbe,
+			client:    clientBadRecord,
+		},
+		{
+			name:      "tls/plaintext-400",
+			tlsOn:     true,
+			handshake: true,
+			limits:    [4]time.Duration{untestedLimit, untestedLimit, untestedLimit, untestedLimit},
+			handler:   okProbe,
+			client:    clientPlaintext,
+		},
+	}
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			stock := sc.run(t, certFile, keyFile, pool, true)
+			gateway := sc.run(t, certFile, keyFile, pool, false)
+			t.Logf("stock:   %+v", stock)
+			t.Logf("gateway: %+v", gateway)
+			if stock != gateway {
+				t.Fatalf("outcomes differ: stock %+v, gateway %+v", stock, gateway)
+			}
+		})
+	}
+}

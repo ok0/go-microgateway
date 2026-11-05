@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"runtime"
@@ -18,6 +19,8 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/testcert"
 )
 
@@ -419,13 +422,14 @@ func seqEntry(t *testing.T, raw net.Conn, pool *x509.CertPool) error {
 	return nil
 }
 
-func seqCase(t *testing.T, kind, script string, lim seqLimits) {
-	addr, ln, m := seqStock(t, kind, lim, seqHandler(script))
+// seqDrive runs script on one client connection to the server at addr and returns that connection once the script
+// has finished and the server has settled. The caller closes it.
+func seqDrive(t *testing.T, kind, script, addr string, ln *seqListener, m *memNet) net.Conn {
+	t.Helper()
 	raw, err := m.dial(context.Background(), "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer raw.Close()
 	guard := time.AfterFunc(bubbleGuard, func() { raw.Close() })
 	switch script {
 	case "keepalive":
@@ -452,11 +456,32 @@ func seqCase(t *testing.T, kind, script string, lim seqLimits) {
 		t.Fatal(err)
 	}
 	synctest.Wait()
+	return raw
+}
+
+// seqRecord runs script against a stock server, or against a gateway when gateway is set, and returns the full trace
+// of the connection that served it.
+func seqRecord(t *testing.T, kind, script string, lim seqLimits, gateway bool) []string {
+	t.Helper()
+	var addr string
+	var ln *seqListener
+	var m *memNet
+	if gateway {
+		addr, ln, m = seqGateway(t, kind, lim, seqHandler(script), clock.NewFake(serverStart))
+	} else {
+		addr, ln, m = seqStock(t, kind, lim, seqHandler(script))
+	}
+	raw := seqDrive(t, kind, script, addr, ln, m)
+	defer raw.Close()
 	tr := ln.last()
 	if tr == nil {
 		t.Fatal("no connection was accepted")
 	}
-	got := tr.list()
+	return tr.list()
+}
+
+func seqCase(t *testing.T, kind, script string, lim seqLimits) {
+	got := seqRecord(t, kind, script, lim, false)
 	want := seqWant(kind, lim, script)
 	t.Logf("trace: %q", got)
 	if script == "entry" && len(got) > len(want) {
@@ -486,6 +511,187 @@ func TestHTTP1DeadlineCallSequence(t *testing.T) {
 			t.Run(p.kind+"/"+p.script+"/"+seqName(lim), func(t *testing.T) {
 				synctest.Test(t, func(t *testing.T) {
 					seqCase(t, p.kind, p.script, lim)
+				})
+			})
+		}
+	}
+}
+
+// seqGateway starts a gateway on memnet with every limit in lim and the clock fake. The connection spy sits below the
+// gateway's limit wrapper on the public listener. It returns the public address, the spy, and the network.
+func seqGateway(t *testing.T, kind string, lim seqLimits, h http.Handler, fake *clock.Fake) (string, *seqListener, *memNet) {
+	t.Helper()
+	m := newMemNet(64 << 10)
+	t.Cleanup(m.close)
+	certFile, keyFile, pool := testcert.Write(t, t.TempDir())
+	muts := []func(*config.Listener){limits(seqOn(lim.h, seqH), seqOn(lim.r, seqR), seqOn(lim.w, seqW), seqOn(lim.i, seqI))}
+	switch kind {
+	case "h2c":
+		muts = append(muts, h2cOn)
+	case "tls":
+		muts = append(muts, tlsOn(certFile, keyFile, true))
+	}
+	srv, err := New(limitCfg(t, muts...), h, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), WithClock(fake))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spy := &seqListener{pool: pool}
+	srv.listen = func(network, address string) (net.Listener, error) {
+		raw, err := m.listen(network, address)
+		if err != nil {
+			return nil, err
+		}
+		if spy.Listener != nil {
+			return raw, nil
+		}
+		spy.Listener = raw
+		return spy, nil
+	}
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		srv.Shutdown(ctx)
+	})
+	return srv.Addrs()["public"].String(), spy, m
+}
+
+// gatewayView converts a stock call sequence into the sequence the gateway's connection spy records. Before a hijack
+// the gateway consumes net/http's limit calls itself, so only reads, closes, the TLS close_notify bound, past-value
+// aborts, and zero calls that change the raw deadline remain. After a hijack every call is forwarded.
+func gatewayView(want []string, kind string) []string {
+	var out []string
+	raw := map[string]string{"rd": "0", "wr": "0"}
+	forwarding := false
+	for _, tok := range want {
+		switch tok {
+		case "new", "active", "idle", "closed":
+			continue
+		case "hijacked":
+			forwarding = true
+			continue
+		}
+		if forwarding {
+			out = append(out, tok)
+			continue
+		}
+		switch {
+		case tok == "read" || tok == "eof" || tok == "rerr" || tok == "close":
+			out = append(out, tok)
+		case tok == "dl0":
+			if raw["rd"] != "0" || raw["wr"] != "0" {
+				out = append(out, tok)
+			}
+			raw["rd"], raw["wr"] = "0", "0"
+		case strings.HasPrefix(tok, "rd") || strings.HasPrefix(tok, "wr"):
+			dir, val := tok[:2], tok[2:]
+			switch {
+			case val == "0":
+				if raw[dir] != "0" {
+					out = append(out, tok)
+					raw[dir] = val
+				}
+			case val == "-":
+				out = append(out, tok)
+				raw[dir] = val
+			case dir == "wr" && (val == "+5s" || val == "="):
+				out = append(out, tok)
+				raw[dir] = val
+			}
+		}
+	}
+	return seqMerge(out)
+}
+
+// gatewayEntryView converts a stock call sequence of an HTTP/2 entry into the sequence the gateway's connection spy
+// records. The deadline calls before the first read are consumed, except the TLS handshake bracket, which the gateway
+// records right after the first read. From the first read on, the gateway forwards every call, so only the state
+// tokens are dropped.
+func gatewayEntryView(want []string, kind string) []string {
+	i := slices.Index(want, "read")
+	if i < 0 {
+		return nil
+	}
+	out := []string{"read"}
+	if kind == "tls" {
+		for _, tok := range want[:i] {
+			if strings.HasPrefix(tok, "rd") || strings.HasPrefix(tok, "wr") {
+				out = append(out, tok)
+			}
+		}
+	}
+	for _, tok := range want[i+1:] {
+		switch tok {
+		case "new", "active", "idle", "closed", "hijacked":
+			continue
+		}
+		out = append(out, tok)
+	}
+	return seqMerge(out)
+}
+
+// seqOffsets returns the rendered limit offsets of lim that a gateway trace must not show: every enabled limit and the
+// handshake limit.
+func seqOffsets(lim seqLimits) []string {
+	hs := seqSmallest(seqOn(lim.h, seqH), seqOn(lim.r, seqR), seqOn(lim.w, seqW))
+	var out []string
+	for _, d := range []time.Duration{seqOn(lim.h, seqH), seqOn(lim.r, seqR), seqOn(lim.w, seqW), seqOn(lim.i, seqI), hs} {
+		if d > 0 {
+			out = append(out, "+"+d.String())
+		}
+	}
+	return out
+}
+
+func TestLimitConnConsumesHTTP1Deadlines(t *testing.T) {
+	pairs := []struct{ kind, script string }{
+		{"plain", "keepalive"},
+		{"h2c", "keepalive"},
+		{"tls", "keepalive"},
+		{"plain", "hijack"},
+		{"tls", "hijack"},
+	}
+	for _, p := range pairs {
+		for bits := 0; bits < 16; bits++ {
+			lim := seqLimits{h: bits&1 != 0, r: bits&2 != 0, w: bits&4 != 0, i: bits&8 != 0}
+			t.Run(p.kind+"/"+p.script+"/"+seqName(lim), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					got := seqRecord(t, p.kind, p.script, lim, true)
+					want := gatewayView(seqWant(p.kind, lim, p.script), p.kind)
+					t.Logf("trace: %q", got)
+					if !slices.Equal(got, want) {
+						t.Errorf("gateway trace mismatch\nwant %q\ngot  %q", want, got)
+					}
+					offsets := seqOffsets(lim)
+					for _, tok := range got {
+						for _, off := range offsets {
+							if strings.Contains(tok, off) {
+								t.Errorf("gateway forwarded %q, which carries limit offset %s", tok, off)
+							}
+						}
+					}
+				})
+			})
+		}
+	}
+}
+
+func TestLimitConnForwardsAfterHTTP2Entry(t *testing.T) {
+	for _, kind := range []string{"h2c", "tls"} {
+		for bits := 0; bits < 16; bits++ {
+			lim := seqLimits{h: bits&1 != 0, r: bits&2 != 0, w: bits&4 != 0, i: bits&8 != 0}
+			t.Run(kind+"/entry/"+seqName(lim), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					stock := seqRecord(t, kind, "entry", lim, false)
+					gw := seqRecord(t, kind, "entry", lim, true)
+					want := gatewayEntryView(stock, kind)
+					t.Logf("stock: %q", stock)
+					t.Logf("gateway: %q", gw)
+					if !slices.Equal(gw, want) {
+						t.Errorf("gateway trace mismatch\nwant %q\ngot  %q", want, gw)
+					}
 				})
 			})
 		}

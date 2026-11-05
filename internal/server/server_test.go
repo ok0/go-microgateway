@@ -163,17 +163,20 @@ func TestListenerSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	hs := srv.data[0].srv
-	if hs.ReadHeaderTimeout != 0 {
-		t.Errorf("ReadHeaderTimeout = %v, want 0", hs.ReadHeaderTimeout)
+	if hs.ReadHeaderTimeout != 3*time.Second {
+		t.Errorf("ReadHeaderTimeout = %v, want %v", hs.ReadHeaderTimeout, 3*time.Second)
 	}
-	if hs.ReadTimeout != 0 {
-		t.Errorf("ReadTimeout = %v, want 0", hs.ReadTimeout)
+	if hs.ReadTimeout != 4*time.Second {
+		t.Errorf("ReadTimeout = %v, want %v", hs.ReadTimeout, 4*time.Second)
 	}
-	if hs.WriteTimeout != 0 {
-		t.Errorf("WriteTimeout = %v, want 0", hs.WriteTimeout)
+	if hs.WriteTimeout != 5*time.Second {
+		t.Errorf("WriteTimeout = %v, want %v", hs.WriteTimeout, 5*time.Second)
 	}
-	if hs.IdleTimeout != 0 {
-		t.Errorf("IdleTimeout = %v, want 0", hs.IdleTimeout)
+	if hs.IdleTimeout != 6*time.Second {
+		t.Errorf("IdleTimeout = %v, want %v", hs.IdleTimeout, 6*time.Second)
+	}
+	if hs.HTTP2 == nil {
+		t.Error("HTTP2 = nil, want the default HTTP/2 config")
 	}
 	if hs.ConnState == nil {
 		t.Error("ConnState = nil, want the limit tracker")

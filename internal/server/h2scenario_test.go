@@ -3,10 +3,12 @@ package server
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -14,6 +16,8 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/ok0/go-microgateway/config"
+	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/memnet"
 )
 
@@ -110,7 +114,7 @@ func pingAcked(tok [8]byte) func(h2frame) bool {
 	}
 }
 
-// eventIndex returns the position of the first event in r.Seq with the given prefix, or -1.
+// eventIndex returns the position of the first event in r.Seq with that prefix, or -1.
 func eventIndex(r h2record, prefix string) int {
 	for i, ev := range r.Seq {
 		if strings.HasPrefix(ev, prefix) {
@@ -120,7 +124,7 @@ func eventIndex(r h2record, prefix string) int {
 	return -1
 }
 
-// wantOrder checks that every prefix occurs in r.Seq and that their first occurrences are in the given order.
+// wantOrder checks that every prefix occurs in r.Seq and that their first occurrences are in the listed order.
 func wantOrder(t *testing.T, r h2record, prefixes ...string) {
 	t.Helper()
 	last := -1
@@ -151,6 +155,11 @@ type h2target func(t *testing.T, m *memNet, w bubbleWire, lim [4]time.Duration, 
 
 func stockTarget(t *testing.T, m *memNet, w bubbleWire, lim [4]time.Duration, h http.Handler, logs *logBuffer) string {
 	return startBubbleStock(t, m, w, lim, h, logs)
+}
+
+func gatewayTarget(t *testing.T, m *memNet, w bubbleWire, lim [4]time.Duration, h http.Handler, logs *logBuffer) string {
+	gw := startBubbleGateway(t, m, w.config(t, limits(lim[0], lim[1], lim[2], lim[3])), h, logs, WithClock(clock.Real()))
+	return gw.Addrs()["public"].String()
 }
 
 func (b *h2bench) retLocked(path string) chan struct{} {
@@ -522,6 +531,11 @@ func scWrite(b *h2bench) (h2record, error) {
 	if err != nil {
 		return h2record{}, err
 	}
+	more, err = b.awaitReturn(c, "/big")
+	fs = append(fs, more...)
+	if err != nil {
+		return h2record{}, err
+	}
 	return b.record(c, fs), nil
 }
 
@@ -886,6 +900,9 @@ func h2Cases() []h2case {
 			handler: scWriteHandler,
 			drive:   scWrite,
 			check: func(t *testing.T, w bubbleWire, r h2record) {
+				if r.Outcome.Handler != "write-error" {
+					t.Errorf("handler outcome %q, want write-error", r.Outcome.Handler)
+				}
 				if !slices.Contains(r.Outcome.Streams[3], "HEADERS 200") || !slices.Contains(r.Outcome.Streams[3], "DATA ES") {
 					t.Errorf("stream 3 events %v, want HEADERS 200 and DATA ES", r.Outcome.Streams[3])
 				}
@@ -1094,5 +1111,125 @@ func TestHTTP2LimitScenariosOnNetHTTP(t *testing.T) {
 				})
 			})
 		}
+	}
+}
+
+func TestHTTP2LimitOutcomesMatchNetHTTP(t *testing.T) {
+	for _, w := range bubbleWires(t) {
+		for _, c := range h2Cases() {
+			if c.tlsOnly && !w.tls {
+				continue
+			}
+			t.Run(c.name+"/"+w.name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					stock := prepareCase(t, w, c, stockTarget)
+					gateway := prepareCase(t, w, c, gatewayTarget)
+					rs, es := stock.run(c)
+					rg, eg := gateway.run(c)
+					if es != nil {
+						t.Fatalf("stock: %v", es)
+					}
+					if eg != nil {
+						t.Fatalf("gateway: %v", eg)
+					}
+					t.Logf("stock: %+v", rs)
+					t.Logf("gateway: %+v", rg)
+					c.check(t, w, rs)
+					c.check(t, w, rg)
+					if !reflect.DeepEqual(rs.Outcome, rg.Outcome) || !reflect.DeepEqual(rs.At, rg.At) {
+						t.Fatalf("stock and gateway differ:\nstock: %+v\ngateway: %+v", rs, rg)
+					}
+				})
+			})
+		}
+	}
+}
+
+func TestHTTP2GatewaysInOneBubble(t *testing.T) {
+	for _, w := range bubbleWires(t) {
+		t.Run(w.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var rc h2case
+				for _, c := range h2Cases() {
+					if c.name == "read" {
+						rc = c
+					}
+				}
+				short := rc
+				long := rc
+				long.lim[1] = 3 * time.Second
+				a := prepareCase(t, w, short, gatewayTarget)
+				b := prepareCase(t, w, long, gatewayTarget)
+				var ra, rb h2record
+				var ea, eb error
+				var wg sync.WaitGroup
+				wg.Go(func() { ra, ea = a.run(short) })
+				wg.Go(func() { rb, eb = b.run(long) })
+				wg.Wait()
+				if ea != nil {
+					t.Fatalf("1 s gateway: %v", ea)
+				}
+				if eb != nil {
+					t.Fatalf("3 s gateway: %v", eb)
+				}
+				t.Logf("1 s gateway: %+v", ra)
+				t.Logf("3 s gateway: %+v", rb)
+				if ra.Outcome.Handler != "read-deadline" || rb.Outcome.Handler != "read-deadline" {
+					t.Errorf("handler outcomes %q and %q, want read-deadline", ra.Outcome.Handler, rb.Outcome.Handler)
+				}
+				wantAt(t, ra, "1 RST_STREAM NO_ERROR", "sent 1", time.Second)
+				wantAt(t, rb, "1 RST_STREAM NO_ERROR", "sent 1", 3*time.Second)
+			})
+		})
+	}
+}
+
+func TestHTTP2ShutdownLeavesNothingArmed(t *testing.T) {
+	for _, w := range bubbleWires(t) {
+		t.Run(w.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				m := newMemNet(64 << 10)
+				t.Cleanup(m.close)
+				cc := &countClock{Clock: clock.Real()}
+				cfg := w.config(t, limits(time.Hour, time.Hour, time.Hour, time.Hour))
+				cfg.Global.DrainTimeout = config.Duration(time.Second)
+				entered := make(chan struct{}, 1)
+				h := http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+					entered <- struct{}{}
+					<-r.Context().Done()
+				})
+				gw := startBubbleGateway(t, m, cfg, h, &logBuffer{}, WithClock(cc))
+				addr := gw.Addrs()["public"].String()
+				a, err := bubblePeer(m, w, addr)
+				if err != nil {
+					t.Fatal(err)
+				}
+				a.t = t
+				t.Cleanup(a.close)
+				a.handshake(true)
+				b, err := bubblePeer(m, w, addr)
+				if err != nil {
+					t.Fatal(err)
+				}
+				b.t = t
+				t.Cleanup(b.close)
+				b.handshake(true)
+				b.headers(1, http.MethodGet, "/", true)
+				bubbleRecv(t, "handler entered", entered, nil)
+				shutdown := shutdownAsync(gw, context.Background())
+				fs := a.until("GOAWAY NO_ERROR", goAwayFrame)
+				if last := fs[len(fs)-1]; last.Code != h2ErrNo {
+					t.Errorf("GOAWAY code = %v, want NO_ERROR", last.Code)
+				}
+				if err, _ := bubbleRecv(t, "Shutdown result", shutdown, nil); !errors.Is(err, ErrForcedClose) {
+					t.Fatalf("Shutdown = %v, want ErrForcedClose", err)
+				}
+				a.awaitEnd("peer A reader ends")
+				b.awaitEnd("peer B reader ends")
+				if n := cc.armed(); n != 0 {
+					t.Errorf("%d timers armed after Shutdown, want 0", n)
+				}
+			})
+		})
 	}
 }

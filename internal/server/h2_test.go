@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/ok0/go-microgateway/config"
@@ -20,8 +21,6 @@ import (
 	"github.com/ok0/go-microgateway/internal/testwait"
 )
 
-const h2Package = "github.com/ok0/go-microgateway/internal/h2server"
-
 // pkgOf returns the package that declares the dynamic type of w, looking through a pointer.
 func pkgOf(w any) string {
 	t := reflect.TypeOf(w)
@@ -29,14 +28,6 @@ func pkgOf(w any) string {
 		t = t.Elem()
 	}
 	return t.PkgPath()
-}
-
-// recordingHandler records the package of each response writer it serves before answering "ok".
-func recordingHandler(seen chan<- string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seen <- pkgOf(w)
-		io.WriteString(w, "ok")
-	})
 }
 
 // startServerLogged starts a server on fake whose log output goes to logs.
@@ -53,8 +44,8 @@ func startServerLogged(t *testing.T, cfg *config.Config, logs io.Writer, fake *c
 	return srv
 }
 
-// requireHTTP2Off fails the test if HTTP/2 is enabled on hs or registered for lst.
-func requireHTTP2Off(t *testing.T, hs *http.Server, lst *listener) {
+// requireHTTP2Off fails the test if HTTP/2 is enabled on hs.
+func requireHTTP2Off(t *testing.T, hs *http.Server) {
 	t.Helper()
 	if hs.Protocols.HTTP2() || hs.Protocols.UnencryptedHTTP2() {
 		t.Errorf("HTTP/2 protocols enabled: TLS %v, unencrypted %v; want both off", hs.Protocols.HTTP2(), hs.Protocols.UnencryptedHTTP2())
@@ -62,115 +53,70 @@ func requireHTTP2Off(t *testing.T, hs *http.Server, lst *listener) {
 	if hs.TLSNextProto != nil {
 		t.Errorf("TLSNextProto = %v, want nil", hs.TLSNextProto)
 	}
-	if lst.h2 != nil {
-		t.Error("HTTP/2 server present, want none")
-	}
 }
 
-func TestHTTP2ServedInRepo(t *testing.T) {
-	certFile, keyFile, pool := testcert.Write(t, t.TempDir())
-	t.Run("tls-h2", func(t *testing.T) {
-		fake := clock.NewFake(serverStart)
-		seen := make(chan string, 8)
-		srv := startServer(t, limitCfg(t, tlsOn(certFile, keyFile, true)), recordingHandler(seen), okHandler(), nil, WithClock(fake))
-		got := getVia(t, h2Client(t, pool, false), "https://"+srv.Addrs()["public"].String()+"/")
-		if got.status != http.StatusOK || got.major != 2 || got.alpn != "h2" {
-			t.Fatalf("status = %d, ProtoMajor = %d, ALPN = %q; want 200, 2, h2", got.status, got.major, got.alpn)
+func TestHTTP2ServedByNetHTTP(t *testing.T) {
+	certFile, keyFile, _ := testcert.Write(t, t.TempDir())
+	for _, w := range bubbleWires(t) {
+		name := "h2c"
+		if w.tls {
+			name = "tls-h2"
 		}
-		if pkg, _ := testwait.Recv(t, "handler", seen, nil); pkg != h2Package {
-			t.Fatalf("handler served by package %q, want %q", pkg, h2Package)
-		}
-		hs := srv.data[0].srv
-		if len(hs.TLSNextProto) != 2 || hs.TLSNextProto["h2"] == nil || hs.TLSNextProto["unencrypted_http2"] == nil {
-			t.Fatalf("TLSNextProto keys = %v, want exactly h2 and unencrypted_http2", reflect.ValueOf(hs.TLSNextProto).MapKeys())
-		}
-		checkNoStdlibTimers(t, hs)
-		checkNoStdlibTimers(t, srv.admin.srv)
-	})
-	t.Run("h2c", func(t *testing.T) {
-		fake := clock.NewFake(serverStart)
-		seen := make(chan string, 8)
-		srv := startServer(t, limitCfg(t, h2cOn), recordingHandler(seen), okHandler(), nil, WithClock(fake))
-		got := getVia(t, h2Client(t, nil, true), "http://"+srv.Addrs()["public"].String()+"/")
-		if got.status != http.StatusOK || got.major != 2 {
-			t.Fatalf("status = %d, ProtoMajor = %d; want 200, 2", got.status, got.major)
-		}
-		if pkg, _ := testwait.Recv(t, "handler", seen, nil); pkg != h2Package {
-			t.Fatalf("handler served by package %q, want %q", pkg, h2Package)
-		}
-		hs := srv.data[0].srv
-		if len(hs.TLSNextProto) != 2 || hs.TLSNextProto["h2"] == nil || hs.TLSNextProto["unencrypted_http2"] == nil {
-			t.Fatalf("TLSNextProto keys = %v, want exactly h2 and unencrypted_http2", reflect.ValueOf(hs.TLSNextProto).MapKeys())
-		}
-		checkNoStdlibTimers(t, hs)
-		checkNoStdlibTimers(t, srv.admin.srv)
-	})
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				m := newMemNet(64 << 10)
+				t.Cleanup(m.close)
+				srv, err := New(w.config(t), okHandler(), nil, nil, nil, WithClock(clock.NewFake(serverStart)))
+				if err != nil {
+					t.Fatal(err)
+				}
+				hs := srv.data[0].srv
+				if hs.TLSNextProto != nil {
+					t.Fatalf("TLSNextProto = %v before serving, want nil", hs.TLSNextProto)
+				}
+				srv.listen = m.listen
+				if err := srv.Start(); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					ctx, cancel := context.WithCancel(context.Background())
+					cancel()
+					srv.Shutdown(ctx)
+				})
+				synctest.Wait()
+				if len(hs.TLSNextProto) != 1 || hs.TLSNextProto["h2"] == nil {
+					t.Fatalf("TLSNextProto keys = %v once serving, want exactly h2", reflect.ValueOf(hs.TLSNextProto).MapKeys())
+				}
+				scheme := "http://"
+				if w.tls {
+					scheme = "https://"
+				}
+				got := getVia(t, bubbleClient(t, m, w), scheme+srv.Addrs()["public"].String()+"/")
+				if got.status != http.StatusOK || got.major != 2 {
+					t.Fatalf("status = %d, ProtoMajor = %d; want 200, 2", got.status, got.major)
+				}
+				if w.tls && got.alpn != "h2" {
+					t.Fatalf("negotiated protocol = %q, want h2", got.alpn)
+				}
+				synctest.Wait()
+				if len(hs.TLSNextProto) != 1 || hs.TLSNextProto["h2"] == nil {
+					t.Fatalf("TLSNextProto keys = %v, want exactly h2", reflect.ValueOf(hs.TLSNextProto).MapKeys())
+				}
+			})
+		})
+	}
 	t.Run("tls-http1-only", func(t *testing.T) {
 		srv := startServer(t, limitCfg(t, tlsOn(certFile, keyFile, false)), okHandler(), okHandler(), nil, WithClock(clock.NewFake(serverStart)))
-		requireHTTP2Off(t, srv.data[0].srv, srv.data[0])
+		requireHTTP2Off(t, srv.data[0].srv)
 	})
 	t.Run("plain", func(t *testing.T) {
 		srv := startServer(t, limitCfg(t), okHandler(), okHandler(), nil, WithClock(clock.NewFake(serverStart)))
-		requireHTTP2Off(t, srv.data[0].srv, srv.data[0])
+		requireHTTP2Off(t, srv.data[0].srv)
 	})
 	t.Run("admin", func(t *testing.T) {
 		srv := startServer(t, limitCfg(t), okHandler(), okHandler(), nil, WithClock(clock.NewFake(serverStart)))
-		requireHTTP2Off(t, srv.admin.srv, srv.admin)
+		requireHTTP2Off(t, srv.admin.srv)
 	})
-}
-
-// h2optsWant holds the HTTP/2 option values that a listener's server is expected to carry.
-type h2optsWant struct {
-	MaxHeaderBytes        int
-	MaxHeaderValueCount   int
-	ReadTimeout           time.Duration
-	WriteTimeout          time.Duration
-	IdleTimeout           time.Duration
-	SendPingTimeout       time.Duration
-	DisableClientPriority bool
-}
-
-func TestHTTP2OptionsMatchNetHTTP(t *testing.T) {
-	certFile, keyFile, _ := testcert.Write(t, t.TempDir())
-	cases := []struct {
-		name string
-		muts []func(*config.Listener)
-		want h2optsWant
-	}{
-		{
-			name: "tls-h2",
-			muts: []func(*config.Listener){limits(3*time.Second, 4*time.Second, 5*time.Second, 6*time.Second), tlsOn(certFile, keyFile, true)},
-			want: h2optsWant{MaxHeaderBytes: 1048576, MaxHeaderValueCount: 500, ReadTimeout: 4 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 6 * time.Second, SendPingTimeout: 4 * time.Second},
-		},
-		{
-			name: "h2c",
-			muts: []func(*config.Listener){limits(3*time.Second, 0, 0, 7*time.Second), h2cOn, func(l *config.Listener) { l.MaxHeaderBytes = 4096 }},
-			want: h2optsWant{MaxHeaderBytes: 4096, MaxHeaderValueCount: 500, IdleTimeout: 7 * time.Second},
-		},
-		{
-			name: "tls-h2-defaults",
-			muts: []func(*config.Listener){tlsOn(certFile, keyFile, true)},
-			want: h2optsWant{MaxHeaderBytes: 1048576, MaxHeaderValueCount: 500, IdleTimeout: 120 * time.Second},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			srv := startServer(t, limitCfg(t, tc.muts...), okHandler(), okHandler(), nil, WithClock(clock.NewFake(serverStart)))
-			o := srv.data[0].h2opts
-			if o.MaxHeaderBytes != tc.want.MaxHeaderBytes || o.MaxHeaderValueCount != tc.want.MaxHeaderValueCount ||
-				o.ReadTimeout != tc.want.ReadTimeout || o.WriteTimeout != tc.want.WriteTimeout ||
-				o.IdleTimeout != tc.want.IdleTimeout || o.SendPingTimeout != tc.want.SendPingTimeout ||
-				o.DisableClientPriority != tc.want.DisableClientPriority || o.HTTP2 != nil {
-				t.Errorf("options = %+v, want %+v", o, tc.want)
-			}
-			if reflect.ValueOf(o.ConnState).Pointer() != reflect.ValueOf(trackConnState).Pointer() {
-				t.Error("ConnState is not the limit tracker")
-			}
-			if o.ErrorLog != srv.data[0].srv.ErrorLog {
-				t.Error("ErrorLog differs from the server's ErrorLog")
-			}
-		})
-	}
 }
 
 func TestTLSHandshakeJoined(t *testing.T) {
