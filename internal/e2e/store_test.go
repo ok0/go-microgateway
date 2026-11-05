@@ -31,6 +31,7 @@ import (
 	"github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/doccheck"
 	"github.com/ok0/go-microgateway/internal/httpcache"
 	"github.com/ok0/go-microgateway/internal/httperr"
 	"github.com/ok0/go-microgateway/internal/ratelimit"
@@ -856,29 +857,28 @@ func TestStoresSeededViaValidate(t *testing.T) {
 	}
 }
 
-// examplesEnv resolves the variables the example files reference to the local values the examples document.
-// The examples are loaded with this fixed environment, so the result does not depend on the caller's environment.
-func examplesEnv(name string) (string, bool) {
-	switch name {
-	case "REDIS_ADDR":
-		return "127.0.0.1:6379", true
-	case "REDIS_PASSWORD":
-		return "example-redis-password", true
-	}
-	return "", false
-}
-
-// This module registers no redis store; the redis module validates these files with its store registered.
+// Full validation with the Redis store type runs in the redis module, which registers that store. This module
+// registers no redis store, so every Redis store in an example is reported as not registered and nothing else is.
 func TestExamplesValidate(t *testing.T) {
-	paths, err := filepath.Glob("../../examples/*.yaml")
+	root, err := doccheck.Root()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(paths) == 0 {
-		t.Fatal("no examples/*.yaml files")
+	paths, err := filepath.Glob(filepath.Join(root, "examples", "*.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	present := map[string]bool{}
+	for _, path := range paths {
+		present[filepath.Base(path)] = true
+	}
+	for _, name := range []string{"basic.yaml", "memory.yaml", "redis.yaml"} {
+		if !present[name] {
+			t.Fatalf("examples/%s is missing", name)
+		}
 	}
 	for _, path := range paths {
-		cfg, err := config.LoadFile(path, config.WithEnvLookup(examplesEnv))
+		cfg, err := config.LoadFile(path, config.WithEnvLookup(doccheck.ExampleLookup(nil)))
 		if err != nil {
 			t.Fatalf("LoadFile(%s) = %v", path, err)
 		}
@@ -886,6 +886,16 @@ func TestExamplesValidate(t *testing.T) {
 		for i, s := range cfg.Stores {
 			if s.Type == "redis" {
 				want = append(want, config.FieldError{Path: fmt.Sprintf("stores[%d].type", i), Msg: `store type "redis" is not registered`})
+			}
+		}
+		switch name := filepath.Base(path); name {
+		case "memory.yaml", "basic.yaml":
+			if len(want) != 0 {
+				t.Errorf("%s has %d Redis stores, want none", name, len(want))
+			}
+		case "redis.yaml":
+			if len(want) == 0 {
+				t.Errorf("%s has no Redis store", name)
 			}
 		}
 		err = microgateway.Validate(cfg)

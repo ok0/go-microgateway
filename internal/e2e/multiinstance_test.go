@@ -1,4 +1,4 @@
-// Shared-vs-per-instance state contract. instanceContract lists every row; each "contract:" line below maps one
+// Shared-vs-per-instance state contract. The rows live in docs/architecture.md under "Shared and per-instance state"; instanceContract parses them. Each "contract:" line below maps one
 // row to the test that proves it, and TestInstanceStateContract fails when a row has no test, a line names an
 // unknown row, or a line names a missing test.
 //
@@ -17,6 +17,7 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -26,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -37,6 +39,7 @@ import (
 	"github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/doccheck"
 	"github.com/ok0/go-microgateway/internal/teststore"
 	"github.com/ok0/go-microgateway/store"
 )
@@ -703,18 +706,75 @@ func TestInstancesIsolateCoalescing(t *testing.T) {
 	}
 }
 
-type contractRow struct{ Scope, State string }
+type contractRow struct{ Scope, State, Where, Consequence string }
 
-var instanceContract = []contractRow{
-	{"shared", "Rate-limit state"},
-	{"shared", "Cache entries"},
-	{"shared", "Purge state"},
-	{"per-instance", "JWKS key sets"},
-	{"per-instance", "Circuit breaker state"},
-	{"per-instance", "Passive outlier ejection"},
-	{"per-instance", "Active health state"},
-	{"per-instance", "Config watch and reload"},
-	{"per-instance", "In-flight request coalescing"},
+const contractHeading = "Shared and per-instance state"
+
+var contractHeader = []string{"State", "Where", "Operational consequence"}
+
+func contractFiles(t *testing.T) (docPath, testDir string) {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot locate the test source")
+	}
+	testDir = filepath.Dir(file)
+	return filepath.Join(testDir, "..", "..", "docs", "architecture.md"), testDir
+}
+
+func contractTable(doc *doccheck.Doc) *doccheck.Table {
+	for i := range doc.Tables {
+		if doc.Tables[i].Heading == contractHeading && slices.Equal(doc.Tables[i].Header, contractHeader) {
+			return &doc.Tables[i]
+		}
+	}
+	return nil
+}
+
+func instanceContract(src []byte) ([]contractRow, error) {
+	doc := doccheck.Parse("architecture.md", src)
+	tbl := contractTable(doc)
+	if tbl == nil {
+		return nil, errors.New("table absent")
+	}
+	var rows []contractRow
+	for i, cells := range tbl.Rows {
+		if len(cells) != 3 {
+			return nil, fmt.Errorf("malformed row %d", i+1)
+		}
+		state, where, consequence := cells[0], cells[1], cells[2]
+		if where == "" {
+			return nil, fmt.Errorf("row %q has an empty Where cell", state)
+		}
+		var scope string
+		switch {
+		case strings.HasPrefix(where, "per instance"):
+			scope = "per-instance"
+		case strings.HasPrefix(where, "`store."):
+			scope = "shared"
+		default:
+			return nil, fmt.Errorf("malformed row %d", i+1)
+		}
+		if consequence == "" {
+			return nil, fmt.Errorf("row %q has an empty consequence cell", state)
+		}
+		rows = append(rows, contractRow{Scope: scope, State: state, Where: where, Consequence: consequence})
+	}
+	if len(rows) != 9 {
+		return nil, fmt.Errorf("has %d rows, want 9", len(rows))
+	}
+	shared, perInstance := 0, 0
+	for _, r := range rows {
+		if r.Scope == "shared" {
+			shared++
+		} else {
+			perInstance++
+		}
+	}
+	if shared != 3 || perInstance != 6 {
+		return nil, fmt.Errorf("%d shared and %d per-instance rows, want 3 and 6", shared, perInstance)
+	}
+	return rows, nil
 }
 
 type contractLink struct{ State, Test string }
@@ -763,8 +823,8 @@ func contractProblems(rows []contractRow, links []contractLink, tests map[string
 	return problems
 }
 
-func packageTests(t *testing.T) map[string]bool {
-	files, err := filepath.Glob("*_test.go")
+func packageTests(t *testing.T, testDir string) map[string]bool {
+	files, err := filepath.Glob(filepath.Join(testDir, "*_test.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -785,56 +845,114 @@ func packageTests(t *testing.T) map[string]bool {
 }
 
 func TestInstanceStateContract(t *testing.T) {
-	if len(instanceContract) != 9 {
-		t.Fatalf("instanceContract has %d rows, want 9", len(instanceContract))
-	}
-	shared, perInstance := 0, 0
-	for _, r := range instanceContract {
-		switch r.Scope {
-		case "shared":
-			shared++
-		case "per-instance":
-			perInstance++
-		}
-	}
-	if shared != 3 || perInstance != 6 {
-		t.Fatalf("instanceContract has %d shared and %d per-instance rows, want 3 and 6", shared, perInstance)
-	}
-	src, err := os.ReadFile("multiinstance_test.go")
+	docPath, testDir := contractFiles(t)
+	doc, err := os.ReadFile(docPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if problems := contractProblems(instanceContract, parseContractLinks(src), packageTests(t)); len(problems) > 0 {
+	rows, err := instanceContract(doc)
+	if err != nil {
+		t.Fatalf("instanceContract: %v", err)
+	}
+	src, err := os.ReadFile(filepath.Join(testDir, "multiinstance_test.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	links := parseContractLinks(src)
+	var rowStates, linkStates []string
+	for _, r := range rows {
+		rowStates = append(rowStates, r.State)
+	}
+	for _, l := range links {
+		linkStates = append(linkStates, l.State)
+	}
+	if !slices.Equal(rowStates, linkStates) {
+		t.Fatalf("contract link states = %q, want the table order %q", linkStates, rowStates)
+	}
+	if problems := contractProblems(rows, links, packageTests(t, testDir)); len(problems) > 0 {
 		t.Fatalf("contract problems:\n%s", strings.Join(problems, "\n"))
 	}
 }
 
 func TestInstanceStateContractCheck(t *testing.T) {
-	src, err := os.ReadFile("multiinstance_test.go")
+	docPath, testDir := contractFiles(t)
+	doc, err := os.ReadFile(docPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := instanceContract(doc)
+	if err != nil {
+		t.Fatalf("instanceContract: %v", err)
+	}
+	src, err := os.ReadFile(filepath.Join(testDir, "multiinstance_test.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	links := parseContractLinks(src)
-	tests := packageTests(t)
+	tests := packageTests(t, testDir)
 	expectOne := func(name string, problems []string, want string) {
 		t.Helper()
 		if len(problems) != 1 || !strings.Contains(problems[0], want) {
 			t.Errorf("%s: problems = %q, want exactly one containing %q", name, problems, want)
 		}
 	}
+	expectErr := func(name string, src []byte, want string) {
+		t.Helper()
+		if _, err := instanceContract(src); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: error = %v, want one containing %q", name, err, want)
+		}
+	}
 
-	rows := append(slices.Clone(instanceContract), contractRow{"shared", "Extra state"})
+	rows := append(slices.Clone(base), contractRow{Scope: "shared", State: "Extra state"})
 	expectOne("extra row", contractProblems(rows, links, tests), `"Extra state" has no test`)
 
 	unknown := append(slices.Clone(links), contractLink{"Unknown row", "TestInstancesIsolateReload"})
-	expectOne("unknown row", contractProblems(instanceContract, unknown, tests), `unknown row "Unknown row"`)
+	expectOne("unknown row", contractProblems(base, unknown, tests), `unknown row "Unknown row"`)
 
 	missing := slices.Clone(links)
 	missing[0].Test = "TestDoesNotExist"
-	expectOne("missing test", contractProblems(instanceContract, missing, tests), "missing test TestDoesNotExist")
+	expectOne("missing test", contractProblems(base, missing, tests), "missing test TestDoesNotExist")
 
-	expectOne("no link", contractProblems(instanceContract, links[:len(links)-1], tests), `"In-flight request coalescing" has no test`)
+	expectOne("no link", contractProblems(base, links[:len(links)-1], tests), `"In-flight request coalescing" has no test`)
 
-	duplicate := append(slices.Clone(instanceContract), instanceContract[0])
+	duplicate := append(slices.Clone(base), base[0])
 	expectOne("duplicate row", contractProblems(duplicate, links, tests), "listed twice")
+
+	lines := strings.Split(string(doc), "\n")
+	parsed := doccheck.Parse("architecture.md", doc)
+	tbl := contractTable(parsed)
+	if tbl == nil {
+		t.Fatal("docs source has no contract table")
+	}
+	first := tbl.Line + 1
+	last := tbl.Line + len(tbl.Rows)
+	editRow := func(edit func(parts []string) []string) []byte {
+		out := slices.Clone(lines)
+		out[first] = strings.Join(edit(strings.Split(out[first], "|")), "|")
+		return []byte(strings.Join(out, "\n"))
+	}
+
+	noHeading := slices.Clone(lines)
+	for _, h := range parsed.Headings {
+		if h.Text == contractHeading {
+			noHeading = slices.Delete(noHeading, h.Line-1, h.Line)
+			break
+		}
+	}
+	expectErr("heading removed", []byte(strings.Join(noHeading, "\n")), "table absent")
+
+	dropped := slices.Clone(lines)
+	dropped = slices.Delete(dropped, last, last+1)
+	expectErr("last row removed", []byte(strings.Join(dropped, "\n")), "has 8 rows, want 9")
+
+	emptyWhere := editRow(func(parts []string) []string {
+		parts[2] = " "
+		return parts
+	})
+	expectErr("empty Where cell", emptyWhere, "empty Where cell")
+
+	shortRow := editRow(func(parts []string) []string {
+		return slices.Delete(parts, 2, 3)
+	})
+	expectErr("cell removed", shortRow, "malformed row")
 }
