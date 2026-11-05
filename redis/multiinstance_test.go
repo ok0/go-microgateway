@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"sync"
@@ -16,6 +17,7 @@ import (
 
 	microgateway "github.com/ok0/go-microgateway"
 	"github.com/ok0/go-microgateway/internal/clock"
+	"github.com/ok0/go-microgateway/internal/doccheck"
 	"github.com/ok0/go-microgateway/internal/hooks"
 	"github.com/ok0/go-microgateway/internal/httpcache"
 	"github.com/ok0/go-microgateway/internal/testwait"
@@ -858,4 +860,139 @@ func TestCacheMultiInstance(t *testing.T) {
 	}
 	t.Run("clock_offsets", gcClockOffsets)
 	t.Run("memory_scope", gcMemoryScope)
+}
+
+const (
+	exampleCatalogClient = "192.0.2.50:2000"
+	exampleBurstClient   = "192.0.2.60:1000"
+	exampleAdminToken    = "example-admin-token"
+	exampleAPIKey        = "example-api-key-alice"
+)
+
+// exampleGet serves GET path with header hdr from remote on g in its own goroutine and waits for it under a hang guard.
+func exampleGet(t *testing.T, g http.Handler, path, remote string, hdr http.Header) *httptest.ResponseRecorder {
+	t.Helper()
+	var rec *httptest.ResponseRecorder
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req := httptest.NewRequest(http.MethodGet, "http://example.com"+path, nil)
+		req.RemoteAddr = remote
+		for k, v := range hdr {
+			req.Header[k] = v
+		}
+		rec = httptest.NewRecorder()
+		g.ServeHTTP(rec, req)
+	}()
+	testwait.Done(t, "GET "+path+" to complete", done, nil)
+	return rec
+}
+
+func TestRedisExampleRunThrough(t *testing.T) {
+	m := newMini(t)
+	m.RequireAuth("example-redis-password")
+
+	catalog := newGCOrigin(t)
+	catalog.set(http.StatusOK, nil, "catalog")
+	orders := newGCOrigin(t)
+	orders.set(http.StatusOK, nil, "orders")
+
+	data, err := os.ReadFile(filepath.Join("..", "examples", "redis.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookup := doccheck.ExampleLookup(map[string]string{
+		"REDIS_ADDR":  m.Addr(),
+		"CATALOG_URL": catalog.url,
+		"ORDERS_URL":  orders.url,
+	})
+	a, err := newGateway(t, string(data), true, clock.NewFake(miniStart), nil, microgateway.WithEnvLookup(lookup))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := newGateway(t, string(data), true, clock.NewFake(miniStart), nil, microgateway.WithEnvLookup(lookup))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const itemsURL = "http://example.com/catalog/items"
+	rec := exampleGet(t, a, "/catalog/items", exampleCatalogClient, nil)
+	if st := gcStatus(t, rec); rec.Code != http.StatusOK || rec.Body.String() != "catalog|" || st.Hit || !st.Stored {
+		t.Fatalf("catalog GET on A: status %d body %q cache %+v, want 200 catalog stored miss", rec.Code, rec.Body.String(), st)
+	}
+	if calls, _ := catalog.counts(); calls != 1 {
+		t.Fatalf("catalog requests after the first GET = %d, want 1", calls)
+	}
+	rec = exampleGet(t, b, "/catalog/items", exampleCatalogClient, nil)
+	if st := gcStatus(t, rec); rec.Code != http.StatusOK || !st.Hit {
+		t.Fatalf("catalog GET on B: status %d cache %+v, want 200 hit", rec.Code, st)
+	}
+	if calls, _ := catalog.counts(); calls != 1 {
+		t.Fatalf("catalog requests after the hit = %d, want 1", calls)
+	}
+
+	rec = exampleGet(t, a, "/orders/1", exampleCatalogClient, nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("orders GET without credentials: status %d, want 401", rec.Code)
+	}
+	ordersHdr := http.Header{}
+	ordersHdr.Set("X-API-Key", exampleAPIKey)
+	rec = exampleGet(t, a, "/orders/1", exampleCatalogClient, ordersHdr)
+	if rec.Code != http.StatusOK || rec.Body.String() != "orders|" {
+		t.Fatalf("orders GET with API key: status %d body %q, want 200 orders", rec.Code, rec.Body.String())
+	}
+
+	body := `{"urls":["` + itemsURL + `"]}`
+	if rec := gcPurge(t, a, "", body); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("purge without token: status %d, want 401", rec.Code)
+	}
+	if rec := gcPurge(t, a, exampleAdminToken+"x", body); rec.Code != http.StatusForbidden {
+		t.Fatalf("purge with wrong token: status %d, want 403", rec.Code)
+	}
+	if rep := gcPurgeOK(t, gcPurge(t, a, exampleAdminToken, body)); rep.Scope != "store" {
+		t.Fatalf("purge reply scope %q, want store", rep.Scope)
+	}
+
+	rec = exampleGet(t, b, "/catalog/items", exampleCatalogClient, nil)
+	if st := gcStatus(t, rec); rec.Code != http.StatusOK || st.Hit {
+		t.Fatalf("catalog GET on B after the purge: status %d cache %+v, want a non-hit", rec.Code, st)
+	}
+	if calls, _ := catalog.counts(); calls != 2 {
+		t.Fatalf("catalog requests after the purge = %d, want 2", calls)
+	}
+
+	softBody := `{"urls":["` + itemsURL + `"],"soft":true}`
+	if rep := gcPurgeOK(t, gcPurge(t, b, exampleAdminToken, softBody)); rep.Scope != "store" || !rep.Soft {
+		t.Fatalf("soft purge reply %+v, want soft store purge", rep)
+	}
+	catalog.set(http.StatusOK, nil, "catalog-v2")
+	rec = exampleGet(t, a, "/catalog/items", exampleCatalogClient, nil)
+	if st := gcStatus(t, rec); rec.Code != http.StatusOK || rec.Body.String() != "catalog-v2|" || st.Hit {
+		t.Fatalf("catalog GET on A after the soft purge: status %d body %q cache %+v, want revalidated non-hit", rec.Code, rec.Body.String(), st)
+	}
+	if calls, _ := catalog.counts(); calls != 3 {
+		t.Fatalf("catalog requests after the soft purge = %d, want 3", calls)
+	}
+
+	admitted := 0
+	for i := 0; i < 15; i++ {
+		gw := a
+		if i%2 == 1 {
+			gw = b
+		}
+		rec := exampleGet(t, gw, "/catalog/burst", exampleBurstClient, nil)
+		switch rec.Code {
+		case http.StatusOK:
+			admitted++
+		case http.StatusTooManyRequests:
+			if v, err := strconv.Atoi(rec.Header().Get("Retry-After")); err != nil || v < 1 {
+				t.Fatalf("request %d denied with Retry-After %q, want integer >= 1", i, rec.Header().Get("Retry-After"))
+			}
+		default:
+			t.Fatalf("request %d: status %d, want 200 or 429", i, rec.Code)
+		}
+	}
+	if admitted != multiBurst {
+		t.Fatalf("admitted %d requests across both gateways, want %d", admitted, multiBurst)
+	}
 }
