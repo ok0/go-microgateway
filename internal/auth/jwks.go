@@ -34,7 +34,7 @@ type JWKSDeps struct {
 	OnRefresh func(ok bool)
 }
 
-// JWKS is a KeySource over a provider's key set. It fetches the set on first use and refreshes it when the cache expires or a key id is unknown. A failed attempt delays the next one by MinRefreshInterval, and a failed refresh keeps the last good keys.
+// JWKS is a KeySource over a provider's key set. It fetches the set on first use and refreshes it when the cache expires or a key id is unknown. Once a set is loaded, keys in it are served at once: a due refresh runs in the background, and only a lookup of an id not in the set waits for a refresh. A failed attempt delays the next one by MinRefreshInterval, and a failed refresh keeps the last good keys.
 type JWKS struct {
 	cfg  JWKSConfig
 	deps JWKSDeps
@@ -89,9 +89,9 @@ func NewJWKS(c JWKSConfig, d JWKSDeps) (*JWKS, error) {
 	return &JWKS{cfg: c, deps: d, ctx: ctx, cancel: cancel, awaitFetch: awaitFetchResult}, nil
 }
 
-// Lookup returns the key with id kid, refreshing the key set when the id is unknown. An empty kid selects the key only when the set holds exactly one key. It returns ErrKeysUnavailable when no key set was ever loaded and ErrUnknownKID when the id is not in the set.
+// Lookup returns the key with id kid. With a loaded key set, a key in the set is returned at once and a refresh that is due is started without being awaited. An id not in the set waits for the refresh in flight, or for a refresh it starts once MinRefreshInterval has passed since the last attempt; the wait ends with the refresh, which Timeout bounds, or with ctx. Before the first successful fetch every lookup waits for the fetch in flight. An empty kid selects the key only when the set holds exactly one key. It returns ErrKeysUnavailable when no key set was ever loaded and ErrUnknownKID when the id is not in the set.
 func (j *JWKS) Lookup(ctx context.Context, kid string) (Key, error) {
-	if err := j.ensure(ctx, false); err != nil {
+	if err := j.load(ctx); err != nil {
 		return Key{}, err
 	}
 	if kid == "" {
@@ -100,7 +100,7 @@ func (j *JWKS) Lookup(ctx context.Context, kid string) (Key, error) {
 	if k, ok := j.byKID(kid); ok {
 		return k, nil
 	}
-	if err := j.ensure(ctx, true); err != nil {
+	if err := j.awaitUnknown(ctx); err != nil {
 		return Key{}, err
 	}
 	if k, ok := j.byKID(kid); ok {
@@ -112,9 +112,9 @@ func (j *JWKS) Lookup(ctx context.Context, kid string) (Key, error) {
 	return Key{}, ErrUnknownKID
 }
 
-// Keys returns a copy of the current key set, refreshing it when the cache has expired. It returns ErrKeysUnavailable when no key set was ever loaded.
+// Keys returns a copy of the current key set. With a loaded set it returns at once and a refresh that is due is started without being awaited; before the first successful fetch it waits for the fetch in flight. It returns ErrKeysUnavailable when no key set was ever loaded.
 func (j *JWKS) Keys(ctx context.Context) ([]Key, error) {
-	if err := j.ensure(ctx, false); err != nil {
+	if err := j.load(ctx); err != nil {
 		return nil, err
 	}
 	j.mu.Lock()
@@ -159,25 +159,51 @@ func (j *JWKS) hasKeys() bool {
 	return j.have
 }
 
-func (j *JWKS) ensure(ctx context.Context, force bool) error {
+// load starts a refresh when one is due. Before the first successful fetch it waits for the fetch in flight; once a
+// set is loaded it never waits.
+func (j *JWKS) load(ctx context.Context) error {
 	j.mu.Lock()
 	if j.closed {
 		j.mu.Unlock()
 		return ErrKeysUnavailable
 	}
-	if j.flight == nil {
-		now := j.deps.Clock.Now()
-		cooled := j.attemptAt.IsZero() || now.Sub(j.attemptAt) >= j.cfg.MinRefreshInterval
-		expired := !j.have || now.Sub(j.goodAt) >= j.cfg.TTL
-		if (expired && (cooled || !j.failed)) || (force && cooled) {
-			j.startLocked(now)
-		}
+	j.startDueLocked(false)
+	if j.have || j.flight == nil {
+		j.mu.Unlock()
+		return nil
 	}
+	return j.wait(ctx, j.flight)
+}
+
+// awaitUnknown waits for the refresh in flight, or starts a refresh when one may be forced and waits for it. It
+// returns at once when no refresh runs and none may start.
+func (j *JWKS) awaitUnknown(ctx context.Context) error {
+	j.mu.Lock()
+	if j.closed {
+		j.mu.Unlock()
+		return ErrKeysUnavailable
+	}
+	j.startDueLocked(true)
 	if j.flight == nil {
 		j.mu.Unlock()
 		return nil
 	}
 	return j.wait(ctx, j.flight)
+}
+
+// startDueLocked starts a refresh when none is in flight and one is due: the set is missing or older than TTL and
+// the last attempt succeeded or MinRefreshInterval has passed since it, or force is set and MinRefreshInterval has
+// passed since the last attempt.
+func (j *JWKS) startDueLocked(force bool) {
+	if j.flight != nil {
+		return
+	}
+	now := j.deps.Clock.Now()
+	cooled := j.attemptAt.IsZero() || now.Sub(j.attemptAt) >= j.cfg.MinRefreshInterval
+	expired := !j.have || now.Sub(j.goodAt) >= j.cfg.TTL
+	if (expired && (cooled || !j.failed)) || (force && cooled) {
+		j.startLocked(now)
+	}
 }
 
 func (j *JWKS) wait(ctx context.Context, f *flight) error {
@@ -273,6 +299,8 @@ func (j *JWKS) run(f *flight) {
 		j.failed = true
 	}
 	have := j.have
+	// The flight ends with the swap, so a reported refresh never holds back the next one.
+	j.flight = nil
 	j.mu.Unlock()
 
 	if j.deps.OnRefresh != nil {
@@ -289,8 +317,6 @@ func (j *JWKS) run(f *flight) {
 		)
 	}
 
-	j.mu.Lock()
-	j.flight = nil
+	// Waiters are released after the outcome has been reported and logged.
 	close(f.done)
-	j.mu.Unlock()
 }
