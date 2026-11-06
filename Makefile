@@ -11,9 +11,10 @@ LDFLAGS := -s -w -X $(CLI).version=$(VERSION) -X $(CLI).commit=$(COMMIT) -X $(CL
 CORE := github.com/ok0/go-microgateway
 COVER_ALGO := $(CORE)/internal/lb $(CORE)/internal/health $(CORE)/internal/breaker $(CORE)/internal/retry $(CORE)/internal/auth $(CORE)/internal/authkey $(CORE)/internal/ratelimit $(CORE)/internal/router $(CORE)/store $(CORE)/internal/memstore $(CORE)/internal/storeguard $(CORE)/internal/cache $(CORE)/internal/httpcache $(CORE)/internal/coalesce $(CORE)/redis
 COVER_EXCLUDE := $(CORE)/internal/teststore $(CORE)/internal/testcert $(CORE)/internal/leakcheck
+REDIS_COVERFLAGS ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help build test race vet cover lint tidy-check realnet bench require-heavy require-redis fuzz soak perf integration docker hygiene check
+.PHONY: help build test race vet cover cover-ci cover-times lint tidy-check realnet bench require-heavy require-redis fuzz soak perf integration docker hygiene check
 
 help: ## list the targets
 	@grep -E '^[A-Za-z0-9_.-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "%-12s %s\n", $$1, $$2}'
@@ -37,8 +38,15 @@ cover: ## race tests with the coverage gate
 	mkdir -p bin/cover
 	$(GO) test -race -covermode=atomic -coverprofile=bin/cover/core.out $$($(GO) list ./... | grep -v -x -e '$(CORE)' -e '$(CORE)/internal/e2e')
 	$(GO) test -race -covermode=atomic -coverpkg=$(CORE) -coverprofile=bin/cover/root.out . ./internal/e2e
-	cd redis && $(GO) test -race -covermode=atomic -coverprofile=../bin/cover/redis.out ./...
+	cd redis && $(GO) test -race -covermode=atomic -coverprofile=../bin/cover/redis.out $(REDIS_COVERFLAGS) ./...
 	$(GO) run ./internal/covergate -total 75 -algo-min 85 -algo '$(COVER_ALGO)' -exclude '$(COVER_EXCLUDE)' -module $(CORE) -module $(CORE)/redis bin/cover/core.out bin/cover/root.out bin/cover/redis.out
+
+cover-ci: ## cover with verbose redis tests, logged to bin/cover/cover.log
+	mkdir -p bin/cover
+	bash -o pipefail -c '$(MAKE) cover REDIS_COVERFLAGS=-v 2>&1 | tee bin/cover/cover.log'
+
+cover-times: ## the slowest top-level tests in bin/cover/cover.log
+	grep -E '^--- (PASS|FAIL|SKIP): ' bin/cover/cover.log | sed -E 's/^--- [A-Z]+: ([^ ]+) \(([0-9.]+)s\)$$/\2 \1/' | sort -rn | head -40
 
 lint: ## golangci-lint v2.14.0 in both modules
 	@command -v $(GOLANGCI_LINT) >/dev/null 2>&1 || { echo "golangci-lint $(GOLANGCI_LINT_VERSION) is required: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)"; exit 1; }

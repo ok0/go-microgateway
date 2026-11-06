@@ -20,6 +20,7 @@ The Makefile wraps the common commands:
 - `make race` runs the tests with the race detector.
 - `make vet` runs `go vet` in both modules.
 - `make cover` runs the tests with coverage and enforces the coverage gate.
+- `make cover-ci` runs `make cover` with verbose redis tests and keeps the log in `bin/cover/cover.log`; `make cover-times` then lists its slowest tests. CI's coverage job uses them.
 - `make lint` runs golangci-lint v2.14.0 in both modules.
 - `make tidy-check` checks that `go mod tidy` changes nothing in either module.
 - `make hygiene` runs the repository hygiene checks, which include the copied-source check.

@@ -60,7 +60,13 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
-      - run: make cover
+      - name: runner
+        run: getconf _NPROCESSORS_ONLN
+      - name: cover
+        run: make cover-ci
+      - name: redis test times
+        if: always()
+        run: make cover-times
 
   tidy:
     runs-on: ubuntu-latest
