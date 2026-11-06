@@ -629,7 +629,15 @@ func gatewayEntryView(want []string, kind string) []string {
 		}
 		out = append(out, tok)
 	}
-	return seqMerge(out)
+	out = seqMerge(out)
+	if kind == "tls" {
+		// Stock tls.Conn.Close omits close_notify when a Write is in flight (crypto/tls conn.go Close, x != 0), so the
+		// stock server's trace is scheduler-dependent. The gateway's connection-level wrapper always forwards the bracket.
+		if n := len(out); n > 0 && out[n-1] == "close" && (n < 3 || out[n-3] != "wr+5s" || out[n-2] != "wr=") {
+			out = append(out[:n-1:n-1], "wr+5s", "wr=", "close")
+		}
+	}
+	return out
 }
 
 // seqOffsets returns the rendered limit offsets of lim that a gateway trace must not show: every enabled limit and the
