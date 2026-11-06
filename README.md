@@ -66,7 +66,9 @@ flowchart TD
   CIP --> OBS["Observe, access log and metrics"]
   OBS --> REC["Recover from panics"]
   REC --> STRIP["Strip identity headers"]
-  STRIP --> RT{"Route matches?"}
+  STRIP --> CANON{"Path canonical?"}
+  CANON -- no --> BADP["400 invalid_path"]
+  CANON -- yes --> RT{"Route matches?"}
   RT -- no --> NF["404 route_not_found"]
   RT -- yes --> RMW["Route middleware"]
   RMW --> TMO["timeout"]

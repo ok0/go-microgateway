@@ -23,9 +23,10 @@ For each request the gateway:
 1. Assigns a request ID from the configured header, or keeps a valid incoming ID, and resolves the client IP from the trusted proxies.
 2. Records the request for the access log and metrics, and recovers from a panic in any later step by answering `500`.
 3. Removes the identity headers listed in `global.strip_identity_headers`, so that a client cannot forge them.
-4. Matches the route. When no route matches, the gateway answers `404` with the code `route_not_found`.
-5. Runs the route's middleware, then the pipeline stages in order, and then the proxy.
-6. The proxy selects a host with the upstream's load balancer, forwards the request, and sends the response back. A failed attempt may be retried on another host, subject to the retry stage.
+4. Canonicalizes the request path. A path that breaks the path rules gets `400` with the code `invalid_path` before any route policy runs; every later step, including the forwarded path, uses the canonical path.
+5. Matches the route. When no route matches, the gateway answers `404` with the code `route_not_found`.
+6. Runs the route's middleware, then the pipeline stages in order, and then the proxy.
+7. The proxy selects a host with the upstream's load balancer, forwards the request, and sends the response back. A failed attempt may be retried on another host, subject to the retry stage.
 
 The diagram of this path is in the [README](../README.md#request-flow).
 

@@ -200,6 +200,7 @@ When `global.log.access_log` is true (the default), every request produces one l
 
 - `request_id`, `method`, `path` and `route`
 - `upstream`, present only when the request was sent to an upstream
+- `error`, present only when the gateway rejected the request path (`invalid_path`)
 - `status`, `bytes`, `latency_ms` and `client_ip`
 
 Messages that matter during operation:
@@ -277,6 +278,7 @@ The response carries `Content-Type: application/json`, `Cache-Control: no-store`
 | Status | Code | Cause |
 |--------|------|-------|
 | 400 | `bad_request` | An admin purge request is malformed or selects nothing valid, or the cache rejects the request. |
+| 400 | `invalid_path` | The request path breaks the path rules (dot segment, encoded or backslash separator, control byte, invalid escape); see [Request paths](configuration.md#request-paths). |
 | 401 | `unauthorized` | A request lacks the credentials a route's `auth` stage requires, or an admin purge request has no well-formed bearer token. |
 | 403 | `forbidden` | Authorization failed for a route's `auth` stage, or an admin purge token matches no key. |
 | 404 | `route_not_found` | No route matches the request. |

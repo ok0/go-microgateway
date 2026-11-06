@@ -22,3 +22,13 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - The `microgateway` binary with `run`, `validate` and `version` commands.
 - The Redis module, which provides the Redis-backed stores.
 - Packaging: a Makefile, a Dockerfile for a distroless non-root image, and a CI workflow.
+
+### Changed
+
+- Rewrite prefixes (`strip_prefix`, `replace_prefix.from` and `replace_prefix.to`) must be canonical paths.
+- The access log has an `error` field for requests rejected because of their path.
+
+### Security
+
+- Request paths are canonicalized before routing. Ambiguous paths get `400 invalid_path`.
+- Equivalent path spellings share one route, one cache entry and one rate-limit bucket.

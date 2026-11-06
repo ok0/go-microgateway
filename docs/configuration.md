@@ -204,7 +204,7 @@ A DNS upstream resolves `hostname` to A and AAAA records, and uses at most 256 a
 
 | Key | Type | Default | Constraints | Meaning |
 |---|---|---|---|---|
-| `upstreams[].load_balancer.hash.source` | string | depends on `algorithm`: required for `consistent_hash` | one of `header`, `cookie`, `ip`, `path` | Request attribute that is hashed. |
+| `upstreams[].load_balancer.hash.source` | string | depends on `algorithm`: required for `consistent_hash` | one of `header`, `cookie`, `ip`, `path` | Request attribute that is hashed; `path` hashes the canonical request path. |
 | `upstreams[].load_balancer.hash.name` | string | none | required for the `header` and `cookie` sources | Name of the header or cookie that is hashed. |
 
 ### upstreams[].timeouts
@@ -367,9 +367,9 @@ Each route matches requests and forwards them to one upstream. `priority` orders
 
 | Key | Type | Default | Constraints | Meaning |
 |---|---|---|---|---|
-| `routes[].rewrite.strip_prefix` | string | none | must start with `/`; mutually exclusive with `replace_prefix` | Prefix removed from the path before forwarding. |
-| `routes[].rewrite.replace_prefix.from` | string | none | must start with `/`; set together with `to`, or both empty | Path prefix that is replaced. |
-| `routes[].rewrite.replace_prefix.to` | string | none | set together with `from`, or both empty | Prefix that replaces `from`. |
+| `routes[].rewrite.strip_prefix` | string | none | must start with `/`; must be a canonical path (see [Request paths](#request-paths)); mutually exclusive with `replace_prefix` | Prefix removed from the path before forwarding; it is compared with the canonical request path. |
+| `routes[].rewrite.replace_prefix.from` | string | none | must start with `/`; must be a canonical path (see [Request paths](#request-paths)); set together with `to`, or both empty | Path prefix that is replaced; it is compared with the canonical request path. |
+| `routes[].rewrite.replace_prefix.to` | string | none | must be a canonical path (see [Request paths](#request-paths)); set together with `from`, or both empty | Prefix that replaces `from`. |
 
 ### routes[].request_headers
 
@@ -506,6 +506,29 @@ Unknown keys are rejected. A key that is not in the tables above is reported at 
 ```text
 retries (line 2): unknown field "retries"
 ```
+
+## Request paths
+
+Before routing, the gateway derives one canonical path from the request path. Routing, route stages, rewriting, the forwarded path, the cache key and the load balancer's `path` hash all use this canonical path. The access log keeps the path the client sent.
+
+A request whose path breaks the path rules is rejected with `400` and the code `invalid_path`, before any route policy runs. The path rules reject:
+
+- dot segments `.` and `..` in any encoding, including a dot segment before a `;`, such as `..;x`;
+- encoded separators `%2F` and `%5C` in any letter case, and a literal backslash;
+- control bytes, literal or percent-encoded;
+- invalid percent escapes;
+- a path that does not start with `/`, except the `OPTIONS *` request form, which matches no route.
+
+The gateway normalizes every other path:
+
+- escapes of unreserved bytes are decoded, so `/a%7Ex` is `/a~x`;
+- other escapes are written with upper-case hex digits;
+- bytes outside the path character set are escaped;
+- repeated slashes are merged, so `/admin//x` is `/admin/x`.
+
+Paths that differ only in the spelling of unreserved bytes or in escape case, or that differ only in repeated slashes, reach the same route and share one cache entry and rate-limit bucket. The path `/a%3Bb` is a different path from `/a;b`. Upstreams receive the merged slashes and the normalized escapes. There is no setting that relaxes these rules. Clients that send `%2F`, `%5C` or dot segments receive `400`.
+
+Rewrite prefixes (`strip_prefix`, `replace_prefix.from` and `replace_prefix.to`) must already be canonical paths, so that they can be compared with the canonical request path.
 
 ## Validation errors
 
