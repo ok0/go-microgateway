@@ -77,7 +77,9 @@ Request directives are honored: `max-age`, `min-fresh`, `max-stale` and `no-cach
 
 ## Conditional revalidation
 
-A stored response that is no longer fresh is revalidated with the origin when it carries an `ETag` or a `Last-Modified` header. The request to the origin is then conditional, with `If-None-Match` or `If-Modified-Since`. A `304` refreshes the stored entry and its freshness. A `200` replaces the entry. An entry with neither validator is revalidated with an unconditional request.
+A stored response that is no longer fresh is revalidated with the origin when it carries an `ETag` or a `Last-Modified` header. The request to the origin is then conditional, with `If-None-Match` or `If-Modified-Since`. A `200` replaces the entry. An entry with neither validator is revalidated with an unconditional request.
+
+A `304` updates the stored entry's header fields, and the updated response is checked with the same rules as a new response, on every revalidation: a request's own revalidation, a stale-while-revalidate background refresh, and the revalidation of a soft-purged entry. When it is still storable, the entry is stored again with the lifetime its updated headers give (`s-maxage`, `max-age`, `Expires`, or `default_ttl`, capped by `max_ttl`, plus the stale windows and `keep`); a `304` never extends the entry beyond that. When it is not storable because of the response (for example, the `304` carries `private`, `no-store`, `Set-Cookie` or `Vary: *`), that variant is deleted from the store, so no instance sharing the store serves it again, fresh or stale, and the next request is a miss; other `Vary` variants are kept. When it is not storable only because of the request (it carries `Cache-Control: no-store`, or credentials and the response does not allow shared caching), nothing is stored or deleted and the entry stays as it was on every instance, so one client cannot remove a shared entry; a `no-store` request inside a stale-while-revalidate window gets the stale answer and starts no background refresh. In both non-storable cases the request that caused the revalidation still receives the stored body with the updated headers (including the `304`'s `Set-Cookie`), without `hit`; requests waiting for it send their own request. If the delete fails, the failure is logged and counted in `microgateway_cache_store_errors_total{op="delete"}` (and `microgateway_store_errors_total{store, op="delete"}` for a named store), the client response is the same, and the entry lasts until its storage deadline.
 
 ## Stale responses
 
@@ -102,9 +104,9 @@ A response served from another request's fetch carries `collapsed`.
 
 Every response that passed through the cache stage carries one `Cache-Status` member named by `cache.name` (default `microgateway`, 1 to 128 printable ASCII characters). The members the gateway emits are:
 
-- `hit`: the response was served from a stored entry, including a stale or revalidated answer.
+- `hit`: the response was served from a stored entry, including a stale answer and a revalidated answer whose entry was stored again. A revalidated answer that may no longer be stored carries no `hit`.
 - `fwd`: why the origin was contacted. `uri-miss` means no entry exists for the URL. `vary-miss` means an entry exists for the URL but not for the request's `Vary` values. `stale` means a stored entry was revalidated or served while stale. `method` means the method is not `GET` or `HEAD`. `bypass` means the cache was not used.
-- `fwd-status`: the origin status that caused the forward. `304` means the stored entry was refreshed. `500`, `502`, `503` or `504` means a stale entry answered a failed revalidation.
+- `fwd-status`: the origin status that caused the forward. `304` means the origin confirmed the stored entry; the entry was stored again, deleted when the response may no longer be stored, or left unchanged when only the request prevented storing. `500`, `502`, `503` or `504` means a stale entry answered a failed revalidation.
 - `stored`: the response was stored by this request.
 - `ttl`: remaining freshness in whole seconds, for stored responses and hits.
 - `collapsed`: the response came from a fetch that another request started.
@@ -136,7 +138,10 @@ flowchart TD
     E -- "fresh and not soft purged" --> H["Hit: serve the stored response"]
     E -- "stale within stale-while-revalidate and not soft purged" --> SW["Serve stale with detail stale-while-revalidate and revalidate in the background"]
     E -- "soft purged or stale outside the windows" --> RV["Revalidate with the origin, conditional when a validator is stored"]
-    RV -- "304" --> RF["Refresh the entry and serve it"]
+    RV -- "304" --> RS{"Updated response still storable"}
+    RS -- "yes" --> RF["Refresh the entry and serve it"]
+    RS -- "no, because of the response" --> RD["Delete the entry from the store and serve the updated response without hit"]
+    RS -- "no, because of the request" --> RK["Keep the entry and serve the updated response without hit"]
     RV -- "200" --> RP["Replace the entry and serve the new response"]
     RV -- "origin failure" --> RE{"Stale-if-error window open and not soft purged"}
     RE -- "yes" --> SIE["Serve stale with detail stale-if-error"]
