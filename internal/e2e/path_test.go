@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -39,6 +40,8 @@ func (p *pathRecorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.cacheControl != "" {
 		w.Header().Set("Cache-Control", p.cacheControl)
 	}
+	w.Header().Set("X-Seen-Path", base64.StdEncoding.EncodeToString([]byte(e.Path)))
+	w.Header().Set("X-Seen-Raw", base64.StdEncoding.EncodeToString([]byte(e.RawPath)))
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(e)
 }
@@ -178,6 +181,42 @@ type outcome struct {
 	Raw     string
 }
 
+// pathBoundaryCase is a path at the edge of a route and the outcomes without and with the API key.
+type pathBoundaryCase struct {
+	path           string
+	noKey, withKey outcome
+}
+
+// pathBoundaryCases are the route-edge paths of TestPathPrefixBoundaries and the seeds of FuzzRoutedPathEqualsForwarded.
+var pathBoundaryCases = pathBoundaryTable()
+
+func pathBoundaryTable() []pathBoundaryCase {
+	ok := func(b, p string) outcome { return outcome{Status: http.StatusOK, Backend: b, Path: p} }
+	nf := outcome{Status: http.StatusNotFound, Code: httperr.CodeRouteNotFound}
+	ua := outcome{Status: http.StatusUnauthorized, Code: httperr.CodeUnauthorized}
+	bad := outcome{Status: http.StatusBadRequest, Code: httperr.CodeInvalidPath}
+	var out []pathBoundaryCase
+	same := func(p string, o outcome) pathBoundaryCase { return pathBoundaryCase{path: p, noKey: o, withKey: o} }
+	for _, p := range []string{"/public", "/public/", "/public/x"} {
+		out = append(out, same(p, ok("public", p)))
+	}
+	out = append(out, same("/publicx", nf), same("/publi", nf))
+	for _, p := range []string{"/cached", "/cached/", "/cached/x"} {
+		out = append(out, same(p, ok("cached", p)))
+	}
+	out = append(out, same("/cachedx", nf))
+	for _, p := range []string{"/admin", "/admin/", "/admin/x"} {
+		out = append(out, pathBoundaryCase{path: p, noKey: ua, withKey: ok("admin", p)})
+	}
+	out = append(out, pathBoundaryCase{path: "/admin//x", noKey: ua, withKey: ok("admin", "/admin/x")})
+	out = append(out, same("/adminx", nf))
+	for _, p := range []string{"/admin/.", "/admin/..", "/admin/%2e", "/admin/%2E/x", "/admin%2fx", "/admin%2F", "/admin/%2e%2e/x"} {
+		out = append(out, same(p, bad))
+	}
+	out = append(out, same("/rl/a/", nf), same("/rl", nf))
+	return out
+}
+
 // pathReq builds a GET request for target, which must parse as a request URI.
 func pathReq(t testing.TB, method, target, remote string) *http.Request {
 	t.Helper()
@@ -226,14 +265,22 @@ func escaped(p reqpath.Path) string {
 	return pathEscaped(p.Decoded, p.Raw)
 }
 
+// pathPrefixMatch reports whether the canonical decoded path falls under the route prefix: the prefix's trailing
+// slash is ignored and the match ends on a segment boundary, so "/p/" and "/p" match "/p", "/p/" and "/p/x" but not "/px".
+func pathPrefixMatch(decoded, prefix string) bool {
+	p := strings.TrimSuffix(prefix, "/")
+	return decoded == p || strings.HasPrefix(decoded, p+"/")
+}
+
 // pathBackend is the name of the backend that the canonical decoded path selects; empty when no route does.
+// It follows the router's prefix rule (see pathPrefixMatch); exact routes compare verbatim.
 func pathBackend(decoded string) string {
 	switch {
-	case strings.HasPrefix(decoded, "/public/"):
+	case pathPrefixMatch(decoded, "/public/"):
 		return "public"
-	case strings.HasPrefix(decoded, "/admin/"):
+	case pathPrefixMatch(decoded, "/admin/"):
 		return "admin"
-	case strings.HasPrefix(decoded, "/cached/"):
+	case pathPrefixMatch(decoded, "/cached/"):
 		return "cached"
 	case decoded == "/rl/a" || decoded == "/rl/b":
 		return "rl"
@@ -255,6 +302,13 @@ func pathDotSegment(p string) bool {
 // pathDo serves req through g and returns the outcome and the raw response body.
 func pathDo(t testing.TB, g http.Handler, req *http.Request) (outcome, string) {
 	t.Helper()
+	o, body, _ := pathDoHdr(t, g, req)
+	return o, body
+}
+
+// pathDoHdr is pathDo that also returns the response headers.
+func pathDoHdr(t testing.TB, g http.Handler, req *http.Request) (outcome, string, http.Header) {
+	t.Helper()
 	rec := httptest.NewRecorder()
 	g.ServeHTTP(rec, req)
 	body := rec.Body.String()
@@ -265,7 +319,7 @@ func pathDo(t testing.TB, g http.Handler, req *http.Request) (outcome, string) {
 			t.Fatalf("200 body %q: %v", body, err)
 		}
 		o.Backend, o.Path, o.Raw = e.Backend, e.Path, e.RawPath
-		return o, body
+		return o, body, rec.Header()
 	}
 	var eb struct {
 		Error apiError `json:"error"`
@@ -274,7 +328,7 @@ func pathDo(t testing.TB, g http.Handler, req *http.Request) (outcome, string) {
 		t.Fatalf("status %d body %q: %v", rec.Code, body, err)
 	}
 	o.Code = eb.Error.Code
-	return o, body
+	return o, body, rec.Header()
 }
 
 // pathCheckServed fails t unless the 200 answer o echoes the canonical form of the request URL u and came from the route that the canonical path selects.
@@ -413,6 +467,52 @@ func TestPathSpellingsMatrix(t *testing.T) {
 	}{{"fresh gateway", first}, {"second gateway", second}, {"after reload", third}} {
 		if !slices.Equal(run.got, want) {
 			t.Fatalf("%s: outcomes = %+v, want %+v", run.name, run.got, want)
+		}
+	}
+}
+
+func TestPathPrefixBoundaries(t *testing.T) {
+	n := newMemNetwork()
+	b := newPathBackends(t, n)
+	g := n.gateway(t, b.doc)
+
+	for _, c := range pathBoundaryCases {
+		for _, key := range []bool{false, true} {
+			req := pathReq(t, http.MethodGet, c.path, "192.0.2.60:1000")
+			want := c.noKey
+			if key {
+				req.URL.RawQuery = "api_key=" + pathAPIKey
+				want = c.withKey
+			}
+			before := b.admin.count()
+			o, _ := pathDo(t, g, req)
+			if o != want {
+				t.Fatalf("%s key=%v: outcome = %+v, want %+v", c.path, key, o, want)
+			}
+			if !key && b.admin.count() != before {
+				t.Fatalf("%s without credentials reached the admin backend", c.path)
+			}
+			if o.Status == http.StatusOK {
+				pathCheckServed(t, req.URL, o)
+			}
+
+			cp, err := reqpath.Canonicalize(req.URL)
+			if err != nil {
+				if want != (outcome{Status: http.StatusBadRequest, Code: httperr.CodeInvalidPath}) {
+					t.Fatalf("%s key=%v: path is rejected but outcome = %+v", c.path, key, want)
+				}
+				continue
+			}
+			expected := ""
+			switch want.Status {
+			case http.StatusOK:
+				expected = want.Backend
+			case http.StatusUnauthorized:
+				expected = "admin"
+			}
+			if got := pathBackend(cp.Decoded); got != expected {
+				t.Fatalf("%s key=%v: oracle backend = %q for canonical path %q, want %q", c.path, key, got, cp.Decoded, expected)
+			}
 		}
 	}
 }
@@ -740,6 +840,8 @@ func pathLineOf(src, substr string) int {
 	return 0
 }
 
+// The expected backend follows the router's prefix rule: a prefix's trailing slash is ignored and a prefix matches on
+// segment boundaries.
 func FuzzRoutedPathEqualsForwarded(f *testing.F) {
 	n := newMemNetwork()
 	b := newPathBackends(f, n)
@@ -752,19 +854,29 @@ func FuzzRoutedPathEqualsForwarded(f *testing.F) {
 		f.Add(u.Path, u.RawPath, false)
 		f.Add(u.Path, u.RawPath, true)
 	}
+	for _, c := range pathBoundaryCases {
+		u := pathTarget(f, c.path)
+		f.Add(u.Path, u.RawPath, false)
+		f.Add(u.Path, u.RawPath, true)
+	}
 	f.Add("*", "", false)
 	f.Add("/public/\x00", "", false)
 	f.Add("/public/a", "/public/%zz", false)
+	f.Add("/public/\x87", "", true)
+	f.Add("/cached/a~x", "", true)
 
+	var iter atomic.Uint32
 	f.Fuzz(func(t *testing.T, path, raw string, withKey bool) {
 		b.takeAll()
-		req := urlReq(http.MethodGet, path, raw, "192.0.2.50:1000")
+		seq := iter.Add(1)
+		remote := fmt.Sprintf("10.%d.%d.%d:1000", seq>>16&255, seq>>8&255, seq&255)
+		req := urlReq(http.MethodGet, path, raw, remote)
 		if withKey {
 			req.URL.RawQuery = "api_key=" + pathAPIKey
 		}
 		want, werr := reqpath.Canonicalize(&url.URL{Path: path, RawPath: raw})
 		adminBefore := b.admin.count()
-		o, _ := pathDo(t, g, req)
+		o, _, hdr := pathDoHdr(t, g, req)
 		adminHit := b.admin.count() != adminBefore
 		seen := b.takeAll()
 
@@ -781,28 +893,62 @@ func FuzzRoutedPathEqualsForwarded(f *testing.F) {
 			if !withKey && adminHit {
 				t.Fatalf("unauthenticated request reached the admin backend (status %d)", o.Status)
 			}
+			wantBackend := pathBackend(want.Decoded)
+			switch {
+			case o.Status == http.StatusNotFound && o.Code == httperr.CodeRouteNotFound:
+				if wantBackend != "" {
+					t.Fatalf("canonical path %q matched no route, want backend %q", want.Decoded, wantBackend)
+				}
+			case o.Status == http.StatusUnauthorized && o.Code == httperr.CodeUnauthorized:
+				if wantBackend != "admin" || withKey {
+					t.Fatalf("canonical path %q (key %v) answered 401, want backend %q", want.Decoded, withKey, wantBackend)
+				}
+			case o.Status == http.StatusTooManyRequests && o.Code == httperr.CodeRateLimited:
+				if wantBackend != "rl" {
+					t.Fatalf("canonical path %q answered 429, want backend %q", want.Decoded, wantBackend)
+				}
+			default:
+				t.Fatalf("canonical path %q answered %d %q", want.Decoded, o.Status, o.Code)
+			}
+			if len(seen) != 0 {
+				t.Fatalf("refused request reached a backend: %+v", seen)
+			}
 			return
 		}
 		if o.Status != http.StatusOK {
 			t.Fatalf("status = %d, want 200", o.Status)
 		}
+		gotPath, err := base64.StdEncoding.DecodeString(hdr.Get("X-Seen-Path"))
+		if err != nil {
+			t.Fatalf("X-Seen-Path: %v", err)
+		}
+		gotRaw, err := base64.StdEncoding.DecodeString(hdr.Get("X-Seen-Raw"))
+		if err != nil {
+			t.Fatalf("X-Seen-Raw: %v", err)
+		}
+		switch len(seen) {
+		case 0:
+			if o.Backend != "cached" {
+				t.Fatalf("%s answered 200 without reaching a backend", o.Backend)
+			}
+		case 1:
+			if seen[0].Path != string(gotPath) || seen[0].RawPath != string(gotRaw) || seen[0].Backend != o.Backend {
+				t.Fatalf("backend received %+v, client got path %q raw %q backend %q", seen[0], gotPath, gotRaw, o.Backend)
+			}
+		default:
+			t.Fatalf("backends received %d requests for a 200 answer: %+v", len(seen), seen)
+		}
 		if pathDotSegment(want.Decoded) {
 			t.Fatalf("accepted canonical path %q has a dot segment", want.Decoded)
 		}
-		if o.Path != want.Decoded || pathEscaped(o.Path, o.Raw) != escaped(want) {
-			t.Fatalf("backend saw path %q (raw %q), want canonical %q (escaped %q)", o.Path, o.Raw, want.Decoded, escaped(want))
+		if string(gotPath) != want.Decoded || pathEscaped(string(gotPath), string(gotRaw)) != escaped(want) {
+			t.Fatalf("backend saw path %q (raw %q), want canonical %q (escaped %q)", gotPath, gotRaw, want.Decoded, escaped(want))
 		}
 		if got := pathBackend(want.Decoded); o.Backend != got {
 			t.Fatalf("backend = %q, want %q for canonical path %q", o.Backend, got, want.Decoded)
 		}
 		if o.Backend == "admin" && !withKey {
 			t.Fatal("admin backend answered a request without credentials")
-		}
-		if len(seen) > 1 {
-			t.Fatalf("backends received %d requests for one call: %+v", len(seen), seen)
-		}
-		if len(seen) == 1 && (seen[0].Backend != o.Backend || seen[0].Path != o.Path || seen[0].RawPath != o.Raw) {
-			t.Fatalf("backend received %+v, client got %+v", seen[0], o)
 		}
 	})
 }
