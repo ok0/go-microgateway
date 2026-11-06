@@ -43,6 +43,7 @@ var hygienePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\b(as re` + `quested|the user (asked|re` + `quested|wants|wanted))\b`),
 }
 
+// Finding is one problem reported by a check. Path is the file or directory concerned, Line the 1-based line (0 for a problem of the whole path or directory), Text the offending text and Pattern the rule or pattern that was violated.
 type Finding struct {
 	Path    string
 	Line    int
@@ -50,6 +51,7 @@ type Finding struct {
 	Pattern string
 }
 
+// LintMermaid returns the problems found in the body of a mermaid fence: an empty body, a missing or unknown diagram type, unbalanced brackets, an odd number of double quotes, unclosed blocks, asymmetric flowchart shapes and undeclared sequence participants. An empty result means the body passed these checks.
 func LintMermaid(body string) []string {
 	if strings.TrimSpace(body) == "" {
 		return []string{"line 1: empty diagram body"}
@@ -88,9 +90,10 @@ func LintMermaid(body string) []string {
 				if inQuote {
 					continue
 				}
-				if c == p.opener {
+				switch c {
+				case p.opener:
 					depth++
-				} else if c == p.closer {
+				case p.closer:
 					depth--
 					if depth < 0 {
 						add(i+1, fmt.Sprintf("unmatched %q", p.closer))
@@ -189,6 +192,7 @@ func sequenceProblems(lines []string) []string {
 	return problems
 }
 
+// Hygiene returns a finding for the path and for each line of src that matches a hygiene pattern: planning identifiers, references to the planning directory, tooling-origin words and phrases. Findings for the path have Line 0.
 func Hygiene(path string, src []byte) []Finding {
 	var out []Finding
 	for _, re := range hygienePatterns {
@@ -206,6 +210,7 @@ func Hygiene(path string, src []byte) []Finding {
 	return out
 }
 
+// Normalize returns the non-blank lines of src with surrounding whitespace removed.
 func Normalize(src string) []string {
 	var out []string
 	for _, line := range strings.Split(src, "\n") {
@@ -216,6 +221,7 @@ func Normalize(src string) []string {
 	return out
 }
 
+// ContainsExcerpt reports whether the non-blank lines of snippet appear as a contiguous run of non-blank lines in file, ignoring indentation. An empty snippet never matches.
 func ContainsExcerpt(file, snippet string) bool {
 	want := Normalize(snippet)
 	if len(want) == 0 {
@@ -237,6 +243,7 @@ func ContainsExcerpt(file, snippet string) bool {
 	return false
 }
 
+// ExampleEnv returns the example environment values used by the documentation: the Redis address and password of the local examples.
 func ExampleEnv() map[string]string {
 	return map[string]string{
 		"REDIS_ADDR":     "127.0.0.1:6379",
@@ -244,6 +251,7 @@ func ExampleEnv() map[string]string {
 	}
 }
 
+// ExampleLookup returns a lookup function over the example environment in which overrides take precedence. It never reads the process environment.
 func ExampleLookup(overrides map[string]string) func(string) (string, bool) {
 	env := ExampleEnv()
 	return func(name string) (string, bool) {

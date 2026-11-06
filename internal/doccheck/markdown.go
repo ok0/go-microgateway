@@ -14,6 +14,7 @@ import (
 
 const modulePath = "github.com/ok0/go-microgateway"
 
+// Doc is a parsed markdown file: its path, its lines with carriage returns removed, and the headings, fenced code blocks, links and pipe tables found in it.
 type Doc struct {
 	Path     string
 	Lines    []string
@@ -23,6 +24,7 @@ type Doc struct {
 	Tables   []Table
 }
 
+// Heading is a markdown heading with its level, its text, its unique anchor and its 1-based line.
 type Heading struct {
 	Level  int
 	Text   string
@@ -30,6 +32,7 @@ type Heading struct {
 	Line   int
 }
 
+// Fence is a fenced code block: its info-string language, its body without the fence lines, the text of the nearest preceding heading, the last non-blank line before it and its 1-based opening line.
 type Fence struct {
 	Lang    string
 	Body    string
@@ -38,11 +41,13 @@ type Fence struct {
 	Line    int
 }
 
+// Link is a link target found outside code spans, with its 1-based line.
 type Link struct {
 	Target string
 	Line   int
 }
 
+// Table is a pipe table: its header cells, its body rows, the text of the nearest preceding heading and its 1-based header line.
 type Table struct {
 	Header  []string
 	Rows    [][]string
@@ -57,6 +62,7 @@ var (
 	separatorRE = regexp.MustCompile(`^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$`)
 )
 
+// Root returns the repository root, two directories above this package, after checking that its go.mod declares the core module path.
 func Root() (string, error) {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
@@ -80,6 +86,7 @@ func Root() (string, error) {
 	return "", fmt.Errorf("doccheck: go.mod at %s has no module line", root)
 }
 
+// Load reads the markdown file at path and parses it.
 func Load(path string) (*Doc, error) {
 	src, err := os.ReadFile(path)
 	if err != nil {
@@ -88,6 +95,7 @@ func Load(path string) (*Doc, error) {
 	return Parse(path, src), nil
 }
 
+// Parse parses the markdown source src of the file at path. Headings get unique anchors, fenced code blocks are recorded with their bodies and links are collected outside code spans and fences.
 func Parse(path string, src []byte) *Doc {
 	doc := &Doc{Path: path, Lines: strings.Split(string(src), "\n")}
 	for i, line := range doc.Lines {
@@ -149,6 +157,7 @@ func Parse(path string, src []byte) *Doc {
 	return doc
 }
 
+// Anchor returns the GitHub-style anchor of a heading text: lower-cased, with letters, digits, hyphens and underscores kept, spaces turned into hyphens and other characters dropped.
 func Anchor(text string) string {
 	var b strings.Builder
 	for _, r := range strings.ToLower(text) {
@@ -162,6 +171,7 @@ func Anchor(text string) string {
 	return b.String()
 }
 
+// CheckLinks returns the broken relative links among docs, sorted: targets of missing files, fragments on non-markdown files and fragments that name no heading. External links are not checked; a target file outside docs is loaded on demand.
 func CheckLinks(docs []*Doc) []string {
 	known := map[string]*Doc{}
 	for _, d := range docs {

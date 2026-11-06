@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// CopiedSource reports the marks of copied upstream source in the file or directory p. p is slash-separated and relative to the repository root. Path marks are reported with line 0 and Text p. Line marks are reported once per matching line and pattern; package marks apply only to .go files. A nil src checks path marks only.
+// CopiedSource reports the marks of copied upstream source in the file or directory p. p is slash-separated and relative to the repository root. Path marks are reported with line 0 and Text p. Line marks cover upstream copyright and governance notices, bundler output, and the license texts of the MIT, Apache, SPDX, GPL and MPL families; they are reported once per matching line and pattern. Package marks apply only to .go files. A nil src checks path marks only.
 func CopiedSource(p string, src []byte) []Finding {
 	type mark struct {
 		label string
@@ -35,6 +35,11 @@ func CopiedSource(p string, src []byte) []Finding {
 		{"Go copyright notice", regexp.MustCompile(`(?i)copyright\b.*\bthe go author[s]`)},
 		{"BSD governance notice", regexp.MustCompile(`governed by a BSD-styl[e]`)},
 		{"bundler output", regexp.MustCompile(`golang\.org/x/tools/cmd/bundl[e]`)},
+		{"MIT grant", regexp.MustCompile(`(?i)permission is hereby grante[d]`)},
+		{"Apache header", regexp.MustCompile(`(?i)licensed under the apache licens[e]`)},
+		{"SPDX identifier", regexp.MustCompile(`SPDX-License-Identifie[r]:`)},
+		{"GPL text", regexp.MustCompile(`(?i)gnu (lesser )?general public licens[e]`)},
+		{"MPL text", regexp.MustCompile(`(?i)mozilla public licens[e]`)},
 	}
 	if strings.HasSuffix(p, ".go") {
 		marks = append(marks, mark{"copied net/http package", regexp.MustCompile(`^package (http[2]|hpack|httpgut[s]|httpcommo[n]|httpsf[v])\b`)})

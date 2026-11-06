@@ -33,6 +33,11 @@ func TestCopiedSource(t *testing.T) {
 		{"vendor path", "vendor/golang.org/x/net/a.go", "", "vendor directory"},
 		{"h2server path", "internal/h2server/server.go", "", "copied HTTP/2 server directory"},
 		{"patents file", "internal/h2server/PATENTS", "", "patent grant file"},
+		{"mit grant line", "x/mit.txt", "Permission is hereby " + "granted, free of charge\n", "MIT grant"},
+		{"apache header line", "x/h.go", "// Licensed under the " + "Apache License, Version 2.0\n", "Apache header"},
+		{"spdx identifier line", "x/s.go", "// SPDX-" + "License-Identifier: MIT\n", "SPDX identifier"},
+		{"gpl text line", "x/g.txt", "GNU " + "General Public License\n", "GPL text"},
+		{"mpl text line", "x/m.txt", "Mozilla " + "Public License 2.0\n", "MPL text"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -48,6 +53,7 @@ func TestCopiedSource(t *testing.T) {
 		{"package name in text file", "notes.txt", "pack" + "age http2\n"},
 		{"unrelated package", "server/server.go", "pack" + "age server\n"},
 		{"similar directory name", "internal/h2serverx/a.go", ""},
+		{"license identifier in readme", "README.md", "Apache-2.0"},
 	}
 	for _, c := range negatives {
 		t.Run(c.name, func(t *testing.T) {
@@ -125,7 +131,7 @@ func copiedProblems(root string) ([]string, error) {
 			}
 			return nil
 		}
-		if strings.HasPrefix(d.Name(), "LICENSE") || strings.HasSuffix(d.Name(), ".md") {
+		if rel == "LICENSE" {
 			return nil
 		}
 		src, err := os.ReadFile(p)
@@ -197,10 +203,18 @@ func TestNoCopiedSourceCatchesSeededTree(t *testing.T) {
 		"go.mod":                      "module example.com/seeded\n\ngo 1.27\n\nrequire golang.org/x/net v0.1.0\n",
 		"internal/h2server/server.go": "package server\n",
 		"vendor/x/x.go":               "package x\n",
+		"docs/x.md":                   "Permission is hereby " + "granted, free of charge\n",
+		"sub/LICENSE":                 "Licensed under the " + "Apache License, Version 2.0\n",
 	})
 	problems, err := copiedProblems(seeded)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !hasProblemWithPrefix(problems, "docs/x.md:1: MIT grant") {
+		t.Errorf("seeded tree problems %q lack the MIT grant in docs/x.md", problems)
+	}
+	if !hasProblemWithPrefix(problems, "sub/LICENSE:1: Apache header") {
+		t.Errorf("seeded tree problems %q lack the Apache header in sub/LICENSE", problems)
 	}
 	if !hasProblemWithPrefix(problems, "internal/h2server:") {
 		t.Errorf("seeded tree problems %q lack the internal/h2server path", problems)

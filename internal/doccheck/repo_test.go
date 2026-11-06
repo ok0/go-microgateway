@@ -42,7 +42,7 @@ func repoRoot(t *testing.T) string {
 
 func repoDocs(t *testing.T, root string) []*Doc {
 	t.Helper()
-	paths := []string{filepath.Join(root, "README.md")}
+	paths := []string{filepath.Join(root, "README.md"), filepath.Join(root, "CONTRIBUTING.md"), filepath.Join(root, "SECURITY.md"), filepath.Join(root, "CHANGELOG.md")}
 	more, err := filepath.Glob(filepath.Join(root, "docs", "*.md"))
 	if err != nil {
 		t.Fatal(err)
@@ -257,11 +257,13 @@ func TestDocsMermaid(t *testing.T) {
 func TestDocsHygiene(t *testing.T) {
 	root := repoRoot(t)
 	files := readTree(t, root, "docs", "examples", "redis/examples")
-	src, err := os.ReadFile(filepath.Join(root, "README.md"))
-	if err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"README.md", "CONTRIBUTING.md", "SECURITY.md", "CHANGELOG.md"} {
+		src, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[name] = string(src)
 	}
-	files["README.md"] = string(src)
 	names := make([]string, 0, len(files))
 	for name := range files {
 		names = append(names, name)

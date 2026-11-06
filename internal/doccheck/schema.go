@@ -7,6 +7,7 @@ import (
 	"strings"
 )
 
+// SchemaPaths returns the sorted dotted YAML key paths of the struct type t. Fields are followed recursively, slices of structs add a [] segment, inline fields add no segment and fields tagged "-" are skipped. A type with an UnmarshalYAML method, or any other non-struct value, is a leaf path.
 func SchemaPaths(t reflect.Type) []string {
 	set := map[string]bool{}
 	walkSchema(derefType(t), "", set, map[reflect.Type]bool{})
@@ -92,6 +93,7 @@ func joinPath(prefix, name string) string {
 	return prefix + "." + name
 }
 
+// Values returns the reflected values found at the dotted YAML path of v, where a [] segment expands each element of a slice or array. A nil pointer that ends the path is returned as it is; a nil pointer before the end of the path yields no value for that branch.
 func Values(v reflect.Value, path string) []reflect.Value {
 	cur := []reflect.Value{v}
 	for _, seg := range strings.Split(path, ".") {
@@ -163,6 +165,7 @@ func fieldByYAML(v reflect.Value, name string) (reflect.Value, bool) {
 	return reflect.Value{}, false
 }
 
+// CompareKeys compares the schema key paths with the documented key paths and returns the sorted problems: schema keys missing from the documentation, documented keys absent from the schema, and keys documented more than once.
 func CompareKeys(schema, documented []string) []string {
 	inSchema := map[string]bool{}
 	for _, p := range schema {
