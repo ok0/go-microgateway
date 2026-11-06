@@ -109,7 +109,7 @@ func TestGuard(t *testing.T) {
 		deadline := time.Now().Add(100 * time.Second)
 		g := Guard(&fakeTB{deadline: deadline, hasDeadline: true})
 		after := time.Until(deadline)
-		if !(g <= 90*time.Second && g >= after-after/10) {
+		if g > 90*time.Second || g < after-after/10 {
 			t.Fatalf("Guard = %v, want between %v and 90s", g, after-after/10)
 		}
 	})
@@ -117,7 +117,7 @@ func TestGuard(t *testing.T) {
 		deadline := time.Now().Add(20 * time.Second)
 		g := Guard(&fakeTB{deadline: deadline, hasDeadline: true})
 		after := time.Until(deadline)
-		if !(g <= 15*time.Second && g >= after-5*time.Second) {
+		if g > 15*time.Second || g < after-5*time.Second {
 			t.Fatalf("Guard = %v, want between %v and 15s", g, after-5*time.Second)
 		}
 	})

@@ -18,6 +18,7 @@ type Entry struct {
 // Action is the decision for a request against the stored entry.
 type Action uint8
 
+// The decisions Decide returns for a request against a stored entry, or for a request with no entry (Miss).
 const (
 	Fresh Action = iota + 1
 	ServeStale
@@ -27,6 +28,7 @@ const (
 	Unsatisfiable
 )
 
+// String returns the lowercase name of the action, or "unknown" for a value outside the defined actions.
 func (a Action) String() string {
 	switch a {
 	case Fresh:
@@ -74,7 +76,7 @@ func decideStored(rd Directives, e *Entry, age time.Duration, o Options) Action 
 		return Revalidate
 	case rd.MaxAge.Present && age > rd.MaxAge.Value:
 		return Revalidate
-	case rd.MinFresh.Present && !(rem > 0 && rem >= rd.MinFresh.Value):
+	case rd.MinFresh.Present && (rem <= 0 || rem < rd.MinFresh.Value):
 		return Revalidate
 	case rem > 0:
 		return Fresh

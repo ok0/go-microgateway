@@ -12,8 +12,10 @@ import (
 	"fmt"
 )
 
+// Algorithms lists the JWT signing algorithms the gateway accepts.
 var Algorithms = []string{"HS256", "HS384", "HS512", "RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "EdDSA"}
 
+// Supported reports whether alg is one of Algorithms.
 func Supported(alg string) bool {
 	for _, a := range Algorithms {
 		if a == alg {
@@ -23,6 +25,7 @@ func Supported(alg string) bool {
 	return false
 }
 
+// IsHMAC reports whether alg is an HMAC algorithm, which uses a shared secret.
 func IsHMAC(alg string) bool {
 	switch alg {
 	case "HS256", "HS384", "HS512":
@@ -31,6 +34,7 @@ func IsHMAC(alg string) bool {
 	return false
 }
 
+// MinSecretBytes returns the minimum shared secret length in bytes for the HMAC algorithm alg, or 0 for any other algorithm.
 func MinSecretBytes(alg string) int {
 	switch alg {
 	case "HS256":
@@ -43,6 +47,7 @@ func MinSecretBytes(alg string) int {
 	return 0
 }
 
+// ParsePublicKeyPEM returns the public key in the first PEM block of data. The block may be a PKIX public key, a PKCS#1 RSA public key or a certificate. Keys other than RSA, ECDSA and Ed25519 are rejected.
 func ParsePublicKeyPEM(data []byte) (crypto.PublicKey, error) {
 	block, _ := pem.Decode(data)
 	if block == nil {
@@ -82,6 +87,7 @@ func ParsePublicKeyPEM(data []byte) (crypto.PublicKey, error) {
 	}
 }
 
+// Check reports whether key has the type and strength alg requires: a shared secret of at least MinSecretBytes for HMAC, an RSA key of at least 2048 bits, an ECDSA key on the curve of the algorithm, or an Ed25519 key for EdDSA.
 func Check(alg string, key any) error {
 	if !Supported(alg) {
 		return fmt.Errorf("unsupported algorithm %q", alg)

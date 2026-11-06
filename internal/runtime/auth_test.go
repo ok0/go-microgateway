@@ -88,14 +88,18 @@ func auECKey(t *testing.T) *ecdsa.PrivateKey {
 func auKeySet(t *testing.T, key *ecdsa.PrivateKey, kid string) []byte {
 	t.Helper()
 	pub := key.PublicKey
+	raw, err := pub.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
 	doc, err := json.Marshal(map[string]any{"keys": []map[string]string{{
 		"kty": "EC",
 		"crv": "P-256",
 		"kid": kid,
 		"alg": "ES256",
 		"use": "sig",
-		"x":   base64.RawURLEncoding.EncodeToString(pub.X.FillBytes(make([]byte, 32))),
-		"y":   base64.RawURLEncoding.EncodeToString(pub.Y.FillBytes(make([]byte, 32))),
+		"x":   base64.RawURLEncoding.EncodeToString(raw[1:33]),
+		"y":   base64.RawURLEncoding.EncodeToString(raw[33:]),
 	}}})
 	if err != nil {
 		t.Fatal(err)

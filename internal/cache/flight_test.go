@@ -246,7 +246,7 @@ func TestCoalesceRelease(t *testing.T) {
 		w.Header().Set("Cache-Control", "max-age=60")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(full[:8]))
-		http.NewResponseController(w).Flush()
+		_ = http.NewResponseController(w).Flush()
 		<-gate
 		_, _ = w.Write([]byte(full[8:]))
 		<-finish

@@ -137,7 +137,7 @@ func readAllProbe(p *probe) http.Handler {
 			}
 			return
 		}
-		io.WriteString(w, "ok")
+		_, _ = io.WriteString(w, "ok")
 	})
 }
 
@@ -182,14 +182,14 @@ func clientIdle(t *testing.T, addr string, _ *x509.CertPool, _ *probe, _ *logBuf
 func deniedProbe(*probe) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		io.WriteString(w, "denied")
+		_, _ = io.WriteString(w, "denied")
 	})
 }
 
 func clientEarlyBody(t *testing.T, addr string, _ *x509.CertPool, _ *probe, _ *logBuffer) outcome {
 	conn := dialRaw(t, addr)
 	writeString(t, conn, "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 4194304\r\n\r\n")
-	go conn.Write(make([]byte, 4<<20))
+	go func() { _, _ = conn.Write(make([]byte, 4<<20)) }()
 	return collect(t, conn)
 }
 
@@ -234,11 +234,11 @@ func stockServer(t *testing.T, sc scenario, h http.Handler, logs *logBuffer, cer
 			t.Fatal(err)
 		}
 		srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
-		go srv.ServeTLS(ln, "", "")
+		go func() { _ = srv.ServeTLS(ln, "", "") }()
 	} else {
-		go srv.Serve(ln)
+		go func() { _ = srv.Serve(ln) }()
 	}
-	t.Cleanup(func() { srv.Close() })
+	t.Cleanup(func() { _ = srv.Close() })
 	return ln.Addr().String()
 }
 

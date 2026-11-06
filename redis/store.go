@@ -280,7 +280,7 @@ func errorCode(msg string) string {
 // text.
 func serverErrorCode(msg string) string {
 	code := errorCode(msg)
-	if code != "ERR" || !(strings.HasPrefix(msg, "ERR Error running script") || strings.HasPrefix(msg, "ERR Error compiling script")) {
+	if code != "ERR" || (!strings.HasPrefix(msg, "ERR Error running script") && !strings.HasPrefix(msg, "ERR Error compiling script")) {
 		return code
 	}
 	rest := msg

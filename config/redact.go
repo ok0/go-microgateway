@@ -183,7 +183,8 @@ func FingerprintOf(v any) string {
 	h.Write(b)
 	walkSecrets(reflect.ValueOf(v), func(kind byte, raw []byte) {
 		h.Write([]byte{0, kind})
-		binary.Write(h, binary.BigEndian, uint64(len(raw)))
+		// hash.Hash never returns a write error.
+		_ = binary.Write(h, binary.BigEndian, uint64(len(raw)))
 		h.Write(raw)
 	})
 	return hex.EncodeToString(h.Sum(nil))

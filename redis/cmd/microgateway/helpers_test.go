@@ -48,7 +48,7 @@ func (b *syncBuffer) String() string {
 func backend(t *testing.T) string {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, "ok")
+		_, _ = fmt.Fprint(w, "ok")
 	}))
 	t.Cleanup(srv.Close)
 	return srv.URL
@@ -192,7 +192,7 @@ func get(t *testing.T, url string) (*http.Response, []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
@@ -296,7 +296,7 @@ func deletePrefix(t *testing.T, addr, password string, db int, prefix string) {
 	t.Helper()
 	ctx := context.Background()
 	c := newRawClient(&goredis.Options{Addr: addr, Password: password, DB: db})
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	var cursor uint64
 	for {
 		keys, next, err := c.Scan(ctx, cursor, prefix+"*", 100).Result()

@@ -84,6 +84,7 @@ var (
 	_ io.Closer         = (*Transport)(nil)
 )
 
+// NewTransport returns the transport of an upstream configured by cfg. dial opens backend connections, and nil dials TCP. clk drives the connect, TLS handshake and idle limits, and nil selects the real clock. Close the transport to release its connections.
 func NewTransport(cfg config.Upstream, dial DialFunc, clk clock.Clock) *Transport {
 	return newTransport(cfg, dial, clk, nil)
 }

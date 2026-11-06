@@ -11,6 +11,7 @@ import (
 	"github.com/ok0/go-microgateway/internal/reqctx"
 )
 
+// Error codes carried in the code field of gateway-originated JSON error bodies.
 const (
 	CodeRouteNotFound        = "route_not_found"
 	CodeUnauthorized         = "unauthorized"
@@ -33,10 +34,13 @@ const (
 	CodeCacheNotConfigured   = "cache_not_configured"
 )
 
+// StatusClientClosed is the status for a request the client closed before the gateway responded. Nothing is written for it.
 const StatusClientClosed = 499
 
+// ErrNoHealthyUpstream reports that no healthy upstream host is available for a request.
 var ErrNoHealthyUpstream = errors.New("no healthy upstream")
 
+// ErrCircuitOpen reports that the upstream circuit breaker rejected a request.
 var ErrCircuitOpen = errors.New("circuit open")
 
 type body struct {

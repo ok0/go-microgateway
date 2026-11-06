@@ -429,7 +429,7 @@ func openH2(addr string, pool *x509.CertPool, rcvBuf int) (*h2peer, error) {
 	}
 	if tc, ok := raw.(*net.TCPConn); ok && rcvBuf > 0 {
 		if err := tc.SetReadBuffer(rcvBuf); err != nil {
-			raw.Close()
+			_ = raw.Close()
 			return nil, err
 		}
 	}
@@ -443,11 +443,11 @@ func openH2Conn(raw net.Conn, pool *x509.CertPool) (*h2peer, error) {
 	if pool != nil {
 		tc := tls.Client(raw, &tls.Config{RootCAs: pool, ServerName: "localhost", NextProtos: []string{"h2"}})
 		if err := tc.Handshake(); err != nil {
-			raw.Close()
+			_ = raw.Close()
 			return nil, fmt.Errorf("%w: %w", errTLSHandshake, err)
 		}
 		if proto := tc.ConnectionState().NegotiatedProtocol; proto != "h2" {
-			raw.Close()
+			_ = raw.Close()
 			return nil, fmt.Errorf("%w: got %q", errNotH2, proto)
 		}
 		conn = tc
@@ -481,7 +481,7 @@ func dialH2(t *testing.T, addr string, pool *x509.CertPool, rcvBuf int) *h2peer 
 func (p *h2peer) close() {
 	p.closeOnce.Do(func() {
 		close(p.quit)
-		p.raw.Close()
+		_ = p.raw.Close()
 	})
 }
 
@@ -490,13 +490,6 @@ func (p *h2peer) send(f func() error) error {
 	p.wmu.Lock()
 	defer p.wmu.Unlock()
 	return f()
-}
-
-func (p *h2peer) mustSend(f func() error) {
-	p.t.Helper()
-	if err := p.send(f); err != nil {
-		p.t.Fatal(err)
-	}
 }
 
 // writePreface writes the client preface and a SETTINGS frame. The frame's first entry sets the header table size to
@@ -686,27 +679,11 @@ func (p *h2peer) writeData(id uint32, b []byte, endStream bool) error {
 	return p.send(func() error { return writeFrame(p.conn, h2Data, flags, id, b) })
 }
 
-// data sends a DATA frame on stream id.
-func (p *h2peer) data(id uint32, b []byte, endStream bool) {
-	p.t.Helper()
-	if err := p.writeData(id, b, endStream); err != nil {
-		p.t.Fatal(err)
-	}
-}
-
 // writeWindowUpdate writes a WINDOW_UPDATE frame for stream id (0 for the connection).
 func (p *h2peer) writeWindowUpdate(id, incr uint32) error {
 	var payload [4]byte
 	binary.BigEndian.PutUint32(payload[:], incr&(1<<31-1))
 	return p.send(func() error { return writeFrame(p.conn, h2WindowUpdate, 0, id, payload[:]) })
-}
-
-// windowUpdate sends a WINDOW_UPDATE frame for stream id (0 for the connection).
-func (p *h2peer) windowUpdate(id, incr uint32) {
-	p.t.Helper()
-	if err := p.writeWindowUpdate(id, incr); err != nil {
-		p.t.Fatal(err)
-	}
 }
 
 // writePing writes a PING frame carrying d.
@@ -841,16 +818,6 @@ func (p *h2peer) endErr() error {
 	return p.err
 }
 
-// open fails the test if the server has already ended the connection.
-func (p *h2peer) open() {
-	p.t.Helper()
-	select {
-	case <-p.done:
-		p.t.Fatalf("connection ended before expected: %v", p.status())
-	default:
-	}
-}
-
 // streamEnded matches the frame that ends stream id, by END_STREAM or by RST_STREAM.
 func streamEnded(id uint32) func(h2frame) bool {
 	return func(f h2frame) bool {
@@ -865,17 +832,6 @@ func streamRST(id uint32) func(h2frame) bool {
 
 // goAwayFrame matches any GOAWAY frame.
 func goAwayFrame(f h2frame) bool { return f.Type == h2GoAway }
-
-// onStream returns the frames of fs that belong to stream id, in order.
-func onStream(fs []h2frame, id uint32) []h2frame {
-	var out []h2frame
-	for _, f := range fs {
-		if f.Stream == id {
-			out = append(out, f)
-		}
-	}
-	return out
-}
 
 // dataBytes returns the DATA bytes that fs carries on stream id.
 func dataBytes(fs []h2frame, id uint32) int {
@@ -977,16 +933,6 @@ func finish(c *h2peer, fs []h2frame) h2outcome {
 	return o
 }
 
-// finishEnded waits for the server to close the connection of c, then summarises every frame received.
-func finishEnded(c *h2peer, fs []h2frame) h2outcome {
-	// The server closes the connection after its GOAWAY linger.
-	<-c.done
-	end := endKind(c.endErr())
-	o := outcomeOf(append(fs, drain(c)...))
-	o.End = end
-	return o
-}
-
 // settingsLine renders the server SETTINGS in ID order followed by the connection WINDOW_UPDATE increment.
 func settingsLine(s map[h2SettingID]uint32, incr uint32) string {
 	var parts []string
@@ -1029,28 +975,8 @@ func h2BigProbe(p *probe) http.Handler {
 // h2TailProbe writes 65535 bytes and then 100 bytes, and records that the handler returned.
 func h2TailProbe(p *probe) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(make([]byte, 65535))
-		w.Write(make([]byte, 100))
+		_, _ = w.Write(make([]byte, 65535))
+		_, _ = w.Write(make([]byte, 100))
 		p.set("returned")
-	})
-}
-
-// h2BlockedProbe serves /a, a 32 MiB response whose write deadline is cleared, and /b, a small response with a
-// trailer. It records when /b has returned and when /a has completed.
-func h2BlockedProbe(p *probe) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/a" {
-			http.NewResponseController(w).SetWriteDeadline(time.Time{})
-			if _, err := w.Write(make([]byte, 32<<20)); err != nil {
-				p.set("a-write-error")
-				return
-			}
-			p.set("a-complete")
-			return
-		}
-		w.Header().Set("Trailer", "X-T")
-		io.WriteString(w, "b")
-		w.Header().Set("X-T", "t")
-		p.set("b-returned")
 	})
 }

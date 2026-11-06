@@ -12,10 +12,12 @@ import (
 	"time"
 )
 
+// Fetcher downloads the raw key set of a provider from its URL.
 type Fetcher interface {
 	FetchKeySet(ctx context.Context, provider, keySetURL string) ([]byte, error)
 }
 
+// MaxKeySetBytes is the largest key set response a fetch accepts.
 const MaxKeySetBytes = 1 << 20
 
 type httpFetcher struct {
@@ -23,8 +25,7 @@ type httpFetcher struct {
 	dialer *net.Dialer
 }
 
-// With a nil client the only bound is the caller's context (the key set's fetch
-// timeout on its clock).
+// NewHTTPFetcher returns a Fetcher that uses c. With a nil client the only bound is the caller's context (the key set's fetch timeout on its clock).
 func NewHTTPFetcher(c *http.Client) Fetcher {
 	if c != nil {
 		return &httpFetcher{client: c}
@@ -59,7 +60,7 @@ func (f *httpFetcher) FetchKeySet(ctx context.Context, _, keySetURL string) ([]b
 		}
 		return nil, fmt.Errorf("jwks request failed: %s", redact(inner.Error(), keySetURL))
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.CopyN(io.Discard, resp.Body, 4096)

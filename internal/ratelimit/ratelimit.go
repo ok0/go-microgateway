@@ -24,6 +24,7 @@ import (
 	"github.com/ok0/go-microgateway/store"
 )
 
+// MaxKeyBytes is the longest key Take passes to the store unchanged. Longer keys are replaced by their SHA-256 hex digest.
 const MaxKeyBytes = 128
 
 // OnError selects the failure policy applied when a guarded store call fails.
@@ -126,6 +127,7 @@ type Limiter struct {
 	suppressed atomic.Int64
 }
 
+// PolicyID returns the identifier of the limit l on route: the route, then the first 8 hex digits of a SHA-256 over the limit's algorithm, count, period and burst.
 func PolicyID(route string, l store.Limit) string {
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%d|%d|%d|%d", l.Algorithm, l.Count, int64(l.Period), l.Burst)))
 	return route + ":" + hex.EncodeToString(sum[:])[:8]

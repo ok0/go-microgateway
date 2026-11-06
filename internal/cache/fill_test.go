@@ -59,7 +59,7 @@ func TestStreamingFlushes(t *testing.T) {
 		w.Header().Set("Cache-Control", "max-age=60")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("event: one\n\n"))
-		http.NewResponseController(w).Flush()
+		_ = http.NewResponseController(w).Flush()
 		<-release
 		_, _ = w.Write([]byte("event: two\n\n"))
 		ex.Finish()
@@ -70,7 +70,7 @@ func TestStreamingFlushes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	reader := bufio.NewReader(resp.Body)
 	first := make(chan string, 1)
 	go func() {
@@ -150,7 +150,7 @@ func TestBufferBound(t *testing.T) {
 				if cap(fw.buf) > fw.maxBody {
 					t.Errorf("buffer capacity %d exceeds max_body_bytes %d", cap(fw.buf), fw.maxBody)
 				}
-				if (i+1)*len(chunk) > fw.maxBody && !(fw.buf == nil && !fw.buffering && fw.tooLarge) {
+				if (i+1)*len(chunk) > fw.maxBody && (fw.buf != nil || fw.buffering || !fw.tooLarge) {
 					t.Errorf("after %d bytes the copy is not abandoned: buf=%v buffering=%v tooLarge=%v", (i+1)*len(chunk), fw.buf != nil, fw.buffering, fw.tooLarge)
 				}
 			}

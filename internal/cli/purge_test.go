@@ -32,7 +32,7 @@ func adminPurgePost(t *testing.T, client *http.Client, addr, host, token, body s
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)

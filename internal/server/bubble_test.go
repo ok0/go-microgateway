@@ -56,7 +56,7 @@ func (m *memNet) close() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, ln := range m.lns {
-		ln.Close()
+		_ = ln.Close()
 	}
 }
 
@@ -101,7 +101,7 @@ func startBubbleGateway(t *testing.T, m *memNet, cfg *config.Config, h http.Hand
 	t.Cleanup(func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		srv.Shutdown(ctx)
+		_ = srv.Shutdown(ctx)
 	})
 	return srv
 }
@@ -142,11 +142,11 @@ func startBubbleStock(t *testing.T, m *memNet, w bubbleWire, lim [4]time.Duratio
 		t.Fatal(err)
 	}
 	if w.tls {
-		go srv.ServeTLS(ln, "", "")
+		go func() { _ = srv.ServeTLS(ln, "", "") }()
 	} else {
-		go srv.Serve(ln)
+		go func() { _ = srv.Serve(ln) }()
 	}
-	t.Cleanup(func() { srv.Close() })
+	t.Cleanup(func() { _ = srv.Close() })
 	return ln.Addr().String()
 }
 

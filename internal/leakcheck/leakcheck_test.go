@@ -14,7 +14,7 @@ type masked string
 
 func (masked) String() string { return "***" }
 
-func (masked) Format(f fmt.State, _ rune) { fmt.Fprint(f, "***") }
+func (masked) Format(f fmt.State, _ rune) { _, _ = fmt.Fprint(f, "***") }
 
 func (masked) MarshalJSON() ([]byte, error) { return []byte(`"***"`), nil }
 
@@ -24,7 +24,7 @@ type opaque struct{ b *struct{ v string } }
 
 func (opaque) String() string { return "***" }
 
-func (opaque) Format(f fmt.State, _ rune) { fmt.Fprint(f, "***") }
+func (opaque) Format(f fmt.State, _ rune) { _, _ = fmt.Fprint(f, "***") }
 
 func (opaque) MarshalJSON() ([]byte, error) { return []byte(`"***"`), nil }
 
@@ -206,11 +206,11 @@ func TestFillAndReaches(t *testing.T) {
 		A *inner
 		L []int
 		M map[string]bool
-		u int
+		u int //nolint:unused // read by Fill through reflection; the field is unexported on purpose
 	}
 	type node struct{ Next *node }
 	type viaMap struct{ M map[string]target }
-	type viaUnexported struct{ u *target }
+	type viaUnexported struct{ u *target } //nolint:unused // read by Reaches through reflection; the field is unexported on purpose
 	type unrelated struct{ X int }
 
 	v := Fill(reflect.TypeFor[filled](), noLeaf)

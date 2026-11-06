@@ -111,7 +111,7 @@ func Storable(req *http.Request, resp ResponseMeta, o Options) (bool, string) {
 		}
 	}
 	credentialed := len(req.Header.Values("Authorization")) > 0 || (o.Credential != nil && o.Credential(req))
-	if credentialed && !(d.Public || d.SMaxAge.Present || d.MustRevalidate) {
+	if credentialed && !d.Public && !d.SMaxAge.Present && !d.MustRevalidate {
 		return false, ReasonCredentialed
 	}
 	l := lifetime(d, resp.Header, resp.ResponseTime, true, o)

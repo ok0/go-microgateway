@@ -21,11 +21,13 @@ const maxProbeDrain = 64 << 10
 
 var errNilRand = errors.New("health: random source is required")
 
+// Target is one upstream host probed by a Checker. Key identifies the host in the callbacks, and URL supplies the scheme and host of each probe request.
 type Target struct {
 	Key string
 	URL *url.URL
 }
 
+// CheckerDeps supplies the clock, the random source for probe jitter and the optional callbacks of a Checker. Rand is required and Clock defaults to the real clock. OnProbe runs after every probe and OnChange runs when a host changes between healthy and unhealthy.
 type CheckerDeps struct {
 	Clock    clock.Clock
 	Rand     clock.Rand
@@ -33,6 +35,7 @@ type CheckerDeps struct {
 	OnChange func(key string, healthy bool, st ActiveStatus)
 }
 
+// ActiveStatus is the active-check state of one host as returned by Status.Snapshot. State is "unknown" before the first probe, then "healthy" or "unhealthy".
 type ActiveStatus struct {
 	State               string
 	ConsecutivePasses   int
@@ -44,6 +47,7 @@ type statusRange struct {
 	lo, hi int
 }
 
+// Checker probes a set of upstream hosts on a jittered schedule. Each host has its own goroutine; SetTargets starts and stops them and Close stops all of them. Checker is safe for concurrent use.
 type Checker struct {
 	mu         sync.Mutex
 	closed     bool
@@ -69,12 +73,14 @@ type prober struct {
 	done   chan struct{}
 }
 
+// Status holds the active-check result of one host. It is safe for concurrent use.
 type Status struct {
 	mu      sync.Mutex
 	healthy atomic.Bool
 	st      ActiveStatus
 }
 
+// NewChecker returns a Checker for cfg. It fails when d.Rand is nil or an expected status range is malformed. Unset jitter, healthy threshold and unhealthy threshold default to 0.1, 2 and 3.
 func NewChecker(cfg config.ActiveHealth, d CheckerDeps) (*Checker, error) {
 	if d.Rand == nil {
 		return nil, errNilRand
@@ -119,6 +125,7 @@ func NewChecker(cfg config.ActiveHealth, d CheckerDeps) (*Checker, error) {
 	}, nil
 }
 
+// SetTargets replaces the probed hosts with ts and uses rt for every probe. A host that stays in the set keeps its status, a new host starts in the unknown state, and a removed host is stopped before SetTargets returns. It does nothing after Close.
 func (c *Checker) SetTargets(ts []Target, rt http.RoundTripper) {
 	c.mu.Lock()
 	if c.closed {
@@ -151,6 +158,7 @@ func (c *Checker) SetTargets(ts []Target, rt http.RoundTripper) {
 	}
 }
 
+// Status returns the status of the host with the given key, or nil when that key is not probed.
 func (c *Checker) Status(key string) *Status {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -160,6 +168,7 @@ func (c *Checker) Status(key string) *Status {
 	return nil
 }
 
+// Close stops every probe goroutine and waits for them to exit. It is idempotent and always returns nil.
 func (c *Checker) Close() error {
 	c.mu.Lock()
 	if c.closed {
@@ -179,10 +188,12 @@ func (c *Checker) Close() error {
 	return nil
 }
 
+// Healthy reports the current health decision for the host. It is true until the host becomes unhealthy and is true again once it recovers.
 func (s *Status) Healthy() bool {
 	return s.healthy.Load()
 }
 
+// Snapshot returns a copy of the active-check state of the host.
 func (s *Status) Snapshot() ActiveStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()

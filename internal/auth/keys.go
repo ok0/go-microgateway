@@ -9,6 +9,7 @@ import (
 	"github.com/ok0/go-microgateway/internal/authkey"
 )
 
+// Key is a verification key: its id, the algorithm it is bound to or the algorithms it allows, and the key material.
 type Key struct {
 	ID        string
 	Algorithm string
@@ -16,14 +17,17 @@ type Key struct {
 	Material  any
 }
 
+// KeySource returns the verification key for a key id. An empty kid asks for the only key.
 type KeySource interface {
 	Lookup(ctx context.Context, kid string) (Key, error)
 }
 
+// StaticKeys is a KeySource over keys fixed at configuration time.
 type StaticKeys struct {
 	keys []Key
 }
 
+// NewStaticKeys returns a StaticKeys for keys. It errors when a key has no algorithm or invalid material, or when two keys share an id.
 func NewStaticKeys(keys []Key) (*StaticKeys, error) {
 	seen := make(map[string]bool, len(keys))
 	for _, k := range keys {
@@ -44,6 +48,7 @@ func NewStaticKeys(keys []Key) (*StaticKeys, error) {
 	return &StaticKeys{keys: slices.Clone(keys)}, nil
 }
 
+// Lookup returns the key with id kid. An empty kid selects the key only when exactly one key is configured. Otherwise it returns ErrUnknownKID.
 func (s *StaticKeys) Lookup(_ context.Context, kid string) (Key, error) {
 	if kid != "" {
 		for _, k := range s.keys {
@@ -59,6 +64,7 @@ func (s *StaticKeys) Lookup(_ context.Context, kid string) (Key, error) {
 	return Key{}, ErrUnknownKID
 }
 
+// Len returns the number of configured keys. A nil StaticKeys has none.
 func (s *StaticKeys) Len() int {
 	if s == nil {
 		return 0
@@ -66,11 +72,13 @@ func (s *StaticKeys) Len() int {
 	return len(s.keys)
 }
 
+// Combined is a KeySource over static keys and a JWKS, either of which may be nil.
 type Combined struct {
 	Static *StaticKeys
 	JWKS   *JWKS
 }
 
+// Lookup returns the key with id kid, trying the static keys first and then the JWKS. An empty kid selects the key only when the static keys and the JWKS hold exactly one key between them.
 func (c *Combined) Lookup(ctx context.Context, kid string) (Key, error) {
 	if kid != "" {
 		if c.Static != nil {

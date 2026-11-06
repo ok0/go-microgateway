@@ -9,7 +9,6 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -541,7 +540,7 @@ func TestKeyFiles(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, "keys.yaml", "keys:\n  - id: f\n    hash: \"sha256:dff38ba3323b08b8f7a333da8f5b561106e69523bfdd4fa46e89eeb3d1a7e84a\"\n    consumer: f\n")
 	writeTestFile(t, dir, "pub.pem", ed25519PublicPEM(t))
-	src := minimalYAML + fmt.Sprintf(`auth:
+	src := minimalYAML + `auth:
   jwt:
     - name: pk
       issuer: https://auth.example.com
@@ -556,7 +555,7 @@ func TestKeyFiles(t *testing.T) {
   api_keys:
     - name: file
       key_file: keys.yaml
-`)
+`
 	path := writeTestFile(t, dir, "microgateway.yaml", src)
 	c, err := LoadFile(path)
 	if err != nil {

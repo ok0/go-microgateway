@@ -100,7 +100,7 @@ func seqValue(t time.Time) string {
 	case !t.After(time.Unix(1, 0)):
 		return "-"
 	}
-	d := t.Sub(time.Now())
+	d := time.Until(t)
 	switch {
 	case d > 0:
 		return "+" + d.String()
@@ -322,8 +322,8 @@ func seqStock(t *testing.T, kind string, lim seqLimits, h http.Handler) (string,
 		srvLn = tls.NewListener(ln, cfg)
 	}
 	srv.Protocols = &protos
-	go srv.Serve(srvLn)
-	t.Cleanup(func() { srv.Close() })
+	go func() { _ = srv.Serve(srvLn) }()
+	t.Cleanup(func() { _ = srv.Close() })
 	return raw.Addr().String(), ln, m
 }
 
@@ -334,13 +334,13 @@ func seqHandler(script string) http.Handler {
 			if err != nil {
 				return
 			}
-			io.WriteString(buf, "HTTP/1.1 101 Switching Protocols\r\n\r\n")
-			buf.Flush()
-			conn.Close()
+			_, _ = io.WriteString(buf, "HTTP/1.1 101 Switching Protocols\r\n\r\n")
+			_ = buf.Flush()
+			_ = conn.Close()
 			return
 		}
-		io.ReadAll(r.Body)
-		io.WriteString(w, "ok")
+		_, _ = io.ReadAll(r.Body)
+		_, _ = io.WriteString(w, "ok")
 	})
 }
 
@@ -364,7 +364,7 @@ func seqReadOK(br *bufio.Reader) error {
 		return err
 	}
 	body, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if err != nil {
 		return err
 	}
@@ -430,7 +430,7 @@ func seqDrive(t *testing.T, kind, script, addr string, ln *seqListener, m *memNe
 	if err != nil {
 		t.Fatal(err)
 	}
-	guard := time.AfterFunc(bubbleGuard, func() { raw.Close() })
+	guard := time.AfterFunc(bubbleGuard, func() { _ = raw.Close() })
 	switch script {
 	case "keepalive":
 		var conn net.Conn
@@ -472,7 +472,7 @@ func seqRecord(t *testing.T, kind, script string, lim seqLimits, gateway bool) [
 		addr, ln, m = seqStock(t, kind, lim, seqHandler(script))
 	}
 	raw := seqDrive(t, kind, script, addr, ln, m)
-	defer raw.Close()
+	defer func() { _ = raw.Close() }()
 	tr := ln.last()
 	if tr == nil {
 		t.Fatal("no connection was accepted")
@@ -553,7 +553,7 @@ func seqGateway(t *testing.T, kind string, lim seqLimits, h http.Handler, fake *
 	t.Cleanup(func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		srv.Shutdown(ctx)
+		_ = srv.Shutdown(ctx)
 	})
 	return srv.Addrs()["public"].String(), spy, m
 }

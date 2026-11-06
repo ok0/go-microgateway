@@ -124,14 +124,14 @@ func TestEarlyBodyCloseResponseComplete(t *testing.T) {
 	fake := clock.NewFake(serverStart)
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		io.WriteString(w, "denied")
+		_, _ = io.WriteString(w, "denied")
 	})
 	srv := startServer(t, limitCfg(t), h, nil, nil, WithClock(fake))
 	conn := dialRaw(t, srv.Addrs()["public"].String())
 	const size = 4 << 20
 	go func() {
 		writeString(t, conn, "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 4194304\r\n\r\n")
-		conn.Write(make([]byte, size))
+		_, _ = conn.Write(make([]byte, size))
 	}()
 	br := bufio.NewReader(conn)
 	status, body := readResponse(t, br)
@@ -181,7 +181,7 @@ func TestHTTP2GracefulShutdownCompletesStreams(t *testing.T) {
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		entered <- struct{}{}
 		<-release
-		io.WriteString(w, body)
+		_, _ = io.WriteString(w, body)
 	})
 	srv := startServer(t, limitCfg(t, tlsOn(certFile, keyFile, true)), h, nil, nil, WithClock(fake))
 	addr := srv.Addrs()["public"].String()
@@ -200,7 +200,7 @@ func TestHTTP2GracefulShutdownCompletesStreams(t *testing.T) {
 			return
 		}
 		b, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		got <- result{status: resp.StatusCode, body: string(b), err: err}
 	}()
 	testwait.Done(t, "slow handler entered", entered, nil)
@@ -230,7 +230,7 @@ func TestShutdownKeepsYoungSilentNewConn(t *testing.T) {
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		entered <- struct{}{}
 		<-release
-		io.WriteString(w, "ok")
+		_, _ = io.WriteString(w, "ok")
 	})
 	srv := startServer(t, cfg, h, nil, nil, WithClock(fake))
 	addr := srv.Addrs()["public"].String()
@@ -282,7 +282,7 @@ func TestShutdownClosesSilentNewConnAfterFiveSeconds(t *testing.T) {
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		entered <- struct{}{}
 		<-release
-		io.WriteString(w, "ok")
+		_, _ = io.WriteString(w, "ok")
 	})
 	// Real clock: net/http's Shutdown counts a StateNew connection as idle only after 5 s of wall time.
 	srv := startServer(t, cfg, h, nil, nil, WithClock(clock.Real()))

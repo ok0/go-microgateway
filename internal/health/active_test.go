@@ -311,7 +311,7 @@ func TestOneProbeInFlight(t *testing.T) {
 		h.blockUntil(t, 1)
 		h.clk.Advance(probeInterval)
 	}
-	h.c.Close()
+	_ = h.c.Close()
 	if calls.Load() == 0 {
 		t.Fatal("no probe was issued")
 	}

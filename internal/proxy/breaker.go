@@ -14,6 +14,7 @@ import (
 
 type stageKey struct{}
 
+// BreakerStage returns middleware that admits each request through the aggregate circuit breaker of up. A request the breaker refuses is answered with 503 and the circuit-open error code. Otherwise the breaker outcome is taken from the response status: 5xx is a failure, 4xx is ignored, and any other response is a success.
 func BreakerStage(up *upstream.Upstream) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

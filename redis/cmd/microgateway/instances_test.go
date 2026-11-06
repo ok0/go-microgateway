@@ -147,7 +147,7 @@ func recordingBackend(t *testing.T) *recordingOrigin {
 		o.mu.Unlock()
 		w.Header().Set("Cache-Control", "max-age=3600")
 		w.Header().Set("ETag", `"v1"`)
-		fmt.Fprint(w, "ok")
+		_, _ = fmt.Fprint(w, "ok")
 	}))
 	t.Cleanup(srv.Close)
 	o.url = srv.URL
@@ -178,7 +178,7 @@ func postAdminPurge(t *testing.T, addr, token, body string) (int, []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	out, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
@@ -198,7 +198,7 @@ func cacheGet(t *testing.T, base string) *http.Response {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if _, err := io.ReadAll(resp.Body); err != nil {
 		t.Fatal(err)
 	}

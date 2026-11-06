@@ -14,6 +14,7 @@ import (
 	"github.com/ok0/go-microgateway/internal/reqctx"
 )
 
+// JWTConfig configures a JWT: the expected issuer and audiences, the header and accepted algorithms, the claims holding scopes and roles, and the claims forwarded upstream.
 type JWTConfig struct {
 	Name               string
 	Issuer             string
@@ -28,6 +29,7 @@ type JWTConfig struct {
 	ForwardCredentials bool
 }
 
+// JWT is an Authenticator that verifies a signed bearer token against a KeySource.
 type JWT struct {
 	cfg    JWTConfig
 	keys   KeySource
@@ -39,6 +41,7 @@ var (
 	errAlgMismatch = errors.New("algorithm does not match key")
 )
 
+// NewJWT returns a JWT for c, verifying keys from keys and checking expiry against clk (nil: the real clock). It returns an error when c or keys is incomplete or an algorithm is unsupported.
 func NewJWT(c JWTConfig, keys KeySource, clk clock.Clock) (*JWT, error) {
 	if c.Name == "" {
 		return nil, errors.New("jwt: name is required")
@@ -82,22 +85,27 @@ func NewJWT(c JWTConfig, keys KeySource, clk clock.Clock) (*JWT, error) {
 	return &JWT{cfg: c, keys: keys, parser: parser}, nil
 }
 
+// Name returns the configured name of the authenticator.
 func (j *JWT) Name() string {
 	return j.cfg.Name
 }
 
+// Challenge returns the scheme sent in the WWW-Authenticate header when a request is rejected.
 func (j *JWT) Challenge() string {
 	return "Bearer"
 }
 
+// Credentials returns the header the token is read from; a JWT has no query parameter.
 func (j *JWT) Credentials() (string, string) {
 	return j.cfg.Header, ""
 }
 
+// ForwardCredentials reports whether the presented token is forwarded upstream.
 func (j *JWT) ForwardCredentials() bool {
 	return j.cfg.ForwardCredentials
 }
 
+// Authenticate verifies the bearer token in the configured header and returns its identity, scopes, roles and forwarded claims. A token that fails any check yields an error with the matching Reason.
 func (j *JWT) Authenticate(r *http.Request) (Result, error) {
 	vals := r.Header.Values(j.cfg.Header)
 	if len(vals) == 0 {

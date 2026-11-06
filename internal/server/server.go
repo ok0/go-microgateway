@@ -251,8 +251,9 @@ func (s *Server) Start() error {
 	for _, l := range all {
 		ln, err := s.listen("tcp", l.address)
 		if err != nil {
+			// The listen error is returned; the listeners opened so far are closed on a best-effort basis.
 			for _, open := range lns {
-				open.Close()
+				_ = open.Close()
 			}
 			return fmt.Errorf("listener %q: %w", l.name, err)
 		}
@@ -340,11 +341,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	forced := !drained || drainCtx.Err() != nil
 	// Close the servers before canceling the base context so that handlers whose requests are canceled
 	// cannot return with an implicit 200 to a connection that is still open.
+	// Close errors are ignored: the listeners are shut down either way.
 	for _, l := range s.data {
-		l.srv.Close()
+		_ = l.srv.Close()
 	}
 	if s.admin != nil {
-		s.admin.srv.Close()
+		_ = s.admin.srv.Close()
 	}
 	s.cancel()
 	cancel()

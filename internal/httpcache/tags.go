@@ -8,11 +8,13 @@ import (
 // Delimiter separates the tags of a tag header.
 type Delimiter uint8
 
+// Delimiter values for ParseTags: DelimSpace separates tags by spaces and tabs, DelimComma by commas.
 const (
 	DelimSpace Delimiter = iota
 	DelimComma
 )
 
+// Limits enforced by ParseTags on the size of a tag header, on each tag, and on the number of distinct tags.
 const (
 	MaxTagHeaderBytes = 16 << 10
 	MaxTagBytes       = 1 << 10

@@ -94,7 +94,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 		o.Logger.Warn("file events unavailable; polling only", "error", err, "poll_interval", o.PollInterval)
 	} else {
 		src = es
-		defer src.Close()
+		defer func() { _ = src.Close() }()
 	}
 	var events <-chan fsnotify.Event
 	var errs <-chan error

@@ -1561,8 +1561,8 @@ func TestProbeExhaustionRepicks(t *testing.T) {
 	}
 	u.Record(h, tok, health.Success)
 
-	control.Acquire(nil, nil, false)
-	control.Acquire(nil, nil, false)
+	_, _, _ = control.Acquire(nil, nil, false)
+	_, _, _ = control.Acquire(nil, nil, false)
 	for i := 0; i < 4; i++ {
 		got, _, err := u.Acquire(nil, nil, false)
 		if err != nil {

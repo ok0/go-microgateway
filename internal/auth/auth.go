@@ -12,8 +12,10 @@ import (
 	"github.com/ok0/go-microgateway/internal/reqctx"
 )
 
+// Reason classifies why an authentication attempt failed. It is the Reason of an *Error.
 type Reason string
 
+// Reasons of an authentication failure, as returned by ReasonOf.
 const (
 	ReasonMissing         Reason = "missing"
 	ReasonMalformed       Reason = "malformed"
@@ -28,6 +30,7 @@ const (
 	ReasonForbidden       Reason = "forbidden"
 )
 
+// Sentinel errors of authentication, matched with errors.Is.
 var (
 	ErrNoCredentials   = errors.New("auth: no credentials presented")
 	ErrInvalid         = errors.New("auth: invalid credentials")
@@ -35,11 +38,13 @@ var (
 	ErrKeysUnavailable = errors.New("auth: verification keys unavailable")
 )
 
+// Error is an authentication failure carrying its Reason and the underlying cause, if any.
 type Error struct {
 	Reason Reason
 	Err    error
 }
 
+// Error returns the reason and the cause, if any, as text.
 func (e *Error) Error() string {
 	if e.Err == nil {
 		return "auth: " + string(e.Reason)
@@ -47,6 +52,7 @@ func (e *Error) Error() string {
 	return "auth: " + string(e.Reason) + ": " + e.Err.Error()
 }
 
+// Unwrap returns ErrInvalid and, when set, the underlying cause, so errors.Is matches both.
 func (e *Error) Unwrap() []error {
 	if e.Err == nil {
 		return []error{ErrInvalid}
@@ -54,10 +60,12 @@ func (e *Error) Unwrap() []error {
 	return []error{ErrInvalid, e.Err}
 }
 
+// Fail returns an *Error with the given reason and cause.
 func Fail(reason Reason, err error) error {
 	return &Error{Reason: reason, Err: err}
 }
 
+// ReasonOf returns the Reason of err: ReasonMissing for ErrNoCredentials, the reason of an *Error, ReasonMalformed for any other error, and the empty Reason for nil.
 func ReasonOf(err error) Reason {
 	if err == nil {
 		return ""
@@ -72,6 +80,7 @@ func ReasonOf(err error) Reason {
 	return ReasonMalformed
 }
 
+// Result is the outcome of a successful authentication: the identity, its scopes and roles, extra values, and headers to forward upstream.
 type Result struct {
 	Identity reqctx.Identity
 	Scopes   []string
@@ -80,6 +89,7 @@ type Result struct {
 	Forward  map[string]string
 }
 
+// Authenticator verifies the credentials of one authentication scheme, such as JWT or API key.
 type Authenticator interface {
 	Name() string
 	Challenge() string

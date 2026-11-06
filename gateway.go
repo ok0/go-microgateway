@@ -29,6 +29,7 @@ import (
 // ErrClosed is returned by Reload, ReloadYAML, ReloadFile, WatchFile and Purge after Close.
 var ErrClosed = errors.New("microgateway: gateway closed")
 
+// Gateway is an http.Handler built from a validated configuration. It is safe for concurrent use.
 type Gateway struct {
 	cur      atomic.Pointer[generation]
 	mu       sync.Mutex // serializes reloads and Close
@@ -50,6 +51,7 @@ type Gateway struct {
 	liveGens map[*generation]struct{}
 }
 
+// Option configures a Gateway built by New or NewFromYAML.
 type Option func(*options)
 
 type options struct {
@@ -112,12 +114,14 @@ func init() {
 	}
 }
 
+// WithLogger sets the logger the gateway writes to. Without it, the process default logger is used.
 func WithLogger(l *slog.Logger) Option {
 	return func(o *options) {
 		o.logger = l
 	}
 }
 
+// WithEnvLookup replaces the lookup used for ${VAR} substitution in the configuration. Without it, substitution reads the process environment.
 func WithEnvLookup(f func(string) (string, bool)) Option {
 	return func(o *options) {
 		o.lookup = f
@@ -171,6 +175,7 @@ func (o options) middlewareRegistry() (*middleware.Registry, error) {
 	return reg, nil
 }
 
+// New builds a gateway serving cfg. cfg is cloned and validated before use; New returns an error when cfg is nil or invalid.
 func New(cfg *config.Config, opts ...Option) (*Gateway, error) {
 	if cfg == nil {
 		return nil, errors.New("microgateway: nil config")
@@ -248,6 +253,7 @@ func NewFromYAML(data []byte, opts ...Option) (*Gateway, error) {
 	return New(cfg, opts...)
 }
 
+// ServeHTTP serves r with the current configuration generation. Requests that arrive after Close receive 503.
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for {
 		gen := g.cur.Load()

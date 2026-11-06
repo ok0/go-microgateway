@@ -103,7 +103,7 @@ func statusOf(client *http.Client, url string) int {
 	if err != nil {
 		return -1
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return resp.StatusCode
 }
@@ -136,7 +136,7 @@ func serialOf(client *http.Client, addr string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
 		return 0, err
 	}

@@ -57,6 +57,7 @@ type Env struct {
 
 // Main runs one invocation and returns its exit code. It never exits the process. opts are passed to every
 // gateway the invocation builds or validates, after the command's own options.
+// Write errors on the Stdout and Stderr writers and errors from closing the gateway are ignored; the returned exit code is the result.
 func Main(ctx context.Context, env Env, opts ...microgateway.Option) int {
 	stdout, stderr := env.Stdout, env.Stderr
 	if stdout == nil {
@@ -71,7 +72,7 @@ func Main(ctx context.Context, env Env, opts ...microgateway.Option) int {
 	}
 	args := env.Args
 	if len(args) == 0 {
-		fmt.Fprint(stderr, usage)
+		_, _ = fmt.Fprint(stderr, usage)
 		return 2
 	}
 	switch args[0] {
@@ -80,14 +81,14 @@ func Main(ctx context.Context, env Env, opts ...microgateway.Option) int {
 	case "run":
 		return runServe(ctx, args[1:], stdout, stderr, lookup, env.Signals, env.Ready, env.Clock, opts)
 	case "version":
-		fmt.Fprintf(stdout, "microgateway %s (commit %s, built %s)\n", version, commit, date)
+		_, _ = fmt.Fprintf(stdout, "microgateway %s (commit %s, built %s)\n", version, commit, date)
 		return 0
 	case "help", "-h", "--help":
-		fmt.Fprint(stdout, usage)
+		_, _ = fmt.Fprint(stdout, usage)
 		return 0
 	default:
-		fmt.Fprintf(stderr, "microgateway: unknown command %q\n", args[0])
-		fmt.Fprint(stderr, usage)
+		_, _ = fmt.Fprintf(stderr, "microgateway: unknown command %q\n", args[0])
+		_, _ = fmt.Fprint(stderr, usage)
 		return 2
 	}
 }
@@ -103,18 +104,18 @@ func runValidate(args []string, stdout, stderr io.Writer, lookup func(string) (s
 		return 2
 	}
 	if fs.NArg() > 0 {
-		fmt.Fprintf(stderr, "microgateway validate: unexpected argument %q\n", fs.Arg(0))
+		_, _ = fmt.Fprintf(stderr, "microgateway validate: unexpected argument %q\n", fs.Arg(0))
 		return 2
 	}
 	if *path == "" {
-		fmt.Fprintln(stderr, "microgateway validate: -config is required")
+		_, _ = fmt.Fprintln(stderr, "microgateway validate: -config is required")
 		return 2
 	}
 	cfg, err := loadConfig(*path, lookup, opts)
 	if err != nil {
 		return printLoadError(stderr, "validate", *path, err)
 	}
-	fmt.Fprintf(stdout, "%s: configuration is valid (%d listeners, %d upstreams, %d routes)\n",
+	_, _ = fmt.Fprintf(stdout, "%s: configuration is valid (%d listeners, %d upstreams, %d routes)\n",
 		*path, len(cfg.Listeners), len(cfg.Upstreams), len(cfg.Routes))
 	return 0
 }
@@ -138,12 +139,12 @@ func printLoadError(stderr io.Writer, cmd, path string, err error) int {
 	var ve *config.ValidationError
 	if errors.As(err, &ve) {
 		for _, fe := range ve.Errors {
-			fmt.Fprintln(stderr, fe.String())
+			_, _ = fmt.Fprintln(stderr, fe.String())
 		}
-		fmt.Fprintf(stderr, "%s: %d error(s)\n", path, len(ve.Errors))
+		_, _ = fmt.Fprintf(stderr, "%s: %d error(s)\n", path, len(ve.Errors))
 		return 1
 	}
-	fmt.Fprintf(stderr, "microgateway %s: %v\n", cmd, err)
+	_, _ = fmt.Fprintf(stderr, "microgateway %s: %v\n", cmd, err)
 	return 1
 }
 
@@ -160,21 +161,21 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, look
 		return 2
 	}
 	if fs.NArg() > 0 {
-		fmt.Fprintf(stderr, "microgateway run: unexpected argument %q\n", fs.Arg(0))
+		_, _ = fmt.Fprintf(stderr, "microgateway run: unexpected argument %q\n", fs.Arg(0))
 		return 2
 	}
 	if *path == "" {
-		fmt.Fprintln(stderr, "microgateway run: -config is required")
+		_, _ = fmt.Fprintln(stderr, "microgateway run: -config is required")
 		return 2
 	}
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 	if set["log-level"] && !slices.Contains([]string{"debug", "info", "warn", "error"}, *logLevel) {
-		fmt.Fprintf(stderr, "microgateway run: invalid -log-level %q\n", *logLevel)
+		_, _ = fmt.Fprintf(stderr, "microgateway run: invalid -log-level %q\n", *logLevel)
 		return 2
 	}
 	if set["log-format"] && !slices.Contains([]string{"json", "text"}, *logFormat) {
-		fmt.Fprintf(stderr, "microgateway run: invalid -log-format %q\n", *logFormat)
+		_, _ = fmt.Fprintf(stderr, "microgateway run: invalid -log-format %q\n", *logFormat)
 		return 2
 	}
 
@@ -211,8 +212,8 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, look
 	}
 	srv, err := server.New(cfg, g, admin, g.SetReady, logger, server.WithCertificates(certs), server.WithClock(clk))
 	if err != nil {
-		fmt.Fprintf(stderr, "microgateway run: %v\n", err)
-		g.Close()
+		_, _ = fmt.Fprintf(stderr, "microgateway run: %v\n", err)
+		_ = g.Close()
 		return 1
 	}
 	sig := signals
@@ -225,8 +226,8 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, look
 	}
 
 	if err := srv.Start(); err != nil {
-		fmt.Fprintf(stderr, "microgateway run: %v\n", err)
-		g.Close()
+		_, _ = fmt.Fprintf(stderr, "microgateway run: %v\n", err)
+		_ = g.Close()
 		return 1
 	}
 
@@ -254,7 +255,7 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, look
 	watchDone := make(chan error, 1)
 	go func() { watchDone <- w.Run(watchCtx) }()
 
-	var ctxDone <-chan struct{} = ctx.Done()
+	ctxDone := ctx.Done()
 	code := 0
 	var stopSig os.Signal
 wait:
@@ -319,7 +320,7 @@ wait:
 			code = 1
 		}
 	}
-	g.Close()
+	_ = g.Close()
 	logger.Info("stopped")
 	return code
 }

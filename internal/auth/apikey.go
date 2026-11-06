@@ -12,6 +12,7 @@ import (
 	"github.com/ok0/go-microgateway/internal/reqctx"
 )
 
+// APIKeyEntry is one accepted API key: its consumer, the SHA-256 hash of the key, and the metadata, scopes and roles it grants.
 type APIKeyEntry struct {
 	ID       string
 	Consumer string
@@ -21,6 +22,7 @@ type APIKeyEntry struct {
 	Roles    []string
 }
 
+// APIKeyConfig configures an APIKey: where the key is read from, the accepted keys, and which values are forwarded upstream.
 type APIKeyConfig struct {
 	Name               string
 	Header             string
@@ -31,11 +33,13 @@ type APIKeyConfig struct {
 	ForwardCredentials bool
 }
 
+// APIKey is an Authenticator that checks an API key read from a header or a query parameter.
 type APIKey struct {
 	cfg    APIKeyConfig
 	hashes [][32]byte
 }
 
+// NewAPIKey returns an APIKey for c.
 func NewAPIKey(c APIKeyConfig) *APIKey {
 	hashes := make([][32]byte, len(c.Keys))
 	for i, k := range c.Keys {
@@ -44,6 +48,7 @@ func NewAPIKey(c APIKeyConfig) *APIKey {
 	return &APIKey{cfg: c, hashes: hashes}
 }
 
+// MatchKey returns the index of the hash equal to the SHA-256 of presented, and whether one matched. Every hash is compared in constant time.
 func MatchKey(hashes [][32]byte, presented string) (index int, ok bool) {
 	if len(hashes) == 0 || presented == "" {
 		return -1, false
@@ -59,22 +64,27 @@ func MatchKey(hashes [][32]byte, presented string) (index int, ok bool) {
 	return idx, found == 1
 }
 
+// Name returns the configured name of the authenticator.
 func (k *APIKey) Name() string {
 	return k.cfg.Name
 }
 
+// Challenge returns the scheme sent in the WWW-Authenticate header when a request is rejected.
 func (k *APIKey) Challenge() string {
 	return "ApiKey"
 }
 
+// Credentials returns the header and the query parameter the API key is read from.
 func (k *APIKey) Credentials() (header, query string) {
 	return k.cfg.Header, k.cfg.Query
 }
 
+// ForwardCredentials reports whether the presented API key is forwarded upstream.
 func (k *APIKey) ForwardCredentials() bool {
 	return k.cfg.ForwardCredentials
 }
 
+// Authenticate checks the API key in the header, or else in the query parameter. It returns ErrNoCredentials when no key is presented, and an error with ReasonInvalidKey when the key matches no entry.
 func (k *APIKey) Authenticate(r *http.Request) (Result, error) {
 	var v string
 	if k.cfg.Header != "" {

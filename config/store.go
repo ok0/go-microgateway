@@ -197,17 +197,19 @@ func (s *Store) BackendFingerprint() string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// hash.Hash writes never fail, so their errors are ignored.
 func writeFingerprintPart(h hash.Hash, v any) {
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(v); err != nil {
-		fmt.Fprintf(h, "unencodable %T\n", v)
+		_, _ = fmt.Fprintf(h, "unencodable %T\n", v)
 		return
 	}
 	h.Write(buf.Bytes())
 }
 
+// hash.Hash writes never fail, so their errors are ignored.
 func writeLengthPrefixed(h hash.Hash, s string) {
-	fmt.Fprintf(h, "%d:%s;", len(s), s)
+	_, _ = fmt.Fprintf(h, "%d:%s;", len(s), s)
 }
 
 // Clone returns a deep copy of r that shares no mutable data with r. It returns nil for nil.

@@ -160,7 +160,7 @@ func gcMalformed(t *testing.T, secret string) string {
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				_, _ = io.WriteString(c, "%malformed "+secret+"\r\n")
 			}(c)
 		}

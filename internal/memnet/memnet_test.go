@@ -32,8 +32,8 @@ func assertDeadline(t *testing.T, err error) {
 func TestPipeBufferedWrite(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		client, server := Pipe(16)
-		defer client.Close()
-		defer server.Close()
+		defer func() { _ = client.Close() }()
+		defer func() { _ = server.Close() }()
 		n, err := client.Write([]byte("0123456789"))
 		if n != 10 || err != nil {
 			t.Fatalf("Write = %d, %v; want 10, nil", n, err)
@@ -51,8 +51,8 @@ func TestPipeBufferedWrite(t *testing.T) {
 func TestPipeUnbufferedWriteWaitsForRead(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		client, server := Pipe(0)
-		defer client.Close()
-		defer server.Close()
+		defer func() { _ = client.Close() }()
+		defer func() { _ = server.Close() }()
 		res := make(chan ioResult, 1)
 		go func() {
 			n, err := client.Write([]byte("hello"))
@@ -94,8 +94,8 @@ func TestPipeUnbufferedWriteWaitsForRead(t *testing.T) {
 func TestPipeWriteBeyondBufferBlocks(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		client, server := Pipe(4)
-		defer client.Close()
-		defer server.Close()
+		defer func() { _ = client.Close() }()
+		defer func() { _ = server.Close() }()
 		res := make(chan ioResult, 1)
 		go func() {
 			n, err := client.Write([]byte("0123456789"))
@@ -123,8 +123,8 @@ func TestPipeWriteBeyondBufferBlocks(t *testing.T) {
 func TestPipeLoweredReadBufferStallsPeer(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		client, server := Pipe(64)
-		defer client.Close()
-		defer server.Close()
+		defer func() { _ = client.Close() }()
+		defer func() { _ = server.Close() }()
 		if err := client.SetReadBuffer(4); err != nil {
 			t.Fatal(err)
 		}
@@ -156,8 +156,8 @@ func TestPipeLoweredReadBufferStallsPeer(t *testing.T) {
 func TestPipeDeadlines(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		client, server := Pipe(0)
-		defer client.Close()
-		defer server.Close()
+		defer func() { _ = client.Close() }()
+		defer func() { _ = server.Close() }()
 
 		start := time.Now()
 		if err := server.SetReadDeadline(start.Add(time.Second)); err != nil {
@@ -282,8 +282,8 @@ func TestPipeDeadlines(t *testing.T) {
 		}
 
 		pc, ps := Pipe(0)
-		defer pc.Close()
-		defer ps.Close()
+		defer func() { _ = pc.Close() }()
+		defer func() { _ = ps.Close() }()
 		if err := pc.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
 			t.Fatal(err)
 		}
@@ -347,7 +347,7 @@ func TestPipeClose(t *testing.T) {
 		if _, err := a.Write([]byte("x")); !errors.Is(err, net.ErrClosed) {
 			t.Fatalf("Write on a closed end = %v, want net.ErrClosed", err)
 		}
-		b.Close()
+		_ = b.Close()
 
 		pc, ps := Pipe(0)
 		partialRes := make(chan ioResult, 1)
@@ -367,7 +367,7 @@ func TestPipeClose(t *testing.T) {
 		if p.n != 2 || !errors.Is(p.err, net.ErrClosed) {
 			t.Fatalf("partial Write = %d, %v; want 2, net.ErrClosed", p.n, p.err)
 		}
-		pc.Close()
+		_ = pc.Close()
 
 		uc, us := Pipe(0)
 		unreadRes := make(chan ioResult, 1)
@@ -383,14 +383,14 @@ func TestPipeClose(t *testing.T) {
 		if u.n != 0 || !errors.Is(u.err, net.ErrClosed) {
 			t.Fatalf("unread Write = %d, %v; want 0, net.ErrClosed", u.n, u.err)
 		}
-		uc.Close()
+		_ = uc.Close()
 	})
 }
 
 func TestPipeWritePendingWhenReaderCloses(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		client, server := Pipe(0)
-		defer client.Close()
+		defer func() { _ = client.Close() }()
 		res := make(chan ioResult, 1)
 		go func() {
 			n, err := client.Write([]byte("abc"))
@@ -410,7 +410,7 @@ func TestPipeWritePendingWhenReaderCloses(t *testing.T) {
 func TestListenerAcceptAndDial(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ln := Listen("127.0.0.1:1", 64)
-		defer ln.Close()
+		defer func() { _ = ln.Close() }()
 		res := make(chan dialResult, 1)
 		go func() {
 			c, err := ln.DialContext(context.Background(), "tcp", "ignored:0")
@@ -420,13 +420,13 @@ func TestListenerAcceptAndDial(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer srv.Close()
+		defer func() { _ = srv.Close() }()
 		d := <-res
 		if d.err != nil {
 			t.Fatal(d.err)
 		}
 		client := d.c
-		defer client.Close()
+		defer func() { _ = client.Close() }()
 
 		if _, err := client.Write([]byte("ping")); err != nil {
 			t.Fatal(err)
@@ -528,8 +528,8 @@ func TestDialContextCanceled(t *testing.T) {
 func TestConcurrentUse(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		client, server := Pipe(7)
-		defer client.Close()
-		defer server.Close()
+		defer func() { _ = client.Close() }()
+		defer func() { _ = server.Close() }()
 		errs := make(chan error, 2)
 		for range 2 {
 			go func() {

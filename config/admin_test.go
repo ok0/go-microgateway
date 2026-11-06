@@ -194,7 +194,8 @@ func TestAdminAuthFingerprint(t *testing.T) {
 	if fp("sha256:"+adminHexA) == fp("sha256:"+adminHexB) {
 		t.Error("changing the admin key hash did not change the fingerprint")
 	}
-	if fp("sha256:"+adminHexA) != fp("sha256:"+adminHexA) {
+	first := fp("sha256:" + adminHexA)
+	if first != fp("sha256:"+adminHexA) {
 		t.Error("same admin key hash gave different fingerprints")
 	}
 }

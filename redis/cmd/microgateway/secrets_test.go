@@ -115,7 +115,7 @@ func TestSecretsNeverPrinted(t *testing.T) {
 			t.Fatal(err)
 		}
 		addr := l.Addr().String()
-		l.Close()
+		_ = l.Close()
 		path := writeDoc(t, instanceDoc(validDoc(addr)))
 		inst := startInstance(t, t.Context(), path, envPW, "-log-level", "debug")
 		base := "http://" + inst.addrs.Listeners["public"].String()

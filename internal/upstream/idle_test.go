@@ -23,10 +23,13 @@ import (
 
 type loggedConn struct {
 	net.Conn
-	wrote  atomic.Int64
-	closed atomic.Bool
-	done   chan struct{}
-	once   sync.Once
+	wrote     atomic.Int64
+	closed    atomic.Bool
+	done      chan struct{}
+	once      sync.Once
+	hold      chan struct{}
+	entered   chan struct{}
+	enterOnce sync.Once
 }
 
 func (c *loggedConn) Write(b []byte) (int, error) {
@@ -36,6 +39,10 @@ func (c *loggedConn) Write(b []byte) (int, error) {
 }
 
 func (c *loggedConn) Close() error {
+	if c.hold != nil {
+		c.enterOnce.Do(func() { close(c.entered) })
+		<-c.hold
+	}
 	c.closed.Store(true)
 	c.once.Do(func() { close(c.done) })
 	return c.Conn.Close()
@@ -44,6 +51,7 @@ func (c *loggedConn) Close() error {
 type connLog struct {
 	mu    sync.Mutex
 	conns []*loggedConn
+	hold  chan struct{}
 }
 
 func (l *connLog) dial(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -51,7 +59,7 @@ func (l *connLog) dial(ctx context.Context, network, addr string) (net.Conn, err
 	if err != nil {
 		return nil, err
 	}
-	c := &loggedConn{Conn: raw, done: make(chan struct{})}
+	c := &loggedConn{Conn: raw, done: make(chan struct{}), hold: l.hold, entered: make(chan struct{})}
 	l.mu.Lock()
 	l.conns = append(l.conns, c)
 	l.mu.Unlock()
@@ -473,6 +481,114 @@ func TestCloseStopsIdleTimers(t *testing.T) {
 	}
 	testwait.Done(t, "in-use connection closed after its request ended on a closed transport", d.at(1).done, nil)
 	checkTimers(t, fake, 0, 0)
+
+	srv.CloseClientConnections()
+	testwait.Until(t, "goroutines back to baseline", func() bool {
+		return runtime.NumGoroutine() <= base
+	}, func() string {
+		return fmt.Sprintf("goroutines=%d, baseline=%d", runtime.NumGoroutine(), base)
+	})
+}
+
+// TestCloseInUseConnClosedByReadLoop pins who closes an in-use connection after Transport.Close. Two goroutines
+// can close it: net/http's read loop, which closes it once the response body reaches EOF on a closed transport
+// (its idle put fails), and the body reader, whose release finds the connection already closed and closes nothing.
+// The test holds the read loop inside the socket close, checks that the reader's release does not close the
+// connection, then checks that the connection is closed exactly once, by the read loop, after it finishes.
+func TestCloseInUseConnClosedByReadLoop(t *testing.T) {
+	arrived := make(chan struct{}, 1)
+	release := make(chan struct{})
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		arrived <- struct{}{}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = io.WriteString(w, "ok")
+	})
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	base := runtime.NumGoroutine()
+
+	var relOnce sync.Once
+	unblock := func() { relOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+
+	fake := clock.NewFake(testStart)
+	hold := make(chan struct{})
+	var holdOnce sync.Once
+	open := func() { holdOnce.Do(func() { close(hold) }) }
+	d := &connLog{hold: hold}
+	tr := newTransport(idleCfg(false), d.dial, fake, nil)
+	t.Cleanup(func() { _ = tr.Close() })
+	t.Cleanup(open)
+
+	var tc atomic.Pointer[trackedConn]
+	ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) { tc.Store(trackedOf(info.Conn)) },
+	})
+	res := startReq(t, tr, ctx, "GET", srv.URL+"/?block=1", nil, 0)
+	testwait.Done(t, "handler arrival", arrived, nil)
+	if n := d.n(); n != 1 {
+		t.Fatalf("dials = %d, want 1", n)
+	}
+
+	_ = tr.Close()
+	checkTimers(t, fake, 0, 0)
+	if d.at(0).closed.Load() {
+		t.Fatal("in-use connection closed by Close before its request ended")
+	}
+
+	unblock()
+	r, _ := testwait.Recv(t, "response", res, nil)
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	rb, ok := r.resp.Body.(*releaseBody)
+	if !ok {
+		t.Fatalf("body type = %T, want *releaseBody", r.resp.Body)
+	}
+
+	b, err := io.ReadAll(rb.ReadCloser)
+	if err != nil {
+		t.Fatalf("body read: %v", err)
+	}
+	if string(b) != "ok" {
+		t.Fatalf("body = %q, want ok", b)
+	}
+
+	testwait.Done(t, "read loop entered the connection close", d.at(0).entered, nil)
+	c := tc.Load()
+	c.mu.Lock()
+	closed, inFlight := c.closed, c.inFlight
+	c.mu.Unlock()
+	if !closed || inFlight != 1 {
+		t.Fatalf("closed = %v, inFlight = %d; want closed=true, inFlight=1", closed, inFlight)
+	}
+
+	rb.rel.done()
+	c.mu.Lock()
+	inFlight, expired := c.inFlight, c.expired.Load()
+	c.mu.Unlock()
+	if inFlight != 0 || expired {
+		t.Fatalf("after release: inFlight = %d, expired = %v; want 0, false", inFlight, expired)
+	}
+	checkTimers(t, fake, 0, 0)
+	if d.at(0).closed.Load() {
+		t.Fatal("the socket close is still owned by the read loop: a synchronous check here is the pre-fix assertion and cannot pass")
+	}
+
+	open()
+	testwait.Done(t, "in-use connection closed after its request ended on a closed transport", d.at(0).done, nil)
+	checkTimers(t, fake, 0, 0)
+	tr.mu.Lock()
+	n := len(tr.conns)
+	tr.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("tracked connections = %d after the close, want 0", n)
+	}
+	_ = r.resp.Body.Close()
 
 	srv.CloseClientConnections()
 	testwait.Until(t, "goroutines back to baseline", func() bool {

@@ -285,7 +285,7 @@ func (s *Store) Get(ctx context.Context, primary string, sel func(varyNames []st
 	if !ok {
 		return store.Lookup{VaryNames: names, Now: now, Token: tok}, nil
 	}
-	if !(gb.found && gb.sec == sec) {
+	if !gb.found || gb.sec != sec {
 		if !slices.Contains(gb.live, sec) {
 			return store.Lookup{VaryNames: names, Now: now, Token: tok}, nil
 		}

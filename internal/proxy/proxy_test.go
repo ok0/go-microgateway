@@ -196,7 +196,7 @@ func TestInFlightUpgrade(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		if _, err := io.WriteString(conn, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: test\r\n\r\n"); err != nil {
 			return
 		}
@@ -223,7 +223,7 @@ func TestInFlightUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := io.WriteString(conn, "GET /ws HTTP/1.1\r\nHost: gateway.test\r\nConnection: Upgrade\r\nUpgrade: test\r\n\r\n"); err != nil {
 		t.Fatal(err)
 	}
@@ -647,7 +647,7 @@ func TestBreakerStageOutcomes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		if _, err := io.WriteString(conn, "GET / HTTP/1.1\r\nHost: gateway.test\r\n\r\n"); err != nil {
 			t.Fatal(err)
 		}
@@ -700,7 +700,7 @@ func TestAttemptTokenCompleted(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		if _, err := io.WriteString(conn, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: test\r\n\r\n"); err != nil {
 			return
 		}

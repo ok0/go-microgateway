@@ -94,10 +94,10 @@ func Compile(path string, t PathType) (*Pattern, error) {
 	p := &Pattern{Raw: path, Type: t}
 	seen := make(map[string]bool)
 	for i, s := range parts {
-		switch {
-		case s == "":
+		switch s {
+		case "":
 			return nil, errors.New("empty path segment")
-		case s == "." || s == "..":
+		case ".", "..":
 			return nil, errors.New("dot segment not allowed")
 		}
 

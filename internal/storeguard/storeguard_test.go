@@ -67,10 +67,6 @@ func expectOpenReject(t *testing.T, g *Guard) {
 	}
 }
 
-func blockOn(gate <-chan error) func(context.Context) error {
-	return func(context.Context) error { return <-gate }
-}
-
 // blockUntil waits until fake has at least n pending timers, tickers or After channels.
 func blockUntil(t *testing.T, fake *clock.Fake, n int, what string) {
 	t.Helper()

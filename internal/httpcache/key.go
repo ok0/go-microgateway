@@ -19,10 +19,12 @@ type URLError struct {
 	Reason string
 }
 
+// Error returns the message of the URL error, which names only the reason.
 func (e *URLError) Error() string {
 	return "httpcache: invalid URL: " + e.Reason
 }
 
+// Unwrap returns ErrInvalidURL, so every URLError matches it with errors.Is.
 func (e *URLError) Unwrap() error {
 	return ErrInvalidURL
 }

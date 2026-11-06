@@ -15,8 +15,10 @@ import (
 	"github.com/ok0/go-microgateway/internal/reqctx"
 )
 
+// Middleware wraps a handler with one stage of request processing.
 type Middleware = func(http.Handler) http.Handler
 
+// Chain wraps final with mws so that the first entry is the outermost. Nil entries are skipped.
 func Chain(final http.Handler, mws ...Middleware) http.Handler {
 	h := final
 	for i := len(mws) - 1; i >= 0; i-- {
@@ -28,6 +30,7 @@ func Chain(final http.Handler, mws ...Middleware) http.Handler {
 	return h
 }
 
+// Recover returns a middleware that turns a panic in the next handler into a 500 internal error response and logs it with the request ID. http.ErrAbortHandler is re-panicked.
 func Recover(logger *slog.Logger) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -50,6 +53,7 @@ func Recover(logger *slog.Logger) Middleware {
 	}
 }
 
+// RequestID returns a middleware that keeps a valid request ID from header or generates one, sets it on the request and response header, and stores it in the request context.
 func RequestID(header string) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -64,6 +68,7 @@ func RequestID(header string) Middleware {
 	}
 }
 
+// ValidRequestID reports whether s is 1 to 128 printable ASCII bytes without spaces.
 func ValidRequestID(s string) bool {
 	if len(s) < 1 || len(s) > 128 {
 		return false
@@ -82,6 +87,7 @@ func newID() string {
 	return hex.EncodeToString(b[:])
 }
 
+// ClientIP returns a middleware that stores the client IP, resolved through t, in the request context.
 func ClientIP(t *reqctx.TrustedProxies) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -7,6 +7,7 @@ import (
 	"strings"
 )
 
+// Fwd values of a Cache-Status member (RFC 9211) that name why the request was forwarded to the origin.
 const (
 	FwdBypass   = "bypass"
 	FwdMethod   = "method"
@@ -18,6 +19,7 @@ const (
 	FwdPartial  = "partial"
 )
 
+// Limits on a Cache-Status field: its size in bytes and its number of members.
 const (
 	MaxStatusBytes   = 64 << 10
 	MaxStatusMembers = 64
@@ -92,6 +94,7 @@ func FormatStatus(members ...Status) string {
 	return b.String()
 }
 
+// ErrMalformedStatus is wrapped by every error that ParseStatus returns.
 var ErrMalformedStatus = errors.New("httpcache: malformed Cache-Status")
 
 // ParseStatus parses a Cache-Status field value as a strict RFC 8941 list.
@@ -209,7 +212,7 @@ func (p *statusParser) key() (string, error) {
 		return "", p.fail("expected parameter key")
 	}
 	c := p.s[p.pos]
-	if !(isLowerAlpha(c) || c == '*') {
+	if !isLowerAlpha(c) && c != '*' {
 		return "", p.fail("invalid parameter key")
 	}
 	start := p.pos
@@ -395,7 +398,7 @@ func (p *statusParser) boolean() (item, error) {
 }
 
 func validToken(s string) bool {
-	if s == "" || !(isAlpha(s[0]) || s[0] == '*') {
+	if s == "" || (!isAlpha(s[0]) && s[0] != '*') {
 		return false
 	}
 	for i := 1; i < len(s); i++ {

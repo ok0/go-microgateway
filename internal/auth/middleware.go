@@ -14,12 +14,14 @@ import (
 	"github.com/ok0/go-microgateway/internal/reqctx"
 )
 
+// Requirements are the scopes, roles and claim values a result must carry to be authorized.
 type Requirements struct {
 	Scopes []string
 	Roles  []string
 	Claims map[string]any
 }
 
+// Satisfied reports whether res carries every required scope and role and every required claim value.
 func (q Requirements) Satisfied(res Result) bool {
 	for _, s := range q.Scopes {
 		if !slices.Contains(res.Scopes, s) {
@@ -87,6 +89,7 @@ func numericValue(v any) (float64, bool) {
 	return f, err == nil
 }
 
+// RouteConfig configures the authentication middleware of one route: its providers, whether anonymous requests pass, the authorization requirements, and the failure callback.
 type RouteConfig struct {
 	Route          string
 	Providers      []Authenticator
@@ -96,6 +99,7 @@ type RouteConfig struct {
 	OnFailure      func(Reason)
 }
 
+// Middleware returns the authentication middleware for c. It authenticates each request with the first provider that accepts it, answers 401 when no provider accepts and 403 when the requirements are not met, removes the credentials of the providers unless the winning one forwards them, and sets the forwarded headers of the result.
 func Middleware(c RouteConfig) func(http.Handler) http.Handler {
 	logger := c.Logger
 	if logger == nil {
@@ -163,10 +167,10 @@ func Middleware(c RouteConfig) func(http.Handler) http.Handler {
 			keep := winner.ForwardCredentials()
 			for _, p := range c.Providers {
 				h, q := p.Credentials()
-				if h != "" && !(keep && strings.EqualFold(h, wh)) {
+				if h != "" && (!keep || !strings.EqualFold(h, wh)) {
 					r.Header.Del(h)
 				}
-				if q != "" && !(keep && q == wq) {
+				if q != "" && (!keep || q != wq) {
 					r.URL = withoutQueryParam(r.URL, q)
 				}
 			}
@@ -228,6 +232,7 @@ func queryPresent(raw, name string) bool {
 	return false
 }
 
+// Strip returns a middleware that deletes the named headers, canonicalized and without duplicates, from each request before the next handler.
 func Strip(headers []string) func(http.Handler) http.Handler {
 	names := make([]string, 0, len(headers))
 	seen := make(map[string]bool, len(headers))

@@ -14,12 +14,14 @@ import (
 	"github.com/ok0/go-microgateway/internal/clock"
 )
 
+// Endpoint is one candidate backend. ID names it for the caller, Weight must be positive for it to be picked, and InFlight, when set, reports its current in-flight count for the power-of-two-choices algorithm.
 type Endpoint struct {
 	ID       string
 	Weight   int
 	InFlight func() int64
 }
 
+// Input describes one call to Balancer.Pick. Key and HasKey supply the hash key for consistent hashing, and Eligible filters the endpoints.
 type Input struct {
 	// Eligible reports whether endpoint i may be chosen; nil means every endpoint with a positive weight. Pick calls it at most once per endpoint and decides from those answers only, so a change made during a Pick takes effect on the next Pick.
 	Eligible func(i int) bool
@@ -27,10 +29,12 @@ type Input struct {
 	HasKey   bool
 }
 
+// Balancer selects one endpoint per call. Pick returns the index of the chosen endpoint and true, or -1 and false when no endpoint is eligible.
 type Balancer interface {
 	Pick(in Input) (int, bool)
 }
 
+// ErrUnknownAlgorithm is returned by New for an algorithm name it does not recognize.
 var ErrUnknownAlgorithm = errors.New("lb: unknown algorithm")
 
 var errNilRand = errors.New("lb: random source is required")
@@ -45,6 +49,7 @@ const (
 	defaultBoundedLoadFactor = 1.25
 )
 
+// New returns a Balancer for cfg over a copy of eps. An empty algorithm selects power-of-two-choices. The random algorithms and consistent hashing require rnd and fail without it, and consistent hashing also validates its virtual node count and bounded-load factor.
 func New(cfg config.LoadBalancer, eps []Endpoint, rnd clock.Rand) (Balancer, error) {
 	cp := make([]Endpoint, len(eps))
 	copy(cp, eps)

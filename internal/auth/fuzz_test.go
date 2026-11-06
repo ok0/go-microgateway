@@ -66,7 +66,7 @@ func FuzzJWTAuthenticate(f *testing.F) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer j.Close()
+		defer func() { _ = j.Close() }()
 		jwksProvider, err := NewJWT(testJWTConfig(authkey.Algorithms), j, clock.NewFake(testNow))
 		if err != nil {
 			t.Fatal(err)

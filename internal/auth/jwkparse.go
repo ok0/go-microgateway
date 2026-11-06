@@ -27,6 +27,7 @@ type jwkEntry struct {
 	Y   string `json:"y"`
 }
 
+// ParseJWKS returns the usable signing keys of a JWKS document bound to algorithms. Entries whose use is not sig, duplicate key ids, and entries with unusable material or algorithm binding are skipped. It errors when the document is invalid or no key is usable.
 func ParseJWKS(data []byte, algorithms []string) ([]Key, error) {
 	var doc struct {
 		Keys []json.RawMessage `json:"keys"`

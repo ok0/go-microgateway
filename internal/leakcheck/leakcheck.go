@@ -35,7 +35,6 @@ var flags = []string{"", "+", "#", "-", " ", "0", "+#", "#0", "10", "-10", ".3",
 
 var (
 	stringType = reflect.TypeFor[string]()
-	anyType    = reflect.TypeFor[any]()
 )
 
 // Forms returns the distinct encodings of secret that a rendering could contain, including hex, base64,

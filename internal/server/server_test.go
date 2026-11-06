@@ -47,7 +47,7 @@ func freePort(t *testing.T) string {
 		t.Fatal(err)
 	}
 	addr := ln.Addr().String()
-	ln.Close()
+	_ = ln.Close()
 	return addr
 }
 
@@ -75,7 +75,7 @@ func cleanupShutdown(t *testing.T, srv *Server) {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		srv.Shutdown(ctx)
+		_ = srv.Shutdown(ctx)
 	})
 }
 
@@ -96,7 +96,7 @@ func fetch(client *http.Client, url string) (*http.Response, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, "", err
@@ -120,7 +120,7 @@ func startServer(t *testing.T, cfg *config.Config, h, admin http.Handler, ready 
 func TestServeAndShutdown(t *testing.T) {
 	cfg := testConfig(t, nil)
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, "ok")
+		_, _ = io.WriteString(w, "ok")
 	})
 	srv, err := New(cfg, h, nil, nil, nil, WithClock(clock.NewFake(serverStart)))
 	if err != nil {
@@ -195,7 +195,7 @@ func TestTLSHTTP2(t *testing.T) {
 		c.Listeners[0].TLS = &config.TLS{CertFile: certFile, KeyFile: keyFile}
 	})
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, fmt.Sprint(r.ProtoMajor, r.TLS != nil))
+		_, _ = io.WriteString(w, fmt.Sprint(r.ProtoMajor, r.TLS != nil))
 	})
 	srv := startServer(t, cfg, h, nil, nil)
 	addr := srv.Addrs()["public"].String()
@@ -223,7 +223,7 @@ func TestTLSHTTP1Only(t *testing.T) {
 		c.Listeners[0].HTTP2 = &off
 	})
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, fmt.Sprint(r.ProtoMajor, r.TLS != nil))
+		_, _ = io.WriteString(w, fmt.Sprint(r.ProtoMajor, r.TLS != nil))
 	})
 	srv := startServer(t, cfg, h, nil, nil)
 	addr := srv.Addrs()["public"].String()
@@ -249,7 +249,7 @@ func TestTLSMinVersion13(t *testing.T) {
 		c.Listeners[0].TLS = &config.TLS{CertFile: certFile, KeyFile: keyFile, MinVersion: "1.3"}
 	})
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, "ok")
+		_, _ = io.WriteString(w, "ok")
 	})
 	srv := startServer(t, cfg, h, nil, nil)
 	addr := srv.Addrs()["public"].String()
@@ -273,7 +273,7 @@ func TestTLSMinVersion13(t *testing.T) {
 
 func TestH2C(t *testing.T) {
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, fmt.Sprint(r.ProtoMajor))
+		_, _ = io.WriteString(w, fmt.Sprint(r.ProtoMajor))
 	})
 	prior := func() *http.Transport {
 		var p http.Protocols
@@ -330,7 +330,7 @@ func TestStartBindError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { taken.Close() })
+	t.Cleanup(func() { _ = taken.Close() })
 	port := freePort(t)
 	cfg := testConfig(t, func(c *config.Config) {
 		c.Listeners = []config.Listener{
@@ -353,15 +353,15 @@ func TestStartBindError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("port of listener a not released after failed Start: %v", err)
 	}
-	ln.Close()
+	_ = ln.Close()
 }
 
 func TestAdminListener(t *testing.T) {
 	dataH := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, "data")
+		_, _ = io.WriteString(w, "data")
 	})
 	adminH := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, "admin")
+		_, _ = io.WriteString(w, "admin")
 	})
 	srv := startServer(t, testConfig(t, nil), dataH, adminH, nil)
 	adminAddr := srv.AdminAddr()
@@ -404,10 +404,10 @@ func TestShutdownGraceful(t *testing.T) {
 		if r.URL.Path == "/slow" {
 			entered <- struct{}{}
 			<-release
-			io.WriteString(w, "ok")
+			_, _ = io.WriteString(w, "ok")
 			return
 		}
-		io.WriteString(w, "fast")
+		_, _ = io.WriteString(w, "fast")
 	})
 	readyCh := make(chan bool, 4)
 	fake := clock.NewFake(serverStart)
@@ -492,7 +492,7 @@ func TestShutdownForced(t *testing.T) {
 			}
 			hijackEntered <- struct{}{}
 			<-r.Context().Done()
-			conn.Close()
+			_ = conn.Close()
 		}
 	})
 	fake := clock.NewFake(serverStart)
@@ -500,14 +500,14 @@ func TestShutdownForced(t *testing.T) {
 	addr := srv.Addrs()["public"].String()
 
 	go func() {
-		fetch(&http.Client{Transport: &http.Transport{}}, "http://"+addr+"/hang")
+		_, _, _ = fetch(&http.Client{Transport: &http.Transport{}}, "http://"+addr+"/hang")
 	}()
 
 	raw, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { raw.Close() })
+	t.Cleanup(func() { _ = raw.Close() })
 	if _, err := io.WriteString(raw, "GET /hijack HTTP/1.1\r\nHost: "+addr+"\r\n\r\n"); err != nil {
 		t.Fatal(err)
 	}
@@ -548,7 +548,7 @@ func TestShutdownCanceledContext(t *testing.T) {
 	addr := srv.Addrs()["public"].String()
 
 	go func() {
-		fetch(&http.Client{Transport: &http.Transport{}}, "http://"+addr+"/hang")
+		_, _, _ = fetch(&http.Client{Transport: &http.Transport{}}, "http://"+addr+"/hang")
 	}()
 	waitSignal(t, entered, "hang handler")
 

@@ -27,8 +27,10 @@ import (
 	"github.com/ok0/go-microgateway/internal/state"
 )
 
+// ErrNoHosts is returned by Acquire when no host of the upstream is usable. It is the same error as httperr.ErrNoHealthyUpstream.
 var ErrNoHosts = httperr.ErrNoHealthyUpstream
 
+// State kinds under which Build stores the shared state of an upstream: its transport, connection pool, passive ejector, active checker and DNS watcher.
 const (
 	KindTransport = "upstream.transport"
 	KindPool      = "upstream.pool"
@@ -132,6 +134,7 @@ func (d Deps) withDefaults() Deps {
 	return d
 }
 
+// Host is one backend endpoint of an upstream. URL carries no userinfo. Weight is the load-balancing weight, and a host with weight zero is never picked. Breaker is the host's circuit breaker, or nil when the upstream has none.
 type Host struct {
 	// URL never carries userinfo.
 	URL    *url.URL
@@ -145,22 +148,27 @@ type Host struct {
 	Breaker *breaker.Breaker
 }
 
+// InFlight returns the number of attempts currently in flight to the host.
 func (h *Host) InFlight() int64 {
 	return h.state.inflight.Load()
 }
 
+// Begin records the start of one attempt to the host.
 func (h *Host) Begin() {
 	h.state.inflight.Add(1)
 }
 
+// Done records the end of an attempt started with Begin.
 func (h *Host) Done() {
 	h.state.inflight.Add(-1)
 }
 
+// Ejected reports whether passive health currently ejects the host. A host without passive health is never ejected.
 func (h *Host) Ejected() bool {
 	return h.passive != nil && h.passive.Ejected()
 }
 
+// ActiveHealthy reports whether the active health check considers the host healthy. Without active health checks every host is healthy.
 func (h *Host) ActiveHealthy() bool {
 	return h.active == nil || h.active.Healthy()
 }
@@ -187,6 +195,7 @@ func (s *hostSet) isEligible(i int) bool {
 	return h.Weight > 0 && !h.Ejected() && h.ActiveHealthy()
 }
 
+// Upstream is one configured upstream. Acquire selects a host for each attempt, and Record reports the attempt's outcome to the breakers and the passive ejector.
 type Upstream struct {
 	Name                  string
 	Algorithm             string
@@ -208,6 +217,7 @@ type Upstream struct {
 	gaugesRetired bool // guarded by Metrics.Hosts.mu; set once the generation of u has drained
 }
 
+// TransportFingerprint returns a digest of the settings that shape the transport and connection pool of cfg: timeouts, pool and HTTP/2. Upstreams with equal fingerprints share one transport.
 func TransportFingerprint(cfg config.Upstream) string {
 	b, err := json.Marshal(struct {
 		Timeouts config.Timeouts `json:"timeouts"`
@@ -237,6 +247,7 @@ func maxEjectionPercent(cfg config.PassiveHealth) int {
 	return 50
 }
 
+// Build returns the upstream for cfg and d. Each shared component (transport, pool, passive ejector, active checker, DNS watcher and circuit breakers) is taken from d.State under its kind and fingerprint, so an unchanged component is reused by the next generation. Build fails on an invalid host URL, invalid load-balancer settings, or a nil d.Metrics.Hosts.
 func Build(cfg config.Upstream, d Deps) (*Upstream, error) {
 	d = d.withDefaults()
 	if d.Metrics.Hosts == nil {

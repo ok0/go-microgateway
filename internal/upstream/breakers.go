@@ -11,11 +11,13 @@ import (
 	"github.com/ok0/go-microgateway/internal/httperr"
 )
 
+// State kinds under which Build stores the aggregate and the per-host circuit breakers of an upstream.
 const (
 	KindBreaker      = "upstream.breaker"
 	KindBreakerHosts = "upstream.breaker.hosts"
 )
 
+// ErrAllOpen is returned by Acquire and AllowAggregate when the circuit breakers refuse every candidate. It is the same error as httperr.ErrCircuitOpen.
 var ErrAllOpen = httperr.ErrCircuitOpen
 
 func orInt(p *int, d int) int {
@@ -45,6 +47,7 @@ func breakerSettings(cb config.CircuitBreaker) breaker.Settings {
 	}
 }
 
+// BreakerOutcome maps a passive health outcome to a circuit breaker outcome. Success and Failure carry over, and every other outcome is Ignored.
 func BreakerOutcome(o health.Outcome) breaker.Outcome {
 	switch o {
 	case health.Success:

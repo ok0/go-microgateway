@@ -155,7 +155,7 @@ func TestCacheMemoryStateEntry(t *testing.T) {
 func TestCacheStageOrder(t *testing.T) {
 	order := middleware.Order(nil, nil)
 	at := func(name string) int { return slices.Index(order, name) }
-	if !(at(middleware.StageRateLimit) < at(middleware.StageCache) && at(middleware.StageCache) < at(middleware.StageCircuitBreaker)) {
+	if at(middleware.StageRateLimit) >= at(middleware.StageCache) || at(middleware.StageCache) >= at(middleware.StageCircuitBreaker) {
 		t.Errorf("default order = %v, want cache after rate_limit and before circuit_breaker", order)
 	}
 

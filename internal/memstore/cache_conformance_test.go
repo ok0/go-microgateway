@@ -203,7 +203,7 @@ func (w trustsCallerStoredAt) Get(ctx context.Context, primary string, sel func(
 type ignoresFillToken struct{ store.Cache }
 
 func (w ignoresFillToken) Put(ctx context.Context, _ store.FillToken, primary, secondary string, varyNames []string, e *store.Entry, ttl time.Duration) (bool, error) {
-	l, err := w.Cache.Get(ctx, primary, fixed(secondary))
+	l, err := w.Get(ctx, primary, fixed(secondary))
 	if err != nil {
 		return false, err
 	}
@@ -223,7 +223,7 @@ type negativeTTLRemoves struct{ store.Cache }
 
 func (w negativeTTLRemoves) Put(ctx context.Context, tok store.FillToken, primary, secondary string, varyNames []string, e *store.Entry, ttl time.Duration) (bool, error) {
 	if ttl < 0 {
-		if _, err := w.Cache.Purge(ctx, store.Purge{Kind: store.PurgeKeys, Keys: []string{primary}, Retain: store.MaxTTL}); err != nil {
+		if _, err := w.Purge(ctx, store.Purge{Kind: store.PurgeKeys, Keys: []string{primary}, Retain: store.MaxTTL}); err != nil {
 			return false, err
 		}
 		return false, nil

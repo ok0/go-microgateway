@@ -331,7 +331,7 @@ func validMetricName(s string) bool {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		letter := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == ':'
-		if !letter && !(i > 0 && c >= '0' && c <= '9') {
+		if !letter && (i <= 0 || c < '0' || c > '9') {
 			return false
 		}
 	}
@@ -345,7 +345,7 @@ func validLabelName(s string) bool {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		letter := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
-		if !letter && !(i > 0 && c >= '0' && c <= '9') {
+		if !letter && (i <= 0 || c < '0' || c > '9') {
 			return false
 		}
 	}

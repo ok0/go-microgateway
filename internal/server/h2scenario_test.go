@@ -231,7 +231,7 @@ func (b *h2bench) dial(rcvBuf int) (*h2peer, error) {
 	}
 	if rcvBuf > 0 {
 		if err := conn.(*memnet.Conn).SetReadBuffer(rcvBuf); err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil, err
 		}
 	}
@@ -247,7 +247,7 @@ func (b *h2bench) close() {
 		p.close()
 	}
 	for _, conn := range conns {
-		conn.Close()
+		_ = conn.Close()
 	}
 }
 
@@ -420,7 +420,7 @@ func scWriteHandler(b *h2bench) http.Handler {
 	big := h2BigProbe(b.probe)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/small" {
-			io.WriteString(w, "ok")
+			_, _ = io.WriteString(w, "ok")
 			return
 		}
 		big.ServeHTTP(w, r)
@@ -429,7 +429,7 @@ func scWriteHandler(b *h2bench) http.Handler {
 
 func scCommittedHandler(b *h2bench) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(make([]byte, 3<<10))
+		_, _ = w.Write(make([]byte, 3<<10))
 		b.probe.set("returned")
 	})
 }
@@ -437,7 +437,7 @@ func scCommittedHandler(b *h2bench) http.Handler {
 func scBlockedHandler(b *h2bench) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/a" {
-			http.NewResponseController(w).SetWriteDeadline(time.Time{})
+			_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 			if _, err := w.Write(make([]byte, 1<<20)); err != nil {
 				b.probe.set("a-write-error")
 				return
@@ -446,7 +446,7 @@ func scBlockedHandler(b *h2bench) http.Handler {
 			return
 		}
 		w.Header().Set("Trailer", "X-T")
-		io.WriteString(w, "b")
+		_, _ = io.WriteString(w, "b")
 		w.Header().Set("X-T", "t")
 		b.probe.set("b-returned")
 	})
@@ -459,7 +459,7 @@ func scActiveHandler(b *h2bench) http.Handler {
 		case <-r.Context().Done():
 			return
 		}
-		io.WriteString(w, "ok")
+		_, _ = io.WriteString(w, "ok")
 	})
 }
 
@@ -576,7 +576,7 @@ func scTailCommitted(b *h2bench) (h2record, error) {
 		return h2record{}, err
 	}
 	if err := conn.(*memnet.Conn).SetReadBuffer(256); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return h2record{}, err
 	}
 	hc := newHoldConn(conn)
@@ -804,7 +804,7 @@ func scTLSHandshakeError(b *h2bench) (h2record, error) {
 	if err != nil {
 		return h2record{}, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	return b.drainRaw(conn, "\x16\x03\x01\x00\x05hello")
 }
 
@@ -813,7 +813,7 @@ func scTLSPlaintext(b *h2bench) (h2record, error) {
 	if err != nil {
 		return h2record{}, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	return b.drainRaw(conn, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
 }
 
@@ -822,7 +822,7 @@ func scTLSStall(b *h2bench) (h2record, error) {
 	if err != nil {
 		return h2record{}, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	return b.drainRaw(conn, "")
 }
 
@@ -856,15 +856,6 @@ func wantAt(t *testing.T, r h2record, prefix, origin string, d time.Duration) {
 	if got != base+d {
 		t.Errorf("%q at %v, want %v", prefix, got, base+d)
 	}
-}
-
-func scEnded(r h2record, id uint32) bool {
-	for _, ev := range r.Outcome.Streams[id] {
-		if strings.HasSuffix(ev, " ES") || strings.HasPrefix(ev, "RST_STREAM ") {
-			return true
-		}
-	}
-	return false
 }
 
 func h2Cases() []h2case {
@@ -1224,8 +1215,8 @@ func TestHTTP2ShutdownLeavesNothingArmed(t *testing.T) {
 				if err, _ := bubbleRecv(t, "Shutdown result", shutdown, nil); !errors.Is(err, ErrForcedClose) {
 					t.Fatalf("Shutdown = %v, want ErrForcedClose", err)
 				}
-				a.awaitEnd("peer A reader ends")
-				b.awaitEnd("peer B reader ends")
+				_ = a.awaitEnd("peer A reader ends")
+				_ = b.awaitEnd("peer B reader ends")
 				if n := cc.armed(); n != 0 {
 					t.Errorf("%d timers armed after Shutdown, want 0", n)
 				}

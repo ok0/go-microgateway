@@ -85,12 +85,12 @@ func (p *holdPeer) Release() {
 }
 
 func (p *holdPeer) handle(client net.Conn) {
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	up, err := net.Dial("tcp", p.target)
 	if err != nil {
 		return
 	}
-	defer up.Close()
+	defer func() { _ = up.Close() }()
 	cr, ur := bufio.NewReader(client), bufio.NewReader(up)
 	for {
 		raw, args, err := readRequest(cr)
@@ -648,10 +648,10 @@ func BenchmarkTimedConn(b *testing.B) {
 	} {
 		b.Run(bc.name, func(b *testing.B) {
 			a, z := net.Pipe()
-			defer a.Close()
-			defer z.Close()
+			defer func() { _ = a.Close() }()
+			defer func() { _ = z.Close() }()
 			go func() { _, _ = io.Copy(z, z) }()
-			var conn net.Conn = a
+			conn := a
 			if bc.clk != nil {
 				tc := newTimedConn(a, bc.clk)
 				tc.setLimits(time.Hour, time.Hour)

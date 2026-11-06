@@ -65,7 +65,7 @@ func send(t *testing.T, client *http.Client, base, method, path string, headers 
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, path, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("read %s %s: %v", method, path, err)

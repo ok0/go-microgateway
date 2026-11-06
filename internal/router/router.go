@@ -27,6 +27,7 @@ type Router struct {
 	any   *bucket
 }
 
+// Matcher holds the conditions of a route: hosts, path and path type, methods, headers, and the priority and config order used to break ties.
 type Matcher struct {
 	Hosts    []string
 	Path     string
@@ -37,13 +38,16 @@ type Matcher struct {
 	Order    int
 }
 
+// Entry is a route given to New: its Matcher and the Value returned when it matches.
 type Entry struct {
 	Matcher
 	Value any
 }
 
+// Params are the path parameters captured by a match, in pattern order.
 type Params []reqctx.Param
 
+// Get returns the value of the parameter name, or the empty string when it is absent.
 func (p Params) Get(name string) string {
 	for _, x := range p {
 		if x.Name == name {
@@ -88,6 +92,7 @@ func newBucket() *bucket {
 	return &bucket{exact: make(map[string][]*route), patterns: &node{}, prefixes: &node{}}
 }
 
+// New builds a Router from entries. It returns an error when a path pattern does not compile or a host is invalid.
 func New(entries []Entry) (*Router, error) {
 	rt := &Router{exact: make(map[string]*bucket)}
 	wildByKey := make(map[string]*bucket)
@@ -261,6 +266,7 @@ func rankPattern(a, b *route) int {
 	return cmpRoute(a, b)
 }
 
+// Lookup returns the value of the route that matches r, with its captured path parameters, and reports whether one matched. A request without a URL, or whose path does not start with a slash, matches nothing.
 func (rt *Router) Lookup(r *http.Request) (value any, params Params, ok bool) {
 	if r.URL == nil {
 		return nil, nil, false

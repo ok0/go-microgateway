@@ -141,13 +141,14 @@ func (c *limitConn) recordRawLocked(which dir, t time.Time) {
 func (c *limitConn) rawSetLocked(which dir, t time.Time) {
 	readDiff := which != dirWrite && !c.raw[dirRead].Equal(t)
 	writeDiff := which != dirRead && !c.raw[dirWrite].Equal(t)
+	// A deadline error means the connection is already closed; the next read or write reports it.
 	switch {
 	case readDiff && writeDiff:
-		c.Conn.SetDeadline(t)
+		_ = c.Conn.SetDeadline(t)
 	case readDiff:
-		c.Conn.SetReadDeadline(t)
+		_ = c.Conn.SetReadDeadline(t)
 	case writeDiff:
-		c.Conn.SetWriteDeadline(t)
+		_ = c.Conn.SetWriteDeadline(t)
 	}
 	c.recordRawLocked(which, t)
 }

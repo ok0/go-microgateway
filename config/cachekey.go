@@ -62,7 +62,7 @@ func routesMayCollide(a, b *Route) bool {
 	}
 	getA, headA := getHeadMethods(a.Match.Methods)
 	getB, headB := getHeadMethods(b.Match.Methods)
-	if !(getA && getB || headA && headB) {
+	if (!getA || !getB) && (!headA || !headB) {
 		return false
 	}
 	return hostsMayOverlap(a.Match.Hosts, b.Match.Hosts) && pathsMayOverlap(&a.Match, &b.Match)

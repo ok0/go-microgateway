@@ -32,7 +32,7 @@ func TestValidateRedisStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { probe.Close() })
+	t.Cleanup(func() { _ = probe.Close() })
 	pw := uniqueSecret(t, "pw-")
 	src := instanceDoc(docOpts{
 		Backend:   backend(t),
@@ -61,7 +61,7 @@ func TestValidateRedisStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sentinel.Close()
+	defer func() { _ = sentinel.Close() }()
 	type acceptResult struct {
 		conn net.Conn
 		err  error
@@ -76,7 +76,7 @@ func TestValidateRedisStore(t *testing.T) {
 	if first.err != nil {
 		t.Fatalf("Accept: %v", first.err)
 	}
-	defer first.conn.Close()
+	defer func() { _ = first.conn.Close() }()
 	if first.conn.RemoteAddr().String() != sentinel.LocalAddr().String() {
 		t.Fatal("validate opened a connection to the Redis address")
 	}

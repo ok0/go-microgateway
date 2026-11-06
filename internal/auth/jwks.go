@@ -12,8 +12,10 @@ import (
 	"github.com/ok0/go-microgateway/internal/clock"
 )
 
+// KindJWKS is the kind name under which the runtime keeps a JWKS key source.
 const KindJWKS = "auth.jwks"
 
+// JWKSConfig configures a JWKS key source: the provider and key set URL, the algorithms accepted, the cache TTL, the minimum interval between failed attempts and the fetch timeout.
 type JWKSConfig struct {
 	Provider           string
 	URL                string
@@ -24,6 +26,7 @@ type JWKSConfig struct {
 	Timeout            time.Duration
 }
 
+// JWKSDeps are the collaborators of a JWKS. A nil Clock means the real clock, a nil Logger discards log output, and OnRefresh, when set, is called with the outcome of each refresh.
 type JWKSDeps struct {
 	Fetcher   Fetcher
 	Clock     clock.Clock
@@ -31,6 +34,7 @@ type JWKSDeps struct {
 	OnRefresh func(ok bool)
 }
 
+// JWKS is a KeySource over a provider's key set. It fetches the set on first use and refreshes it when the cache expires or a key id is unknown. A failed attempt delays the next one by MinRefreshInterval, and a failed refresh keeps the last good keys.
 type JWKS struct {
 	cfg  JWKSConfig
 	deps JWKSDeps
@@ -54,6 +58,7 @@ type flight struct {
 	waiters int
 }
 
+// NewJWKS returns a JWKS for c and d. It errors when the fetcher or a required configuration value is missing or not positive.
 func NewJWKS(c JWKSConfig, d JWKSDeps) (*JWKS, error) {
 	switch {
 	case d.Fetcher == nil:
@@ -82,6 +87,7 @@ func NewJWKS(c JWKSConfig, d JWKSDeps) (*JWKS, error) {
 	return &JWKS{cfg: c, deps: d, ctx: ctx, cancel: cancel}, nil
 }
 
+// Lookup returns the key with id kid, refreshing the key set when the id is unknown. An empty kid selects the key only when the set holds exactly one key. It returns ErrKeysUnavailable when no key set was ever loaded and ErrUnknownKID when the id is not in the set.
 func (j *JWKS) Lookup(ctx context.Context, kid string) (Key, error) {
 	if err := j.ensure(ctx, false); err != nil {
 		return Key{}, err
@@ -104,6 +110,7 @@ func (j *JWKS) Lookup(ctx context.Context, kid string) (Key, error) {
 	return Key{}, ErrUnknownKID
 }
 
+// Keys returns a copy of the current key set, refreshing it when the cache has expired. It returns ErrKeysUnavailable when no key set was ever loaded.
 func (j *JWKS) Keys(ctx context.Context) ([]Key, error) {
 	if err := j.ensure(ctx, false); err != nil {
 		return nil, err
@@ -116,6 +123,7 @@ func (j *JWKS) Keys(ctx context.Context) ([]Key, error) {
 	return slices.Clone(j.keys), nil
 }
 
+// Close stops the key source: a refresh in progress is cancelled and later lookups return ErrKeysUnavailable. It always returns nil.
 func (j *JWKS) Close() error {
 	j.mu.Lock()
 	j.closed = true

@@ -18,6 +18,7 @@ const maxDNSHosts = 256
 
 const maxDNSLookup = 5 * time.Second
 
+// Resolver looks up the addresses of a host name. *net.Resolver satisfies it.
 type Resolver interface {
 	LookupHost(ctx context.Context, host string) ([]string, error)
 }

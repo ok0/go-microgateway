@@ -51,7 +51,7 @@ func wallHandler(name string, res chan<- error) http.Handler {
 			res <- nil
 			return
 		}
-		io.WriteString(w, "ok")
+		_, _ = io.WriteString(w, "ok")
 	})
 }
 
@@ -81,7 +81,7 @@ func wallStallRun(t *testing.T, kind string, st wallStall) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer raw.Close()
+	defer func() { _ = raw.Close() }()
 	conn := raw
 	if kind == "tls" && st.name != "handshake" {
 		if conn, err = seqClient(raw, kind, ln.pool, "http/1.1"); err != nil {

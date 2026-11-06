@@ -14,17 +14,20 @@ import (
 	"github.com/ok0/go-microgateway/internal/clock"
 )
 
+// Events receives the ejection, restoration and refusal notifications of an Ejector. Any field may be nil.
 type Events struct {
 	Ejected  func(key string, d time.Duration, count int)
 	Restored func(key, reason string)
 	Refused  func(key string)
 }
 
+// Member is one upstream host in an Ejector. A member with Weight <= 0 is not counted toward the ejection limit.
 type Member struct {
 	Key    string
 	Weight int
 }
 
+// PassiveStatus is the passive-ejection state of one host as returned by Record.Status. Remaining is the time left in the current ejection and is zero when the host is not ejected.
 type PassiveStatus struct {
 	Ejected             bool
 	Remaining           time.Duration
@@ -32,6 +35,7 @@ type PassiveStatus struct {
 	ConsecutiveFailures int
 }
 
+// Ejector counts consecutive request failures per host and ejects a host for a period that grows with each ejection, up to the maximum ejection time. At most the configured percentage of the members with a positive weight is ejected at once, with a minimum of one unless the percentage is zero. Ejector is safe for concurrent use.
 type Ejector struct {
 	mu         sync.Mutex
 	threshold  int
@@ -43,6 +47,7 @@ type Ejector struct {
 	members    map[string]*Record
 }
 
+// Record is the failure state of one host within an Ejector.
 type Record struct {
 	e           *Ejector
 	key         string
@@ -53,6 +58,7 @@ type Record struct {
 	weight      int
 }
 
+// NewEjector returns an Ejector for cfg that reads time from clk. Zero settings take their defaults: 5 consecutive failures, a 30 s base ejection, a 300 s maximum ejection (raised to the base when smaller) and 50 percent maximum ejection.
 func NewEjector(cfg config.PassiveHealth, clk clock.Clock, ev Events) *Ejector {
 	e := &Ejector{
 		threshold:  cfg.ConsecutiveFailures,
@@ -81,6 +87,7 @@ func NewEjector(cfg config.PassiveHealth, clk clock.Clock, ev Events) *Ejector {
 	return e
 }
 
+// SetMembers replaces the member set. A host that stays a member keeps its ejection state, and a new host starts with no failures.
 func (e *Ejector) SetMembers(ms []Member) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -100,12 +107,14 @@ func (e *Ejector) SetMembers(ms []Member) {
 	e.members = next
 }
 
+// Record returns the failure record of the host with the given key, or nil when the key is not a member.
 func (e *Ejector) Record(key string) *Record {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.members[key]
 }
 
+// Observe records the outcome of one request to the host. Outcomes observed while the host is ejected are ignored. A Failure that reaches the threshold ejects the host when the ejection limit allows it.
 func (r *Record) Observe(o Outcome) {
 	if r.Ejected() {
 		return
@@ -120,6 +129,7 @@ func (r *Record) Observe(o Outcome) {
 	}
 }
 
+// Ejected reports whether the host is currently ejected. An expired ejection is cleared here and reported through Events.Restored with reason "expired".
 func (r *Record) Ejected() bool {
 	u := r.until.Load()
 	if u == 0 {
@@ -134,6 +144,7 @@ func (r *Record) Ejected() bool {
 	return false
 }
 
+// Clear ends any ejection of the host immediately and resets its consecutive failure count. The restoration is reported through Events.Restored with reason "active_check".
 func (r *Record) Clear() {
 	e := r.e
 	e.mu.Lock()
@@ -152,6 +163,7 @@ func (r *Record) Clear() {
 	}
 }
 
+// Status returns the current passive-ejection state of the host. The ejection count drops by one for every full maximum ejection time elapsed since the last ejection ended, and only while the host is not ejected.
 func (r *Record) Status() PassiveStatus {
 	e := r.e
 	e.mu.Lock()

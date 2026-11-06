@@ -25,6 +25,7 @@ func (headerTimeoutError) Error() string   { return "upstream response header ti
 func (headerTimeoutError) Timeout() bool   { return true }
 func (headerTimeoutError) Temporary() bool { return true }
 
+// ErrResponseHeaderTimeout is the error of an attempt whose response headers did not arrive within the upstream response header timeout.
 var ErrResponseHeaderTimeout error = headerTimeoutError{}
 
 const (
@@ -33,6 +34,7 @@ const (
 	headerFired
 )
 
+// AttemptTransport is the http.RoundTripper of a proxied route. It acquires an upstream host for each request, makes the attempts that the route's retry policy allows, and records the outcome of every attempt. A nil Clock selects the real clock, and a nil Rand is replaced by a source with a fixed seed.
 type AttemptTransport struct {
 	Upstream     *upstream.Upstream
 	Attempts     *metrics.CounterVec
@@ -41,6 +43,7 @@ type AttemptTransport struct {
 	HostBreakers bool
 }
 
+// RoundTrip performs the request through the upstream host selected for it and retries as the retry settings in the request context allow. It returns the response or error of the final attempt.
 func (t *AttemptTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	clk := t.Clock
 	if clk == nil {

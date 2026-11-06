@@ -35,7 +35,8 @@ func FuzzParse(f *testing.F) {
 		if cfg == nil {
 			t.Fatal("nil config without error")
 		}
-		if cfg.Fingerprint() != cfg.Fingerprint() {
+		fp := cfg.Fingerprint()
+		if fp != cfg.Fingerprint() {
 			t.Fatal("fingerprint is not stable")
 		}
 		if cfg.Redacted() == nil {

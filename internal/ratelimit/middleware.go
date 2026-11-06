@@ -10,8 +10,10 @@ import (
 	"github.com/ok0/go-microgateway/internal/reqctx"
 )
 
+// KeyFunc returns the rate limit key for a request.
 type KeyFunc func(*http.Request) string
 
+// Key sources accepted by NewKeyFunc.
 const (
 	SourceIP       = "ip"
 	SourceConsumer = "consumer"
@@ -19,6 +21,7 @@ const (
 	SourceRoute    = "route"
 )
 
+// NewKeyFunc returns the KeyFunc for source. The header source keys on the named header and falls back to the client IP when the header is empty. An unknown source is an error.
 func NewKeyFunc(source, header string) (KeyFunc, error) {
 	switch source {
 	case SourceIP:

@@ -476,7 +476,7 @@ func (p *respProxy) handle(client net.Conn) {
 	if err != nil {
 		return
 	}
-	defer up.Close()
+	defer func() { _ = up.Close() }()
 	cr := bufio.NewReader(client)
 	ur := bufio.NewReader(up)
 	for {

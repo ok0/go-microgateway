@@ -33,7 +33,7 @@ func listeningAddrs(t *testing.T) map[string]bool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer probe.Close()
+	defer func() { _ = probe.Close() }()
 	entries, err := os.ReadDir("/dev/fd")
 	if err != nil {
 		t.Fatal(err)
@@ -155,7 +155,7 @@ func wsBackend(t *testing.T) *httptest.Server {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		if _, err := brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"); err != nil {
 			return
 		}
@@ -203,7 +203,7 @@ func fetchURL(t *testing.T, client *http.Client, url string) (*http.Response, []
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
@@ -226,7 +226,7 @@ func startHold(t *testing.T, addr string) <-chan holdResult {
 			return
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		out <- holdResult{status: resp.StatusCode}
 	}()
 	return out
@@ -238,7 +238,7 @@ func readyzStatus(t *testing.T, addr string) int {
 	if err != nil {
 		return -1
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return resp.StatusCode
 }
 
@@ -344,7 +344,7 @@ func TestRunTLS(t *testing.T) {
 	if string(got) != "hello\n" {
 		t.Errorf("websocket echo = %q, want %q", got, "hello\n")
 	}
-	conn.Close()
+	_ = conn.Close()
 
 	if code := h.stop(); code != 0 {
 		t.Errorf("exit code = %d, want 0", code)
@@ -429,7 +429,7 @@ func TestRunBindConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer held.Close()
+	defer func() { _ = held.Close() }()
 	conflict := held.Addr().String()
 	free := "127.0.0.1:0"
 	admin := "127.0.0.1:0"
@@ -509,7 +509,7 @@ func TestRunGracefulShutdown(t *testing.T) {
 		if err != nil {
 			return true
 		}
-		conn.Close()
+		_ = conn.Close()
 		return false
 	})
 	select {
@@ -528,7 +528,7 @@ func TestRunGracefulShutdown(t *testing.T) {
 		t.Errorf("exit code = %d, want 0", code)
 	}
 	if conn, err := net.Dial("tcp", public); err == nil {
-		conn.Close()
+		_ = conn.Close()
 		t.Error("data listener still accepts connections after shutdown")
 	}
 }
@@ -574,7 +574,7 @@ routes:
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	br := wsHandshake(t, conn, public)
 
 	h.sig <- syscall.SIGTERM

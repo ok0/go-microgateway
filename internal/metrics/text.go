@@ -41,29 +41,31 @@ func (r *Registry) Handler() http.Handler {
 	})
 }
 
+// writeFamily writes one metric family. bw keeps the first write error, and WriteText returns it from Flush.
 func writeFamily(bw *bufio.Writer, f *family) {
-	fmt.Fprintf(bw, "# HELP %s %s\n", f.name, helpEscaper.Replace(f.help))
-	fmt.Fprintf(bw, "# TYPE %s %s\n", f.name, f.kind)
+	_, _ = fmt.Fprintf(bw, "# HELP %s %s\n", f.name, helpEscaper.Replace(f.help))
+	_, _ = fmt.Fprintf(bw, "# TYPE %s %s\n", f.name, f.kind)
 	for _, s := range sortedSeries(f) {
 		body := labelBody(f.labels, s.values)
 		if f.kind == kindHistogram {
 			writeHistogram(bw, f.name, body, s)
 			continue
 		}
-		fmt.Fprintf(bw, "%s%s %s\n", f.name, braces(body), formatFloat(s.float()))
+		_, _ = fmt.Fprintf(bw, "%s%s %s\n", f.name, braces(body), formatFloat(s.float()))
 	}
 }
 
+// writeHistogram writes one histogram series. bw keeps the first write error, and WriteText returns it from Flush.
 func writeHistogram(bw *bufio.Writer, name, body string, s *series) {
 	var cum uint64
 	for i, bound := range s.bounds {
 		cum += s.counts[i].Load()
-		fmt.Fprintf(bw, "%s_bucket%s %d\n", name, braces(join(body, `le="`+formatFloat(bound)+`"`)), cum)
+		_, _ = fmt.Fprintf(bw, "%s_bucket%s %d\n", name, braces(join(body, `le="`+formatFloat(bound)+`"`)), cum)
 	}
 	cum += s.counts[len(s.bounds)].Load()
-	fmt.Fprintf(bw, "%s_bucket%s %d\n", name, braces(join(body, `le="+Inf"`)), cum)
-	fmt.Fprintf(bw, "%s_sum%s %s\n", name, braces(body), formatFloat(s.float()))
-	fmt.Fprintf(bw, "%s_count%s %d\n", name, braces(body), cum)
+	_, _ = fmt.Fprintf(bw, "%s_bucket%s %d\n", name, braces(join(body, `le="+Inf"`)), cum)
+	_, _ = fmt.Fprintf(bw, "%s_sum%s %s\n", name, braces(body), formatFloat(s.float()))
+	_, _ = fmt.Fprintf(bw, "%s_count%s %d\n", name, braces(body), cum)
 }
 
 func sortedSeries(f *family) []*series {

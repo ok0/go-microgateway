@@ -77,7 +77,7 @@ func TestRunServerLimitsOnClock(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { conn.Close() })
+		t.Cleanup(func() { _ = conn.Close() })
 		if _, err := io.WriteString(conn, "GET / HTTP/1.1\r\nHost: "+public+"\r\n"); err != nil {
 			t.Fatal(err)
 		}
@@ -120,7 +120,7 @@ func TestRunServerLimitsOnClock(t *testing.T) {
 		if _, err := io.ReadAll(resp.Body); err != nil {
 			t.Fatal(err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("status = %d, want 200", resp.StatusCode)
 		}

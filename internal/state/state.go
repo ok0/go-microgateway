@@ -10,10 +10,13 @@ import (
 	"sync/atomic"
 )
 
+// ErrTypeMismatch reports that a component stored under a kind and name holds a value of a type other than the one requested.
 var ErrTypeMismatch = errors.New("state: component has a different type")
 
+// ErrConflict reports that one transaction requested the same component with two different fingerprints.
 var ErrConflict = errors.New("state: component requested with two fingerprints in one transaction")
 
+// ErrDone reports a Get on a transaction that has already been committed or aborted.
 var ErrDone = errors.New("state: transaction already finished")
 
 type key struct{ kind, name string }
@@ -49,6 +52,7 @@ type Lease struct {
 	released atomic.Bool
 }
 
+// NewRegistry returns an empty Registry that logs component close failures to logger. A nil logger discards them.
 func NewRegistry(logger *slog.Logger) *Registry {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
@@ -60,17 +64,20 @@ func NewRegistry(logger *slog.Logger) *Registry {
 	}
 }
 
+// Begin opens a transaction. It waits until no other transaction is open.
 func (r *Registry) Begin() *Tx {
 	r.sem <- struct{}{}
 	return &Tx{r: r, used: map[key]*entry{}}
 }
 
+// Len returns the number of components the registry holds.
 func (r *Registry) Len() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.entries)
 }
 
+// Close removes every component from the registry. Components that no lease holds are closed now; the others are closed when their last lease is released.
 func (r *Registry) Close() {
 	var collected []*entry
 	r.mu.Lock()
@@ -85,6 +92,7 @@ func (r *Registry) Close() {
 	r.closeLogged(collected)
 }
 
+// Get returns the component of the given kind and name. It reuses the registered component when its fingerprint matches, and otherwise creates one with create. Within one transaction a component must keep the same fingerprint.
 func Get[T any](tx *Tx, kind, name, fingerprint string, create func() (T, error)) (T, error) {
 	var zero T
 	if tx.done {
@@ -122,6 +130,7 @@ func Get[T any](tx *Tx, kind, name, fingerprint string, create func() (T, error)
 	return v, nil
 }
 
+// Commit publishes the transaction's components as the registry's current set and finishes the transaction. Components it replaces are closed unless a lease holds them. The returned Lease keeps the components this transaction used open until it is released.
 func (tx *Tx) Commit() *Lease {
 	if tx.done {
 		panic("state: Commit on a finished transaction")
@@ -154,6 +163,7 @@ func (tx *Tx) Commit() *Lease {
 	return lease
 }
 
+// Abort finishes the transaction without publishing its components and closes the components it created. Abort after Commit or Abort does nothing.
 func (tx *Tx) Abort() {
 	if tx.done {
 		return
@@ -163,6 +173,7 @@ func (tx *Tx) Abort() {
 	tx.r.closeLogged(tx.created)
 }
 
+// Release drops the lease's hold on its components and closes those that are no longer registered and no longer held. It returns the joined close errors. Release on a nil or already released lease does nothing.
 func (l *Lease) Release() error {
 	if l == nil {
 		return nil

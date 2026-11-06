@@ -59,7 +59,7 @@ func h2cOn(l *config.Listener) {
 
 func okHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, "ok")
+		_, _ = io.WriteString(w, "ok")
 	})
 }
 
@@ -70,7 +70,7 @@ func dialRaw(t *testing.T, addr string) net.Conn {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { conn.Close() })
+	t.Cleanup(func() { _ = conn.Close() })
 	return conn
 }
 
@@ -224,7 +224,7 @@ func readResponse(t *testing.T, br *bufio.Reader) (int, string) {
 			ch <- result{err: err}
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		b, err := io.ReadAll(resp.Body)
 		ch <- result{status: resp.StatusCode, body: string(b), err: err}
 	}()
@@ -264,10 +264,10 @@ func exchange(t *testing.T, conn net.Conn, br *bufio.Reader) {
 func clientHello(t *testing.T, protos ...string) []byte {
 	t.Helper()
 	cli, srv := net.Pipe()
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 	go func() {
-		tls.Client(cli, &tls.Config{InsecureSkipVerify: true, ServerName: "x", NextProtos: protos}).Handshake()
-		cli.Close()
+		_ = tls.Client(cli, &tls.Config{InsecureSkipVerify: true, ServerName: "x", NextProtos: protos}).Handshake()
+		_ = cli.Close()
 	}()
 	hdr := make([]byte, 5)
 	if _, err := io.ReadFull(srv, hdr); err != nil {
@@ -316,7 +316,7 @@ func getVia(t *testing.T, client *http.Client, url string) fetched {
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("read body: %v", err)
@@ -536,7 +536,7 @@ func TestHTTP2StillNegotiatedAndServed(t *testing.T) {
 				m := newMemNet(64 << 10)
 				t.Cleanup(m.close)
 				srv := startBubbleGateway(t, m, limitCfg(t, tc.muts...), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					io.WriteString(w, body)
+					_, _ = io.WriteString(w, body)
 				}), &logBuffer{}, WithClock(clock.NewFake(serverStart)))
 				addr := srv.Addrs()["public"].String()
 				scheme := "http://"
@@ -623,7 +623,7 @@ func TestHTTP1ReadLimitClearedAtBodyEnd(t *testing.T) {
 				}
 				entered <- struct{}{}
 				<-release
-				io.WriteString(w, "ok:"+string(b))
+				_, _ = io.WriteString(w, "ok:"+string(b))
 			})
 			muts := []func(*config.Listener){limits(time.Hour, 4*time.Second, 0, 0)}
 			var p *x509.CertPool
@@ -735,7 +735,7 @@ func TestHTTP1StreamingWriteLimit(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		rc := http.NewResponseController(w)
 		for i := 1; ; i++ {
-			fmt.Fprintf(w, "data: %d\n\n", i)
+			_, _ = fmt.Fprintf(w, "data: %d\n\n", i)
 			if err := rc.Flush(); err != nil {
 				errc <- err
 				return
@@ -862,7 +862,7 @@ func stallHandler(got chan<- string) http.Handler {
 		if r.URL.Path == "/big" {
 			chunk := make([]byte, 64<<10)
 			for range 128 {
-				w.Write(chunk)
+				_, _ = w.Write(chunk)
 			}
 			return
 		}
@@ -870,7 +870,7 @@ func stallHandler(got chan<- string) http.Handler {
 			b, _ := io.ReadAll(r.Body)
 			got <- string(b)
 		}
-		io.WriteString(w, "ok")
+		_, _ = io.WriteString(w, "ok")
 	})
 }
 
@@ -935,7 +935,7 @@ func TestFrozenClockRealStallCutsNothing(t *testing.T) {
 					stall()
 					tc := tls.Client(raw, &tls.Config{RootCAs: pool, ServerName: "localhost", NextProtos: []string{"h2", "http/1.1"}})
 					if err := tc.HandshakeContext(ctx); err != nil {
-						raw.Close()
+						_ = raw.Close()
 						return nil, err
 					}
 					return tc, nil
@@ -956,7 +956,7 @@ func TestFrozenClockRealStallCutsNothing(t *testing.T) {
 					}
 					tc := tls.Client(&holdFirstWrite{Conn: raw, split: 16}, &tls.Config{RootCAs: pool, ServerName: "localhost", NextProtos: []string{"h2", "http/1.1"}})
 					if err := tc.HandshakeContext(ctx); err != nil {
-						raw.Close()
+						_ = raw.Close()
 						return nil, err
 					}
 					return tc, nil
@@ -1011,8 +1011,8 @@ func TestHTTP1WriteLimitArmedWhenRequestReadEnds(t *testing.T) {
 		t.Helper()
 		srvSide, peer := net.Pipe()
 		t.Cleanup(func() {
-			srvSide.Close()
-			peer.Close()
+			_ = srvSide.Close()
+			_ = peer.Close()
 		})
 		ln := &limitListener{
 			lim:     connLimits{header: time.Hour, write: 5 * time.Second},
@@ -1033,7 +1033,7 @@ func TestHTTP1WriteLimitArmedWhenRequestReadEnds(t *testing.T) {
 		fake := clock.NewFake(serverStart)
 		lc, _ := newConn(t, fake)
 		lc.state(http.StateNew)
-		lc.SetReadDeadline(time.Time{})
+		_ = lc.SetReadDeadline(time.Time{})
 		if n := fake.Due(5 * time.Second); n != 0 {
 			t.Fatalf("write limit armed before the response: due = %d", n)
 		}
@@ -1080,7 +1080,7 @@ func TestHTTP1WriteLimitArmedWhenRequestReadEnds(t *testing.T) {
 		lc, _ := newConn(t, fake)
 		lc.state(http.StateNew)
 		lc.state(http.StateActive)
-		lc.SetWriteDeadline(time.Time{})
+		_ = lc.SetWriteDeadline(time.Time{})
 		if n := fake.Due(time.Hour); n != 1 {
 			t.Fatalf("pending limits due within 1h = %d, want the header limit only", n)
 		}
@@ -1190,16 +1190,16 @@ func TestHijackedConnNeverCut(t *testing.T) {
 					t.Error(err)
 					return
 				}
-				defer conn.Close()
-				rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
-				rw.Flush()
+				defer func() { _ = conn.Close() }()
+				_, _ = rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+				_ = rw.Flush()
 				for {
 					line, err := rw.ReadString('\n')
 					if err != nil {
 						return
 					}
-					rw.WriteString(line)
-					rw.Flush()
+					_, _ = rw.WriteString(line)
+					_ = rw.Flush()
 				}
 			})
 			muts := []func(*config.Listener){limits(time.Second, time.Second, time.Second, time.Second)}
@@ -1248,9 +1248,9 @@ func TestShutdownStopsLimitTimers(t *testing.T) {
 			}
 			entered <- struct{}{}
 			<-r.Context().Done()
-			conn.Close()
+			_ = conn.Close()
 		default:
-			io.WriteString(w, "ok")
+			_, _ = io.WriteString(w, "ok")
 		}
 	})
 	srv := startServer(t, limitCfg(t, limits(time.Hour, time.Hour, time.Hour, time.Hour)), h, nil, nil, WithClock(fake))

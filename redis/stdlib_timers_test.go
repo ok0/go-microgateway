@@ -132,12 +132,12 @@ func startClusterNode(t *testing.T, target string, hold time.Duration) string {
 }
 
 func serveClusterConn(c net.Conn, target, slots string, hold time.Duration) {
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	up, err := net.Dial("tcp", target)
 	if err != nil {
 		return
 	}
-	defer up.Close()
+	defer func() { _ = up.Close() }()
 	cr := bufio.NewReader(c)
 	ur := bufio.NewReader(up)
 	for {

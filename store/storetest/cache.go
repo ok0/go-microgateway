@@ -35,6 +35,7 @@ type cVariant struct {
 	p, s, state string
 }
 
+// Cache runs the conformance subtests against the response-cache backend described by h.
 func Cache(t *testing.T, h Harness[store.Cache]) {
 	if h.New == nil || h.NewAt == nil || h.Advance == nil {
 		t.Fatal("cache harness needs New, NewAt and Advance")

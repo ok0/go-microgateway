@@ -2,6 +2,7 @@ package middleware
 
 import "slices"
 
+// Names of the built-in pipeline stages, as used in DefaultStages and in a route pipeline.
 const (
 	StageTimeout        = "timeout"
 	StageAuth           = "auth"

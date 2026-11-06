@@ -282,11 +282,6 @@ func (o *origin) conditional() int {
 	return o.countSeen(true)
 }
 
-// unconditional returns how many origin requests carried neither If-None-Match nor If-Modified-Since.
-func (o *origin) unconditional() int {
-	return o.countSeen(false)
-}
-
 func (o *origin) countSeen(conditional bool) int {
 	o.mu.Lock()
 	defer o.mu.Unlock()

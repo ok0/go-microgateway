@@ -68,7 +68,7 @@ func dialSerial(t *testing.T, addr string) (*tls.Conn, int64) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { conn.Close() })
+	t.Cleanup(func() { _ = conn.Close() })
 	return conn, conn.ConnectionState().PeerCertificates[0].SerialNumber.Int64()
 }
 
@@ -132,7 +132,7 @@ func TestCertificateSwap(t *testing.T) {
 			oldReply <- reply{err: err}
 			return
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		oldReply <- reply{status: resp.StatusCode}
 	}()
 	r, _ := testwait.Recv(t, "response on the pre-swap connection", oldReply, nil)
@@ -289,7 +289,7 @@ func TestShutdownTimingsUpdated(t *testing.T) {
 
 	client := newClient(t, &http.Transport{})
 	addr := srv.Addrs()["public"].String()
-	go fetch(client, "http://"+addr+"/")
+	go func() { _, _, _ = fetch(client, "http://"+addr+"/") }()
 	waitSignal(t, entered, "held request")
 
 	errc := shutdownAsync(srv, context.Background())

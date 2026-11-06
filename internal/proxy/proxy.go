@@ -21,6 +21,7 @@ import (
 	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
+// RouteSpec holds the path rewrite, header, host and forwarding settings applied to each request and response of a route.
 type RouteSpec struct {
 	Name            string
 	StripPrefix     string
@@ -33,6 +34,7 @@ type RouteSpec struct {
 	Trusted         *reqctx.TrustedProxies
 }
 
+// Deps supplies the collaborators of a proxy handler. A nil Logger discards logs, and HostBreakers enables the per-host circuit breakers.
 type Deps struct {
 	Logger       *slog.Logger
 	Attempts     *metrics.CounterVec
@@ -41,6 +43,7 @@ type Deps struct {
 	HostBreakers bool
 }
 
+// New returns the reverse-proxy handler of a route that forwards to up. Each request is rewritten according to spec, each upstream attempt goes through an AttemptTransport, and upstream errors are answered with the gateway error codes.
 func New(spec RouteSpec, up *upstream.Upstream, deps Deps) http.Handler {
 	logger := deps.Logger
 	if logger == nil {
@@ -132,7 +135,7 @@ func rewritePath(u *url.URL, from, to string) {
 		escFrom = (&url.URL{Path: from}).EscapedPath()
 	}
 	esc := u.EscapedPath()
-	if !(esc == escFrom || strings.HasPrefix(esc, escFrom+"/")) {
+	if esc != escFrom && !strings.HasPrefix(esc, escFrom+"/") {
 		u.Path = join(to, u.Path[len(from):])
 		u.RawPath = ""
 		return

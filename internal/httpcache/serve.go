@@ -8,6 +8,7 @@ import (
 	"time"
 )
 
+// StoredHeader returns a copy of h for storage without the hop-by-hop fields, the fields named by a Connection header, and Age.
 func StoredHeader(h http.Header) http.Header {
 	out := make(http.Header, len(h))
 	named := map[string]bool{}
@@ -33,10 +34,12 @@ func StoredHeader(h http.Header) http.Header {
 	return out
 }
 
+// StoredLifetime returns the freshness lifetime of a stored response with header h under the options o.
 func StoredLifetime(h http.Header, o Options) time.Duration {
 	return lifetime(ParseCacheControl(h), h, time.Time{}, false, o)
 }
 
+// NotModified reports whether a GET or HEAD request req can be answered with 304 Not Modified from a stored response with header h. If-None-Match takes precedence over If-Modified-Since.
 func NotModified(req *http.Request, h http.Header) bool {
 	if req.Method != http.MethodGet && req.Method != http.MethodHead {
 		return false
@@ -84,6 +87,7 @@ func validEntityTag(s string) bool {
 	return len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"'
 }
 
+// NotModifiedHeader returns a copy of the validator and freshness fields of h (Cache-Control, Content-Location, Date, Etag, Expires, Last-Modified and Vary) for a 304 response.
 func NotModifiedHeader(h http.Header) http.Header {
 	fields := []string{"Cache-Control", "Content-Location", "Date", "Etag", "Expires", "Last-Modified", "Vary"}
 	out := make(http.Header, len(fields))

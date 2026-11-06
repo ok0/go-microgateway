@@ -81,7 +81,7 @@ func TestHTTP2ServedByNetHTTP(t *testing.T) {
 				t.Cleanup(func() {
 					ctx, cancel := context.WithCancel(context.Background())
 					cancel()
-					srv.Shutdown(ctx)
+					_ = srv.Shutdown(ctx)
 				})
 				synctest.Wait()
 				if len(hs.TLSNextProto) != 1 || hs.TLSNextProto["h2"] == nil {
@@ -168,7 +168,7 @@ func TestHTTP1OnTLSListenerUsesNetHTTP(t *testing.T) {
 	seen := make(chan string, 4)
 	srv := startServer(t, limitCfg(t, tlsOn(certFile, keyFile, true)), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen <- fmt.Sprintf("%d %s", r.ProtoMajor, pkgOf(w))
-		io.WriteString(w, "ok")
+		_, _ = io.WriteString(w, "ok")
 	}), okHandler(), nil, WithClock(clock.NewFake(serverStart)))
 	tc := dialTLS(t, srv.Addrs()["public"].String(), pool, "http/1.1")
 	writeString(t, tc, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -196,7 +196,7 @@ func shutdownSendsGoAway(t *testing.T, cfg *config.Config, pool *x509.CertPool) 
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		entered <- struct{}{}
 		<-release
-		io.WriteString(w, "ok")
+		_, _ = io.WriteString(w, "ok")
 	})
 	srv := startServer(t, cfg, h, okHandler(), nil, WithClock(clock.NewFake(serverStart)))
 	p := dialH2(t, srv.Addrs()["public"].String(), pool, 0)
@@ -210,7 +210,7 @@ func shutdownSendsGoAway(t *testing.T, cfg *config.Config, pool *x509.CertPool) 
 	}
 	close(release)
 	p.until("stream 1 completed", func(f h2frame) bool { return f.Stream == 1 && f.EndStream })
-	p.conn.Close()
+	_ = p.conn.Close()
 	if err, _ := testwait.Recv(t, "Shutdown result", shutdown, nil); err != nil {
 		t.Fatalf("Shutdown: %v", err)
 	}

@@ -27,6 +27,7 @@ import (
 	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
+// Deps holds the dependencies a gateway passes to Build.
 type Deps struct {
 	Logger        *slog.Logger
 	Clock         clock.Clock
@@ -41,6 +42,7 @@ type Deps struct {
 	Retention *cache.Retention
 }
 
+// Snapshot is one built configuration generation: the parsed configuration, its router and upstreams, and the handler that serves requests with them.
 type Snapshot struct {
 	Config      *config.Config
 	Fingerprint string
@@ -474,6 +476,7 @@ func (s *Snapshot) RefreshCacheGauges() {
 	s.cacheSeries.Entries.With().Set(float64(st.Entries))
 }
 
+// MemCacheStats returns the statistics of the built-in memory cache. It reports false when the snapshot has none.
 func (s *Snapshot) MemCacheStats() (memstore.CacheStats, bool) {
 	if s.memCache == nil {
 		return memstore.CacheStats{}, false
@@ -571,6 +574,7 @@ func PruneGauges(live []*Snapshot) {
 	}
 }
 
+// ServeHTTP serves r with the snapshot's handler.
 func (s *Snapshot) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.handler.ServeHTTP(w, r)
 }

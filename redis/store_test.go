@@ -177,7 +177,7 @@ func TestFailuresAreUnavailable(t *testing.T) {
 		for _, l := range []store.Limit{storeTB, storeSW} {
 			m := newMini(t)
 			s := newTestStore(t, m.Addr(), 0, "mgtest")
-			m.Set(s.keyFor("fail", l.Algorithm), "garbage")
+			_ = m.Set(s.keyFor("fail", l.Algorithm), "garbage")
 			_, err := s.Take(context.Background(), "fail", l)
 			if !errors.Is(err, store.ErrUnavailable) {
 				t.Errorf("%v: error %v, want ErrUnavailable", l.Algorithm, err)

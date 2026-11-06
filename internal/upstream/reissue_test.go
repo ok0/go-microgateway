@@ -126,7 +126,7 @@ func TestStaleHandoutNotARetry(t *testing.T) {
 					w.WriteHeader(http.StatusBadGateway)
 					return
 				}
-				defer resp.Body.Close()
+				defer func() { _ = resp.Body.Close() }()
 				w.WriteHeader(resp.StatusCode)
 				_, _ = io.Copy(w, resp.Body)
 			})

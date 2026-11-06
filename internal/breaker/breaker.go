@@ -20,6 +20,7 @@ import (
 // State is the position of a breaker in its state machine.
 type State int32
 
+// Breaker states. Closed admits every request, HalfOpen admits at most HalfOpenProbes probes, and Open admits none until OpenTimeout has elapsed.
 const (
 	Closed   State = 0
 	HalfOpen State = 1
@@ -43,6 +44,7 @@ func (s State) String() string {
 // Outcome classifies a completed request for the breaker.
 type Outcome uint8
 
+// Outcome values passed to Token.Done. Success and Failure are counted in the rolling window; Ignored is not counted and only releases a probe slot.
 const (
 	Success Outcome = iota
 	Failure
@@ -52,6 +54,7 @@ const (
 // Reason explains why a transition happened.
 type Reason string
 
+// Reason values reported to OnStateChange. ReasonRatio and ReasonConsecutive open a closed breaker, ReasonProbeFailed reopens a half-open breaker, ReasonProbesSucceeded closes it, and ReasonTimeoutElapsed moves an open breaker to half-open.
 const (
 	ReasonRatio           Reason = "ratio"
 	ReasonConsecutive     Reason = "consecutive"

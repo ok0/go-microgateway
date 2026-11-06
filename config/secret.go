@@ -56,9 +56,9 @@ func (s Secret) GoString() string {
 	return strconv.Quote(s.String())
 }
 
-// Format writes String using the verb and flags given to it.
+// Format writes String using the verb and flags given to it. Write errors on f are ignored, since fmt.Formatter has no way to report them.
 func (s Secret) Format(f fmt.State, verb rune) {
-	fmt.Fprintf(f, fmt.FormatString(f, verb), s.String())
+	_, _ = fmt.Fprintf(f, fmt.FormatString(f, verb), s.String())
 }
 
 // LogValue returns String as a slog value.
@@ -138,9 +138,9 @@ func (u SecretURL) GoString() string {
 	return strconv.Quote(u.String())
 }
 
-// Format writes String using the verb and flags given to it.
+// Format writes String using the verb and flags given to it. Write errors on f are ignored, since fmt.Formatter has no way to report them.
 func (u SecretURL) Format(f fmt.State, verb rune) {
-	fmt.Fprintf(f, fmt.FormatString(f, verb), u.String())
+	_, _ = fmt.Fprintf(f, fmt.FormatString(f, verb), u.String())
 }
 
 // LogValue returns String as a slog value.
@@ -265,9 +265,9 @@ func (p SecretParams) GoString() string {
 	return fmt.Sprintf("%#v", p.redactedMap())
 }
 
-// Format writes the parameters with every leaf redacted, using the verb and flags given to it.
+// Format writes the parameters with every leaf redacted, using the verb and flags given to it. Write errors on f are ignored, since fmt.Formatter has no way to report them.
 func (p SecretParams) Format(f fmt.State, verb rune) {
-	fmt.Fprintf(f, fmt.FormatString(f, verb), p.redactedMap())
+	_, _ = fmt.Fprintf(f, fmt.FormatString(f, verb), p.redactedMap())
 }
 
 // LogValue returns the parameters with every leaf redacted as a slog value.

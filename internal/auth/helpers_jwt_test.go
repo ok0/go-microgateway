@@ -101,8 +101,12 @@ func jwk(kid, alg string, pub any) map[string]any {
 		size := (k.Curve.Params().BitSize + 7) / 8
 		m["kty"] = "EC"
 		m["crv"] = k.Curve.Params().Name
-		m["x"] = b64(k.X.FillBytes(make([]byte, size)))
-		m["y"] = b64(k.Y.FillBytes(make([]byte, size)))
+		raw, err := k.Bytes()
+		if err != nil {
+			panic(err)
+		}
+		m["x"] = b64(raw[1 : 1+size])
+		m["y"] = b64(raw[1+size:])
 	case ed25519.PublicKey:
 		m["kty"] = "OKP"
 		m["crv"] = "Ed25519"
