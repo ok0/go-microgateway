@@ -51,6 +51,8 @@ type JWKS struct {
 	failed    bool
 	flight    *flight
 	closed    bool
+	// awaitFetch observes the end of a fetch; tests replace it to force one observation order.
+	awaitFetch func(fctx context.Context, res <-chan fetchResult) (fetchResult, bool)
 }
 
 type flight struct {
@@ -84,7 +86,7 @@ func NewJWKS(c JWKSConfig, d JWKSDeps) (*JWKS, error) {
 		d.Logger = slog.New(slog.DiscardHandler)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &JWKS{cfg: c, deps: d, ctx: ctx, cancel: cancel}, nil
+	return &JWKS{cfg: c, deps: d, ctx: ctx, cancel: cancel, awaitFetch: awaitFetchResult}, nil
 }
 
 // Lookup returns the key with id kid, refreshing the key set when the id is unknown. An empty kid selects the key only when the set holds exactly one key. It returns ErrKeysUnavailable when no key set was ever loaded and ErrUnknownKID when the id is not in the set.
@@ -207,9 +209,22 @@ type fetchResult struct {
 	err  error
 }
 
+// errFetchTimedOut is the cause the fetch timer sets on the fetch context.
+var errFetchTimedOut = errors.New("key set fetch timed out")
+
+// awaitFetchResult returns the fetch result, or reports true when the fetch context ended first.
+func awaitFetchResult(fctx context.Context, res <-chan fetchResult) (fetchResult, bool) {
+	select {
+	case r := <-res:
+		return r, false
+	case <-fctx.Done():
+		return fetchResult{}, true
+	}
+}
+
 func (j *JWKS) run(f *flight) {
-	fctx, cancel := context.WithCancel(j.ctx)
-	timer := j.deps.Clock.AfterFunc(j.cfg.Timeout, cancel)
+	fctx, cancel := context.WithCancelCause(j.ctx)
+	timer := j.deps.Clock.AfterFunc(j.cfg.Timeout, func() { cancel(errFetchTimedOut) })
 
 	res := make(chan fetchResult, 1)
 	go func() {
@@ -222,18 +237,19 @@ func (j *JWKS) run(f *flight) {
 		res <- fetchResult{data: data, err: err}
 	}()
 
-	var r fetchResult
-	select {
-	case r = <-res:
-	case <-fctx.Done():
-		if j.ctx.Err() != nil {
-			r.err = errors.New("key set fetch cancelled")
-		} else {
+	// The timer records the timeout as the cause of the fetch context, so a failed fetch is classified by what
+	// ended it, whichever of the result and the end of the context is observed first.
+	r, ended := j.awaitFetch(fctx, res)
+	timer.Stop()
+	if ended || r.err != nil {
+		switch cause := context.Cause(fctx); {
+		case errors.Is(cause, errFetchTimedOut):
 			r.err = fmt.Errorf("key set fetch timed out after %s", j.cfg.Timeout)
+		case cause != nil:
+			r.err = errors.New("key set fetch cancelled")
 		}
 	}
-	timer.Stop()
-	cancel()
+	cancel(nil)
 
 	err := r.err
 	var keys []Key
