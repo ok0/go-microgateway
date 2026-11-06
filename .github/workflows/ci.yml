@@ -1,0 +1,102 @@
+name: ci
+
+on: [push, pull_request]
+
+env:
+  GOWORK: "off"
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.x
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.14.0
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.14.0
+          working-directory: redis
+
+  test:
+    strategy:
+      matrix:
+        go: ["1.27.x", "stable"]
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+      - name: build
+        run: go build ./...
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test -race ./...
+      - name: build redis module
+        run: go build ./...
+        working-directory: redis
+      - name: vet redis module
+        run: go vet ./...
+        working-directory: redis
+      - name: test redis module
+        run: go test -race ./...
+        working-directory: redis
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.x
+      - run: make cover
+
+  tidy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.x
+      - run: make tidy-check
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: "redis:6.2"
+        ports: ["6379:6379"]
+        options: "--health-cmd \"redis-cli ping\" --health-interval 5s --health-retries 10"
+    env:
+      MICROGATEWAY_HEAVY: "1"
+      MICROGATEWAY_REDIS_ADDR: "localhost:6379"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.x
+      - run: make integration
+
+  realnet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.x
+      - run: make realnet
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: make docker

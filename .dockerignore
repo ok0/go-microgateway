@@ -1,0 +1,11 @@
+.git
+.github
+.docs
+.ensemble/
+go.work*
+bin
+*.test
+*.out
+**/testdata/fuzz
+Dockerfile
+.dockerignore

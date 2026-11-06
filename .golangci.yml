@@ -1,0 +1,22 @@
+version: "2"
+run:
+  tests: true
+linters:
+  default: none
+  enable: [errcheck, govet, ineffassign, revive, staticcheck, unused]
+  settings:
+    revive:
+      rules:
+        - name: exported
+        - name: package-comments
+  exclusions:
+    generated: strict
+    rules:
+      # Test-only relaxation: helpers exported inside _test.go files are visible to the test binary only and need no doc comment.
+      - path: _test\.go
+        linters: [revive]
+        text: exported
+formatters:
+  enable: [gofmt, goimports]
+  exclusions:
+    generated: strict
