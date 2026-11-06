@@ -22,9 +22,9 @@ import (
 // testNetwork is the network a gateway test runs on: in memory (hermetic) or loopback TCP.
 type testNetwork interface {
 	// serve runs h on a new listener until the test ends.
-	serve(t *testing.T, h http.Handler) *testServer
+	serve(t testing.TB, h http.Handler) *testServer
 	// gateway builds a gateway from doc whose upstream connections use this network.
-	gateway(t *testing.T, doc string, opts ...microgateway.Option) *microgateway.Gateway
+	gateway(t testing.TB, doc string, opts ...microgateway.Option) *microgateway.Gateway
 	// client returns a client on this network; tune (may be nil) adjusts its transport. Idle connections are closed at test end.
 	client(t *testing.T, tune func(*http.Transport)) *http.Client
 	// dial opens a raw connection to s; it is closed at test end.
@@ -199,7 +199,7 @@ func (l *memListener) Addr() net.Addr {
 	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 80}
 }
 
-func (n *memNetwork) serve(t *testing.T, h http.Handler) *testServer {
+func (n *memNetwork) serve(t testing.TB, h http.Handler) *testServer {
 	t.Helper()
 	return n.serveListener(t, n.listen(), h)
 }
@@ -213,7 +213,7 @@ func (n *memNetwork) serveAt(t *testing.T, addr string, h http.Handler) *testSer
 	return n.serveListener(t, l, h)
 }
 
-func (n *memNetwork) serveListener(t *testing.T, l *memListener, h http.Handler) *testServer {
+func (n *memNetwork) serveListener(t testing.TB, l *memListener, h http.Handler) *testServer {
 	s := &testServer{URL: "http://" + l.addr, Addr: l.addr}
 	srv := &http.Server{Handler: h, ConnState: s.track}
 	served := make(chan struct{})
@@ -258,7 +258,7 @@ func (n *memNetwork) blackhole(t *testing.T) string {
 	return addr
 }
 
-func (n *memNetwork) gateway(t *testing.T, doc string, opts ...microgateway.Option) *microgateway.Gateway {
+func (n *memNetwork) gateway(t testing.TB, doc string, opts ...microgateway.Option) *microgateway.Gateway {
 	t.Helper()
 	return gwWith(t, doc, append(opts, withDialer(n.DialContext))...)
 }
@@ -290,7 +290,7 @@ func (n *memNetwork) openConns() (int64, bool) {
 
 type tcpNetwork struct{}
 
-func (tcpNetwork) serve(t *testing.T, h http.Handler) *testServer {
+func (tcpNetwork) serve(t testing.TB, h http.Handler) *testServer {
 	t.Helper()
 	srv := httptest.NewUnstartedServer(h)
 	s := &testServer{}
@@ -313,7 +313,7 @@ func (tcpNetwork) blackhole(t *testing.T) string {
 	return "10.255.255.1:81"
 }
 
-func (tcpNetwork) gateway(t *testing.T, doc string, opts ...microgateway.Option) *microgateway.Gateway {
+func (tcpNetwork) gateway(t testing.TB, doc string, opts ...microgateway.Option) *microgateway.Gateway {
 	t.Helper()
 	return gwWith(t, doc, opts...)
 }

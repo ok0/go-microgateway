@@ -515,6 +515,7 @@ func TestDocumentedErrorCodes(t *testing.T) {
 
 	api := gwWith(t, "version: 1\n"+listenersYAML+fmt.Sprintf("upstreams:\n  - name: up\n    hosts:\n      - url: %q\nroutes:\n  - name: api\n    match:\n      path: /api\n    upstream: up\n", okBe.URL))
 	sink.addRec(t, rlGet(t, api, "http://example.com/nope", "192.0.2.1:1000", nil))
+	sink.addRec(t, rlGet(t, api, "http://example.com/api/%2e%2e/x", "192.0.2.1:1000", nil))
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -640,6 +641,7 @@ func TestDocumentedErrorCodes(t *testing.T) {
 		httperr.CodeBadRequest,
 		httperr.CodeStoreUnavailable,
 		httperr.CodeCacheNotConfigured,
+		httperr.CodeInvalidPath,
 	}
 	tableCodes := map[string]bool{}
 	for p := range table {

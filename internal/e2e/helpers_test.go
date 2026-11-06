@@ -205,7 +205,7 @@ func eventuallyAdvancing(t *testing.T, what string, fake *clock.Fake, step time.
 	})
 }
 
-func gwWith(t *testing.T, doc string, opts ...microgateway.Option) *microgateway.Gateway {
+func gwWith(t testing.TB, doc string, opts ...microgateway.Option) *microgateway.Gateway {
 	t.Helper()
 	g, err := newGatewayFromYAML([]byte(doc), opts...)
 	if err != nil {
