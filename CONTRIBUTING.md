@@ -35,6 +35,8 @@ GOWORK=off go test ./...
 cd redis && go test ./...
 ```
 
+The repository tests read the git history and tags. `TestCommitMessageHygiene` scans every commit and `TestReleaseCheck` checks the release tag pairs, so both need a full clone with all history and all tags. A shallow clone (`git clone --depth 1`, or `actions/checkout` without `fetch-depth: 0`) has one commit and few or no tags; on it both tests fail and name the fix. Run `git fetch --unshallow --tags` to complete a shallow clone. CI checks out every job with `fetch-depth: 0`.
+
 ## Command modes
 
 Core commands run from the repository root with `GOWORK=off`. The core builds from its own `go.mod` alone, as a consumer's build does, and the dependency check proves that the core has no Redis dependency.
