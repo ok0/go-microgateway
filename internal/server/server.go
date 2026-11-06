@@ -87,6 +87,7 @@ type Server struct {
 	addrs     map[string]net.Addr
 	adminAddr net.Addr
 	clk       clock.Clock
+	hsHook    func(record func())
 	// listen binds a listener; tests replace it to serve on in-memory listeners.
 	listen func(network, address string) (net.Listener, error)
 	// shutdownDelay and drainTimeout are guarded by mu.
@@ -98,8 +99,9 @@ type Server struct {
 type Option func(*options)
 
 type options struct {
-	certs *Certificates
-	clk   clock.Clock
+	certs  *Certificates
+	clk    clock.Clock
+	hsHook func(record func())
 }
 
 // WithCertificates makes TLS listeners present the certificates held by c, which must already hold one for every TLS listener.
@@ -111,6 +113,12 @@ func WithCertificates(c *Certificates) Option {
 // limits with c. HTTP/2 connections use net/http's own timers. Without it the server uses the real clock.
 func WithClock(c clock.Clock) Option {
 	return func(o *options) { o.clk = c }
+}
+
+// withHandshakeHook makes every TLS connection hand the record of its handshake end to h, which must call record
+// exactly once. Tests use it to observe or order that record.
+func withHandshakeHook(h func(record func())) Option {
+	return func(o *options) { o.hsHook = h }
 }
 
 // New prepares a server for every listener in cfg. The data handler h serves the listeners and the admin handler
@@ -154,6 +162,7 @@ func New(cfg *config.Config, h http.Handler, admin http.Handler, ready func(bool
 		shutdownDelay: cfg.Global.ShutdownDelay.Std(),
 		drainTimeout:  cfg.Global.DrainTimeout.Std(),
 		clk:           clk,
+		hsHook:        o.hsHook,
 		listen:        net.Listen,
 	}
 	s.base, s.cancel = context.WithCancel(context.Background())
@@ -267,6 +276,7 @@ func (s *Server) Start() error {
 			clk:       s.clk,
 			idleClk:   clock.Housekeeping(s.clk),
 			tlsConfig: l.srv.TLSConfig,
+			hsHook:    s.hsHook,
 		}
 	}
 	for _, l := range s.data {

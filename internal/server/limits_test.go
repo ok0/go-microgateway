@@ -94,11 +94,47 @@ func dialConn(t *testing.T, addr string, pool *x509.CertPool) net.Conn {
 	return dialTLS(t, addr, pool)
 }
 
-// waitHandshakeReleased waits until the handshake limit timer of a TLS connection has been stopped. It relies on
-// the header limit being longer than limit, so that no timer of the header phase is due within limit.
-func waitHandshakeReleased(t *testing.T, fake *clock.Fake, limit time.Duration) {
+// handshakeGate observes, and optionally holds, the server's record of the end of the first TLS handshake on a
+// server: the record stops the handshake limit timer and arms the header phase. Later handshakes record at once.
+type handshakeGate struct {
+	ctx      context.Context
+	hold     bool
+	n        atomic.Int32
+	ended    chan struct{} // closed when the server's handshake has returned, before the record
+	release  chan struct{} // closed by the test to let a held record proceed
+	recorded chan struct{} // closed after the record
+}
+
+func newHandshakeGate(t *testing.T, hold bool) *handshakeGate {
+	return &handshakeGate{ctx: t.Context(), hold: hold, ended: make(chan struct{}), release: make(chan struct{}), recorded: make(chan struct{})}
+}
+
+func (g *handshakeGate) option() Option { return withHandshakeHook(g.hook) }
+
+func (g *handshakeGate) hook(record func()) {
+	if g.n.Add(1) != 1 {
+		record()
+		return
+	}
+	close(g.ended)
+	if g.hold {
+		select {
+		case <-g.release:
+		case <-g.ctx.Done():
+		}
+	}
+	record()
+	close(g.recorded)
+}
+
+// awaitHandshakeReleased waits until the server has recorded the end of the handshake gated by g, then checks that
+// no limit timer is due within limit; the handshake limit timer would be.
+func awaitHandshakeReleased(t *testing.T, fake *clock.Fake, g *handshakeGate, limit time.Duration) {
 	t.Helper()
-	testwait.Until(t, "handshake limit timer released", func() bool { return fake.Due(limit) == 0 }, nil)
+	testwait.Done(t, "TLS handshake end recorded", g.recorded, nil)
+	if n := fake.Due(limit); n != 0 {
+		t.Fatalf("handshake limit timer still armed: timers due within %v = %d, want 0", limit, n)
+	}
 }
 
 // capture reads from a connection in the background, keeping every byte and the error that ended the reading.
@@ -395,26 +431,46 @@ func TestServersCarryLimitFields(t *testing.T) {
 func TestHTTP1HeaderLimit(t *testing.T) {
 	certFile, keyFile, pool := testcert.Write(t, t.TempDir())
 	for _, kind := range []struct {
-		name string
-		tls  bool
-	}{{"plain", false}, {"tls", true}} {
+		name       string
+		tls        bool
+		clockFirst bool
+	}{{"plain", false, false}, {"tls-handshake-recorded-first", true, false}, {"tls-clock-stepped-first", true, true}} {
 		t.Run(kind.name, func(t *testing.T) {
 			fake := clock.NewFake(serverStart)
 			muts := []func(*config.Listener){limits(3*time.Second, 0, 0, 0)}
+			opts := []Option{WithClock(fake)}
 			var p *x509.CertPool
+			var g *handshakeGate
 			if kind.tls {
 				muts = append(muts, tlsOn(certFile, keyFile, true))
 				p = pool
+				g = newHandshakeGate(t, kind.clockFirst)
+				opts = append(opts, g.option())
 			}
-			srv := startServer(t, limitCfg(t, muts...), okHandler(), nil, nil, WithClock(fake))
+			srv := startServer(t, limitCfg(t, muts...), okHandler(), nil, nil, opts...)
 			conn := dialConn(t, srv.Addrs()["public"].String(), p)
 			c := capturing(conn)
 			if kind.tls {
-				// The handshake limit equals the header limit, so the pending handshake timer cannot be told
-				// from the header timer by its due time. Step the clock once so that it is due sooner than
-				// the header timer armed after it, then wait until it has been released.
-				fake.Advance(time.Nanosecond)
-				waitHandshakeReleased(t, fake, 3*time.Second-time.Nanosecond)
+				if kind.clockFirst {
+					// The server's handshake has returned but is not recorded: the handshake limit timer is still the only
+					// timer. Step the clock before the record.
+					testwait.Done(t, "server TLS handshake returned", g.ended, nil)
+					if n := fake.Waiters(); n != 1 {
+						t.Fatalf("pending timers before the record = %d, want 1 (the handshake limit timer)", n)
+					}
+					fake.Advance(time.Nanosecond)
+					close(g.release)
+				}
+				testwait.Done(t, "TLS handshake end recorded", g.recorded, nil)
+				// The record stops the handshake limit timer and arms the header limit timer in its place.
+				if n := fake.Waiters(); n != 1 {
+					t.Fatalf("pending timers after the record = %d, want 1 (the header limit timer)", n)
+				}
+				if kind.clockFirst {
+					if n := fake.Due(3*time.Second - time.Nanosecond); n != 0 {
+						t.Fatalf("timers due within 3s-1ns after the record = %d, want 0 (the handshake limit timer was due then)", n)
+					}
+				}
 			}
 			writeString(t, conn, "GET / HTTP/1.1\r\nHost: x\r\n")
 			awaitDue(t, fake, 1, 3*time.Second, "header limit timer")
@@ -495,9 +551,10 @@ func TestTLSHandshakeLimit(t *testing.T) {
 	})
 	t.Run("completed-handshake-stops-timer", func(t *testing.T) {
 		fake := clock.NewFake(serverStart)
-		srv := startServer(t, limitCfg(t, tlsOn(certFile, keyFile, false), limits(10*time.Second, 4*time.Second, 6*time.Second, time.Hour)), okHandler(), nil, nil, WithClock(fake))
+		g := newHandshakeGate(t, false)
+		srv := startServer(t, limitCfg(t, tlsOn(certFile, keyFile, false), limits(10*time.Second, 4*time.Second, 6*time.Second, time.Hour)), okHandler(), nil, nil, WithClock(fake), g.option())
 		tc := dialTLS(t, srv.Addrs()["public"].String(), pool)
-		waitHandshakeReleased(t, fake, 4*time.Second)
+		awaitHandshakeReleased(t, fake, g, 4*time.Second)
 		c := capturing(tc)
 		writeString(t, tc, "GET / HTTP/1.1\r\nHost: x\r\n")
 		awaitDue(t, fake, 1, 10*time.Second, "header limit timer")
@@ -583,10 +640,11 @@ func TestHTTP1ReadLimit(t *testing.T) {
 				muts = append(muts, tlsOn(certFile, keyFile, true))
 				p = pool
 			}
-			srv := startServer(t, limitCfg(t, muts...), h, nil, nil, WithClock(fake))
+			g := newHandshakeGate(t, false)
+			srv := startServer(t, limitCfg(t, muts...), h, nil, nil, WithClock(fake), g.option())
 			conn := dialConn(t, srv.Addrs()["public"].String(), p)
 			if kind.tls {
-				waitHandshakeReleased(t, fake, 4*time.Second)
+				awaitHandshakeReleased(t, fake, g, 4*time.Second)
 			}
 			writeString(t, conn, "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n0123456789")
 			awaitDue(t, fake, 1, 4*time.Second, "read limit timer")
@@ -631,10 +689,11 @@ func TestHTTP1ReadLimitClearedAtBodyEnd(t *testing.T) {
 				muts = append(muts, tlsOn(certFile, keyFile, true))
 				p = pool
 			}
-			srv := startServer(t, limitCfg(t, muts...), h, nil, nil, WithClock(fake))
+			g := newHandshakeGate(t, false)
+			srv := startServer(t, limitCfg(t, muts...), h, nil, nil, WithClock(fake), g.option())
 			conn := dialConn(t, srv.Addrs()["public"].String(), p)
 			if kind.tls {
-				waitHandshakeReleased(t, fake, 4*time.Second)
+				awaitHandshakeReleased(t, fake, g, 4*time.Second)
 			}
 			writeString(t, conn, "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello")
 			testwait.Done(t, "body read by handler", entered, nil)
@@ -682,10 +741,11 @@ func TestHTTP1WriteLimit(t *testing.T) {
 				muts = append(muts, tlsOn(certFile, keyFile, true))
 				p = pool
 			}
-			srv := startServer(t, limitCfg(t, muts...), h, nil, nil, WithClock(fake))
+			g := newHandshakeGate(t, false)
+			srv := startServer(t, limitCfg(t, muts...), h, nil, nil, WithClock(fake), g.option())
 			conn := dialConn(t, srv.Addrs()["public"].String(), p)
 			if kind.tls {
-				waitHandshakeReleased(t, fake, 5*time.Second)
+				awaitHandshakeReleased(t, fake, g, 5*time.Second)
 			}
 			writeString(t, conn, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
 			awaitDue(t, fake, 1, 5*time.Second, "write limit timer")
@@ -1111,10 +1171,11 @@ func TestHTTP1ErrorResponseUnderWriteLimit(t *testing.T) {
 				muts = append(muts, tlsOn(certFile, keyFile, true))
 				p = pool
 			}
-			srv := startServer(t, limitCfg(t, muts...), okHandler(), nil, nil, WithClock(fake))
+			g := newHandshakeGate(t, false)
+			srv := startServer(t, limitCfg(t, muts...), okHandler(), nil, nil, WithClock(fake), g.option())
 			conn := dialConn(t, srv.Addrs()["public"].String(), p)
 			if kind.tls {
-				waitHandshakeReleased(t, fake, 5*time.Second)
+				awaitHandshakeReleased(t, fake, g, 5*time.Second)
 			}
 			c := capturing(conn)
 			writeString(t, conn, "GET / HTTP/1.1\r\nHost: x\r\nBad Header\r\n\r\n")

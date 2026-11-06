@@ -55,6 +55,7 @@ type limitListener struct {
 	clk       clock.Clock
 	idleClk   clock.Clock
 	tlsConfig *tls.Config
+	hsHook    func(record func())
 }
 
 func (l *limitListener) Accept() (net.Conn, error) {
@@ -237,10 +238,17 @@ func (c *limitConn) awaitHandshake() {
 }
 
 // handshake runs the server side of the TLS handshake and records its end. net/http's own HandshakeContext call
-// waits on crypto/tls's handshake lock and returns the same stored result.
+// waits on crypto/tls's handshake lock and returns the same stored result. A hook set on the listener receives the
+// record and must call it once.
 func (c *limitConn) handshake() {
 	err := c.tc.HandshakeContext(context.Background())
-	c.handshakeDone(err == nil, c.tc.ConnectionState().NegotiatedProtocol)
+	proto := c.tc.ConnectionState().NegotiatedProtocol
+	record := func() { c.handshakeDone(err == nil, proto) }
+	if h := c.ln.hsHook; h != nil {
+		h(record)
+	} else {
+		record()
+	}
 	close(c.hsDone)
 }
 
