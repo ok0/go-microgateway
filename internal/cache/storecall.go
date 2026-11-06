@@ -52,6 +52,26 @@ func (s *stage) put(ctx context.Context, tok store.FillToken, primary, secondary
 	return stored, nil
 }
 
+// deleteVariant removes the variant secondary of primary through the store, bounded by the guard when one is set.
+func (s *stage) deleteVariant(ctx context.Context, primary, secondary string) (bool, error) {
+	if s.guard == nil {
+		return s.store.Delete(ctx, primary, secondary)
+	}
+	var deleted bool
+	err := s.guard.Do(ctx, s.timeout, func(cctx context.Context) error {
+		ok, err := s.store.Delete(cctx, primary, secondary)
+		if err != nil {
+			return err
+		}
+		deleted = ok
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return deleted, nil
+}
+
 func (s *stage) purge(ctx context.Context, p store.Purge) (store.PurgeResult, error) {
 	return callPurge(ctx, s.store, s.guard, s.timeout, p)
 }

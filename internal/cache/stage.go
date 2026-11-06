@@ -38,6 +38,7 @@ const (
 	opGet                 = "get"
 	opPut                 = "put"
 	opPurge               = "purge"
+	opDelete              = "delete"
 	memoryStoreLabel      = "memory"
 	bypassStoreError      = "store-error"
 	bypassUpgrade         = "upgrade"
@@ -61,7 +62,7 @@ type Metrics struct {
 	Requests *metrics.CounterVec
 	// Stores counts storage outcomes by route and result: stored, not_storable, too_large, aborted, refused or error.
 	Stores *metrics.CounterVec
-	// StoreErrors counts failed store calls by operation: get, put or purge.
+	// StoreErrors counts failed store calls by operation: get, put, purge or delete.
 	StoreErrors *metrics.CounterVec
 	// Coalesced counts requests served by a response another request fetched, by route. Required when Deps.Group is set.
 	Coalesced *metrics.CounterVec
@@ -204,7 +205,7 @@ func NewStage(rc config.RouteCache, gc config.Cache, d Deps) (middleware.Middlew
 		group:        d.Group,
 		requests:     make(map[string]*metrics.Counter, 5),
 		stores:       make(map[string]*metrics.Counter, 6),
-		storeErrs:    make(map[string]*metrics.Counter, 3),
+		storeErrs:    make(map[string]*metrics.Counter, 4),
 	}
 	if d.Group != nil {
 		s.waitTimeout = gc.Coalescing.Timeout.Std()
@@ -223,7 +224,7 @@ func NewStage(rc config.RouteCache, gc config.Cache, d Deps) (middleware.Middlew
 	for _, res := range []string{storeStored, storeNotStorable, storeTooLarge, storeAborted, storeRefused, storeError} {
 		s.stores[res] = d.Metrics.Stores.With(d.Route, res)
 	}
-	for _, op := range []string{opGet, opPut, opPurge} {
+	for _, op := range []string{opGet, opPut, opPurge, opDelete} {
 		s.storeErrs[op] = d.Metrics.StoreErrors.With(op)
 	}
 	return func(next http.Handler) http.Handler {
@@ -292,7 +293,9 @@ func (s *stage) handle(next http.Handler, w http.ResponseWriter, r *http.Request
 		if s.runner != nil {
 			s.serve(w, r, e, age, httpcache.Status{Hit: true, Fwd: httpcache.FwdStale, Detail: detailSWR, Key: key})
 			s.count(resultStale)
-			s.revalidateInBackground(next, r, fillInput{primary: primary, lk: lk, e: e, fwd: httpcache.FwdStale, key: key}, primary+"\x00"+selected)
+			if httpcache.RequestReason(r) == "" {
+				s.revalidateInBackground(next, r, fillInput{primary: primary, secondary: selected, lk: lk, e: e, fwd: httpcache.FwdStale, key: key}, primary+"\x00"+selected)
+			}
 			return
 		}
 		fallthrough
@@ -304,7 +307,7 @@ func (s *stage) handle(next http.Handler, w http.ResponseWriter, r *http.Request
 		case len(lk.VaryNames) > 0:
 			fwd = httpcache.FwdVaryMiss
 		}
-		s.fetch(next, w, r, fillInput{primary: primary, lk: lk, e: e, fwd: fwd, key: key, age: age, sie: httpcache.StaleOnError(e, age, s.opts)}, primary+"\x00"+selected)
+		s.fetch(next, w, r, fillInput{primary: primary, secondary: selected, lk: lk, e: e, fwd: fwd, key: key, age: age, sie: httpcache.StaleOnError(e, age, s.opts)}, primary+"\x00"+selected)
 	}
 }
 

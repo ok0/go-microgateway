@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
@@ -13,16 +14,18 @@ import (
 )
 
 // fillInput describes a request that is forwarded to the origin.
+// secondary is the secondary key of the looked-up variant.
 type fillInput struct {
-	primary string
-	lk      store.Lookup
-	e       *httpcache.Entry
-	fwd     string
-	key     string
-	forced  bool
-	detail  string
-	age     time.Duration
-	sie     bool
+	primary   string
+	secondary string
+	lk        store.Lookup
+	e         *httpcache.Entry
+	fwd       string
+	key       string
+	forced    bool
+	detail    string
+	age       time.Duration
+	sie       bool
 }
 
 // fetch describes how one forward runs. ctx is the upstream request context: the request context unless the forward
@@ -370,8 +373,22 @@ func (s *stage) storeEntry(r *http.Request, tok store.FillToken, primary string,
 	return storeStored
 }
 
-// refresh applies a 304 received for a conditional forward to the stored entry, stores the merged entry and
-// serves it. It returns false, without writing anything, when the 304 cannot be merged.
+// removeEntry deletes the stored variant secondary of primary after a revalidation found that it may no longer
+// be stored, and returns the storage outcome. A failed delete is accounted for and leaves the entry to its
+// storage deadline.
+func (s *stage) removeEntry(r *http.Request, primary, secondary string) string {
+	ctx := context.WithoutCancel(r.Context())
+	if _, err := s.deleteVariant(ctx, primary, secondary); err != nil {
+		s.fail(ctx, opDelete, err)
+	}
+	return storeNotStorable
+}
+
+// refresh applies a 304 received for a conditional forward to the stored entry and serves the result. The merged
+// response is checked with the rule of a new response: when it may be stored it replaces the entry and is shared
+// with waiting requests; otherwise the response goes only to this request, and the variant is deleted from the store
+// when the response itself may not be stored (a reason in the request alone leaves the entry as it is). It returns
+// false, without writing anything, when the 304 cannot be merged.
 func (s *stage) refresh(w http.ResponseWriter, r *http.Request, fw *fillWriter) (outcome, bool) {
 	in := fw.in
 	merged, ok := httpcache.Merge304(in.e, fw.h304)
@@ -397,13 +414,24 @@ func (s *stage) refresh(w http.ResponseWriter, r *http.Request, fw *fillWriter) 
 	if s.stripTag {
 		stored.Del(s.tagHeader)
 	}
-	storage := storeNotStorable
-	if !in.forced {
+	resp := merged.Header
+	if cookies := fw.h304.Values("Set-Cookie"); len(cookies) > 0 {
+		resp = merged.Header.Clone()
+		resp["Set-Cookie"] = slices.Clone(cookies)
+	}
+	v := httpcache.Check(r, httpcache.ResponseMeta{Status: merged.Status, Header: resp, Complete: true, ResponseTime: fw.responseTime}, s.opts)
+	var storage string
+	switch {
+	case v.Side == httpcache.SideResponse:
+		storage = s.removeEntry(r, in.primary, in.secondary)
+	case !v.Storable, in.forced:
+		storage = storeNotStorable
+	default:
 		storage = s.storeEntry(r, in.lk.Token, in.primary, stored, merged.Body, merged.Status, tags, initialAge, ttl)
 	}
 	s.countStore(storage)
 	st := httpcache.Status{
-		Hit:          true,
+		Hit:          v.Storable,
 		Fwd:          httpcache.FwdStale,
 		FwdStatus:    http.StatusNotModified,
 		HasFwdStatus: true,
@@ -411,13 +439,16 @@ func (s *stage) refresh(w http.ResponseWriter, r *http.Request, fw *fillWriter) 
 		Key:          in.key,
 	}
 	fw.f.sent = true
+	o := outcome{result: resultRevalidated, stored: storage, responded: true}
+	if !v.Storable {
+		served := *merged
+		served.Header = resp
+		s.serve(w, r, &served, initialAge, st)
+		return o, true
+	}
 	s.serve(w, r, merged, initialAge, st)
-	return outcome{
-		result:    resultRevalidated,
-		stored:    storage,
-		shared:    s.share(r, &sharedResponse{merged: merged, age: initialAge, result: resultRevalidated, st: st}),
-		responded: true,
-	}, true
+	o.shared = s.share(r, &sharedResponse{merged: merged, age: initialAge, result: resultRevalidated, st: st})
+	return o, true
 }
 
 // failureStatus returns code when it is 500, 502, 503 or 504, and 0 otherwise.

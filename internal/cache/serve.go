@@ -13,10 +13,12 @@ import (
 )
 
 // serve writes the stored response e to w. age is the current age of the entry and st the Cache-Status
-// member to report; its TTL is derived from the stored lifetime and age.
+// member to report; its TTL is derived from the stored lifetime and age when st reports a hit or a stored response.
 func (s *stage) serve(w http.ResponseWriter, r *http.Request, e *httpcache.Entry, age time.Duration, st httpcache.Status) {
-	lifetime := httpcache.StoredLifetime(e.Header, s.opts)
-	st.TTL, st.HasTTL = httpcache.TTLSeconds(httpcache.Remaining(lifetime, age)), true
+	if st.Hit || st.Stored {
+		lifetime := httpcache.StoredLifetime(e.Header, s.opts)
+		st.TTL, st.HasTTL = httpcache.TTLSeconds(httpcache.Remaining(lifetime, age)), true
+	}
 	h := w.Header()
 	for k, vs := range e.Header {
 		h[textproto.CanonicalMIMEHeaderKey(k)] = slices.Clone(vs)

@@ -459,7 +459,7 @@ func (s *Snapshot) Activate() {
 			}
 		}
 		if len(s.cacheRoutes) > 0 {
-			for _, op := range []string{"get", "put", "purge"} {
+			for _, op := range []string{"get", "put", "purge", "delete"} {
 				s.cacheSeries.StoreErrors.With(op)
 			}
 		}
