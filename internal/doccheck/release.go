@@ -60,11 +60,11 @@ func ParseLog(out []byte) []Commit {
 	return commits
 }
 
-// ScanRefs returns the sorted refs whose history is scanned: local branches, tags and remote-tracking branches. The retained local backup branches and the symbolic HEAD refs are left out.
+// ScanRefs returns the sorted refs whose history is scanned: local branches, tags and remote-tracking branches. The retained backup branches, local or remote-tracking, and the symbolic HEAD refs are left out.
 func ScanRefs(refs []string) []string {
 	var out []string
 	for _, ref := range refs {
-		if strings.HasPrefix(ref, "refs/heads/backup/") || strings.HasSuffix(ref, "/HEAD") {
+		if isBackupRef(ref) || strings.HasSuffix(ref, "/HEAD") {
 			continue
 		}
 		if strings.HasPrefix(ref, "refs/heads/") || strings.HasPrefix(ref, "refs/tags/") || strings.HasPrefix(ref, "refs/remotes/") {
@@ -73,6 +73,18 @@ func ScanRefs(refs []string) []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+// isBackupRef reports whether ref is a retained backup branch, local (refs/heads/backup/...) or remote-tracking (refs/remotes/<remote>/backup/...).
+func isBackupRef(ref string) bool {
+	if strings.HasPrefix(ref, "refs/heads/backup/") {
+		return true
+	}
+	if rest, ok := strings.CutPrefix(ref, "refs/remotes/"); ok {
+		_, branch, found := strings.Cut(rest, "/")
+		return found && strings.HasPrefix(branch, "backup/")
+	}
+	return false
 }
 
 // CommitFindings returns a finding for each message line that matches a hygiene pattern or a commit trailer pattern: a co-author trailer, a session trailer or a session URL. Path is the first seven characters of the commit hash and Line is the 1-based line within the message.

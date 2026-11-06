@@ -27,6 +27,14 @@ func TestScanRefs(t *testing.T) {
 	}
 }
 
+func TestScanRefsBackup(t *testing.T) {
+	refs := []string{"refs/heads/main", "refs/heads/backup/x", "refs/remotes/origin/backup/x", "refs/remotes/upstream/backup/x/y", "refs/remotes/origin/main", "refs/remotes/backup/main", "refs/tags/v1", "refs/tags/backup/v1", "refs/heads/backups", "refs/heads/feature/backup", "refs/remotes/origin/backups", "refs/remotes/origin/feature/backup/x"}
+	want := []string{"refs/heads/backups", "refs/heads/feature/backup", "refs/heads/main", "refs/remotes/backup/main", "refs/remotes/origin/backups", "refs/remotes/origin/feature/backup/x", "refs/remotes/origin/main", "refs/tags/backup/v1", "refs/tags/v1"}
+	if got := ScanRefs(refs); !slices.Equal(got, want) {
+		t.Errorf("ScanRefs = %q, want %q", got, want)
+	}
+}
+
 func TestCommitFindings(t *testing.T) {
 	cases := []struct {
 		name, msg string
