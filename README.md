@@ -84,7 +84,7 @@ The stages and their order are described in [docs/architecture.md](docs/architec
 
 ## Requirements
 
-- Go toolchain 1.27 or later, as declared in `go.mod` of both modules.
+- Go 1.27 or later, as declared in `go.mod` of both modules; releases are built and tested with Go 1.27.
 - Redis 6.2 or later, for the Redis store only. The core module does not need Redis.
 - Platforms supported by the Go toolchain.
 
@@ -108,6 +108,12 @@ or, from a checkout:
 
 ```sh
 cd redis && GOWORK=off go build -o microgateway ./cmd/microgateway
+```
+
+or `make build`, which writes the binary to `bin/microgateway`:
+
+```sh
+make build
 ```
 
 ## Quick start
@@ -144,6 +150,22 @@ The repository holds two Go modules:
 
 The Redis module requires the core module at a version and includes `replace github.com/ok0/go-microgateway => ../` for local development. No `go.work` file is committed.
 
+## Dependencies
+
+Core module, direct dependencies:
+
+- `go.yaml.in/yaml/v3` for YAML configuration
+- `github.com/golang-jwt/jwt/v5` for JWT verification
+- `github.com/fsnotify/fsnotify` for file watching during hot reload
+
+Redis module, direct dependencies:
+
+- `github.com/ok0/go-microgateway`, the core module, through the local `replace` or a version
+- `github.com/redis/go-redis/v9` for the Redis store
+- `github.com/alicebob/miniredis/v2` for tests only
+
+The core has no Redis client. Only the `redis` module imports `github.com/redis/go-redis/v9`.
+
 ## Documentation
 
 - [Configuration reference](docs/configuration.md): every configuration block and key, defaults, and validation rules.
@@ -154,7 +176,10 @@ The Redis module requires the core module at a version and includes `replace git
 - [Embedding](docs/embedding.md): using the gateway from Go, mounting it in `net/http`, custom middleware and custom stores.
 - [Operations](docs/operations.md): the binary's commands and signals, the admin endpoint, metrics, logs and errors.
 - [Examples](examples/): runnable configurations and the embedding program.
+- [Contributing](CONTRIBUTING.md) (including the [release verification checklist](CONTRIBUTING.md#release-verification)): building, testing and the rules for changes.
+- [Security policy](SECURITY.md): supported versions and how to report a vulnerability.
+- [Changelog](CHANGELOG.md): notable changes by release.
 
 ## License
 
-Apache-2.0
+Apache-2.0. See [LICENSE](LICENSE).

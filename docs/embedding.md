@@ -206,7 +206,7 @@ func (f *allowListFetcher) FetchKeySet(ctx context.Context, provider, rawURL str
 	if err != nil {
 		return nil, fmt.Errorf("fetch key set for %s: request failed", provider)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetch key set for %s: status %d", provider, resp.StatusCode)
 	}

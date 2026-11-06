@@ -230,6 +230,38 @@ Messages that matter during operation:
 | warn | `admin request rejected` | A purge request was rejected with `401` or `403`. |
 | error | `panic recovered` | A panic was recovered while serving a request. |
 
+## Performance
+
+The benchmarks and soak tests measure the gateway's own overhead:
+
+- `BenchmarkFullChain` runs every stage on one route: timeout, API-key authentication, rate limit, route circuit breaker, retry, a two-host load balancer and the proxy. The cache is off. The benchmark runs against a local no-op backend and reports the gateway path and the direct client path separately.
+- `BenchmarkCacheHit` compares a memory-cache hit with the same route without a cache.
+- `BenchmarkLookup1000` measures route lookup with 1000 routes.
+- `TestSoakFullChain` and `TestSoakCacheMixed` run the full chain and a mixed cache workload for the duration set by `MICROGATEWAY_SOAK`, and log the goroutine count and the heap in use.
+- Each soak sample is taken with no request in flight, after two garbage collections, over a fixed pool of upstream connections opened before the warm-up; the baseline is taken after the warm-up.
+
+Commands:
+
+- `make bench` runs every benchmark once as a smoke test. It sets no thresholds.
+- `make perf` runs the full-length benchmarks, with `MICROGATEWAY_HEAVY=1`.
+- `make soak` runs the soak tests with `MICROGATEWAY_HEAVY=1` and `MICROGATEWAY_SOAK=60s`.
+
+Targets:
+
+- The overhead p50 of the full chain is below 150 µs. The overhead of a cache hit is below 50 µs over passthrough.
+- Route lookup is below 2 µs per operation.
+- The goroutine count stays within ±10% of the baseline at every sample.
+- The final heap in use is at most 1.25 times the baseline, and the heap does not rise across the thirds of the run (the mean of each third is higher than the one before by more than twice the spread within the thirds).
+
+Reading the output:
+
+- `gateway-p50-ns` and `direct-p50-ns` (or `passthrough-p50-ns` for the cache benchmark) are the median latencies of the gateway path and the direct path, in nanoseconds.
+- `overhead-p50-ns` is the difference between them, which is the value the targets apply to.
+- The benchmarks also report `ns/op` in the usual Go format.
+- The soak tests write their measurements to the test log.
+
+No measured result is published yet. Record results in the CHANGELOG entry of the release that measured them.
+
 ## Error responses
 
 Every error the gateway writes itself has a JSON body with this shape:
