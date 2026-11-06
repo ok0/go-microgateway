@@ -121,6 +121,12 @@ func (f *auFetcher) setPanic(on bool) {
 	f.panics = on
 }
 
+func (f *auFetcher) setBlock(ch chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.block = ch
+}
+
 func (f *auFetcher) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -161,6 +167,23 @@ func auAssert403(t *testing.T, rec *httptest.ResponseRecorder) {
 func auFailures(t *testing.T, g *microgateway.Gateway, route, reason string) float64 {
 	t.Helper()
 	return rsMetricOr0(t, g, "microgateway_auth_failures_total", "route", route, "reason", reason)
+}
+
+// auRefreshes returns the value of microgateway_auth_jwks_refreshes_total for provider idp and result, or 0 when not
+// yet recorded.
+func auRefreshes(t *testing.T, g *microgateway.Gateway, result string) float64 {
+	t.Helper()
+	return rsMetricOr0(t, g, "microgateway_auth_jwks_refreshes_total", "provider", "idp", "result", result)
+}
+
+// auAwaitRefreshes waits until n refreshes with result have been reported and fails unless exactly n were.
+func auAwaitRefreshes(t *testing.T, g *microgateway.Gateway, result string, n float64) {
+	t.Helper()
+	eventually(t, fmt.Sprintf("%v %s key set refreshes", n, result), func() bool { return auRefreshes(t, g, result) >= n },
+		func() string { return fmt.Sprintf("%s refreshes = %v", result, auRefreshes(t, g, result)) })
+	if got := auRefreshes(t, g, result); got != n {
+		t.Fatalf("%s refreshes = %v, want %v", result, got, n)
+	}
 }
 
 const apkRoute = "  - name: r\n    match:\n      path: /x\n    upstream: be\n    auth:\n      mode: apikey\n      providers: [keys1]\n"
@@ -903,6 +926,12 @@ func TestAuthJWKSLastGood(t *testing.T) {
 			if rr := e.get(g, "/jwt", hdr); rr.Code != http.StatusOK {
 				t.Fatalf("status after failed refresh = %d, want 200 (last-good keys)", rr.Code)
 			}
+			auAwaitRefreshes(t, g, "failure", 1)
+			eventually(t, "failed refresh logged", func() bool {
+				e.mu.Lock()
+				defer e.mu.Unlock()
+				return strings.Contains(e.logs.String(), "jwks refresh failed")
+			}, nil)
 			if n := f.count(); n != 2 {
 				t.Errorf("fetches = %d, want 2", n)
 			}
@@ -951,6 +980,7 @@ func TestAuthJWKSTTLLazy(t *testing.T) {
 	if rr := e.get(g, "/jwt", hdr); rr.Code != http.StatusOK {
 		t.Fatalf("status after ttl = %d, want 200", rr.Code)
 	}
+	auAwaitRefreshes(t, g, "success", 2)
 	if n := f.count(); n != 2 {
 		t.Fatalf("fetches after ttl = %d, want 2", n)
 	}
@@ -1174,13 +1204,16 @@ func TestInstancesIsolateJWKSKeySets(t *testing.T) {
 	if rr := get(gA, "/jwt", tok1); rr.Code != http.StatusOK {
 		t.Fatalf("A status at ttl = %d, want 200", rr.Code)
 	}
-	eventually(t, "A key set refetched at its ttl", func() bool { return fa.count() == 2 },
-		func() string { return fmt.Sprintf("A fetches = %d, want 2", fa.count()) })
+	auAwaitRefreshes(t, gA, "success", 2)
+	if n := fa.count(); n != 2 {
+		t.Fatalf("A fetches at ttl = %d, want 2", n)
+	}
 
 	fakeA.Advance(5*time.Minute + time.Nanosecond)
 	if rr := get(gA, "/jwt", tok1); rr.Code != http.StatusOK {
 		t.Fatalf("A status after second ttl = %d, want 200", rr.Code)
 	}
+	auAwaitRefreshes(t, gA, "success", 3)
 	if n := fa.count(); n != 3 {
 		t.Fatalf("A fetches after second ttl = %d, want 3", n)
 	}
@@ -1212,6 +1245,7 @@ func TestInstancesIsolateJWKSKeySets(t *testing.T) {
 	if rr := get(gA, "/jwt", tok1); rr.Code != http.StatusOK {
 		t.Fatalf("A status after failed refresh = %d, want 200 (last-good keys)", rr.Code)
 	}
+	auAwaitRefreshes(t, gA, "failure", 1)
 	if n := fa.count(); n != 5 {
 		t.Fatalf("A fetches after failed refresh = %d, want 5", n)
 	}
@@ -1247,6 +1281,101 @@ func TestInstancesIsolateJWKSKeySets(t *testing.T) {
 	}
 }
 
+func TestAuthJWKSServesDuringBlockedRefresh(t *testing.T) {
+	e := newAuEnv(t)
+	k := auTestKeys(t)
+	be, _ := auBackend(e)
+	k1 := auJWK("k1", "RS256", &k.rsa1.PublicKey)
+	fa, fb := &auFetcher{}, &auFetcher{}
+	fa.set(auJWKS(k1), nil)
+	fb.set(auJWKS(k1), nil)
+	spy := teststore.NewSpy()
+	shared := stShared(t, rlFake())
+	opt := miSpyOption(spy, store.CapRateLimit, shared, nil, nil)
+	doc := auSpyDoc(be.URL, "5m", "1s")
+	fakeA, fakeB := clock.NewFake(auStart), clock.NewFake(auStart)
+	gA := e.n.gateway(t, doc, microgateway.WithLogger(e.logger()), withClock(fakeA),
+		microgateway.WithKeySetFetcher(fa), microgateway.WithHTTPClient(auFailingClient(t)), opt)
+	gB := e.n.gateway(t, doc, microgateway.WithLogger(e.logger()), withClock(fakeB),
+		microgateway.WithKeySetFetcher(fb), microgateway.WithHTTPClient(auFailingClient(t)), opt)
+	tok1 := e.mint("RS256", "k1", k.rsa1, e.claims(nil))
+	tok2 := e.mint("RS256", "k2", k.rsa2, e.claims(nil))
+	get := func(g *microgateway.Gateway, target, tok string) *httptest.ResponseRecorder {
+		return e.get(g, target, http.Header{"Authorization": []string{"Bearer " + tok}})
+	}
+	async := func(g *microgateway.Gateway, tok string) <-chan *httptest.ResponseRecorder {
+		ch := make(chan *httptest.ResponseRecorder, 1)
+		go func() { ch <- get(g, "/jwt", tok) }()
+		return ch
+	}
+
+	if rr := get(gA, "/jwt", tok1); rr.Code != http.StatusOK {
+		t.Fatalf("A k1 status = %d, want 200", rr.Code)
+	}
+	if rr := get(gB, "/jwt", tok1); rr.Code != http.StatusOK {
+		t.Fatalf("B k1 status = %d, want 200", rr.Code)
+	}
+	if fa.count() != 1 || fb.count() != 1 {
+		t.Fatalf("fetches after load = %d and %d, want 1 and 1", fa.count(), fb.count())
+	}
+
+	block := make(chan struct{})
+	fa.setBlock(block)
+	fakeA.Advance(5 * time.Minute)
+	rr, _ := testwait.Recv(t, "A request with a cached kid during a blocked refresh", async(gA, tok1), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("A cached kid status during refresh = %d, want 200", rr.Code)
+	}
+	eventually(t, "A refresh fetching", func() bool { return fa.count() == 2 }, nil)
+	unknown := async(gA, tok2)
+	for range 3 {
+		rr, _ = testwait.Recv(t, "A cached kid request while the refresh is blocked", async(gA, tok1), nil)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("A cached kid status while blocked = %d, want 200", rr.Code)
+		}
+	}
+	rr, _ = testwait.Recv(t, "B request with a cached kid", async(gB, tok1), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("B status = %d, want 200", rr.Code)
+	}
+	if n := fb.count(); n != 1 {
+		t.Fatalf("B fetches = %d, want 1", n)
+	}
+
+	fakeB.Advance(5 * time.Minute)
+	rr, _ = testwait.Recv(t, "B request after its ttl", async(gB, tok1), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("B status after ttl = %d, want 200", rr.Code)
+	}
+	auAwaitRefreshes(t, gB, "success", 2)
+	if n := fb.count(); n != 2 {
+		t.Fatalf("B fetches after ttl = %d, want 2", n)
+	}
+	if n := fa.count(); n != 2 {
+		t.Fatalf("A fetches during B refresh = %d, want 2", n)
+	}
+	if n := spy.Count(""); n != 0 {
+		t.Fatalf("store calls for /jwt requests = %d, want 0", n)
+	}
+
+	close(block)
+	rr, _ = testwait.Recv(t, "A unknown-kid request after the refresh", unknown, nil)
+	auAssert401(t, rr, "Bearer")
+	if got := auFailures(t, gA, "jwt", "unknown_kid"); got != 1 {
+		t.Errorf("A unknown_kid failures = %v, want 1", got)
+	}
+	auAwaitRefreshes(t, gA, "success", 2)
+	if rr := get(gA, "/jwt", tok1); rr.Code != http.StatusOK {
+		t.Fatalf("A k1 status after refresh = %d, want 200", rr.Code)
+	}
+	if n := fa.count(); n != 2 {
+		t.Fatalf("A fetches after refresh = %d, want 2", n)
+	}
+	if n := spy.Count(""); n != 0 {
+		t.Fatalf("store calls for /jwt requests after refresh = %d, want 0", n)
+	}
+}
+
 func TestKeySetFetcherOnlySource(t *testing.T) {
 	e := newAuEnv(t)
 	k := auTestKeys(t)
@@ -1273,6 +1402,7 @@ func TestKeySetFetcherOnlySource(t *testing.T) {
 	if rr := e.get(g, "/jwt", hdr(tok1)); rr.Code != http.StatusOK {
 		t.Fatalf("status after failed fetch = %d, want 200 (last-good keys)", rr.Code)
 	}
+	auAwaitRefreshes(t, g, "failure", 1)
 	if n := f.count(); n != 2 {
 		t.Fatalf("fetches after failed fetch = %d, want 2", n)
 	}
@@ -1282,6 +1412,7 @@ func TestKeySetFetcherOnlySource(t *testing.T) {
 	if rr := e.get(g, "/jwt", hdr(tok1)); rr.Code != http.StatusOK {
 		t.Fatalf("status after panicking fetch = %d, want 200 (last-good keys)", rr.Code)
 	}
+	auAwaitRefreshes(t, g, "failure", 2)
 	if n := f.count(); n != 3 {
 		t.Fatalf("fetches after panicking fetch = %d, want 3", n)
 	}

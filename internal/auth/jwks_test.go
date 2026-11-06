@@ -58,6 +58,21 @@ func (r *refreshCount) get() (int, int) {
 	return r.ok, r.fail
 }
 
+// waitRefreshes waits until rc has recorded ok+fail refreshes and fails unless exactly ok succeeded and fail failed.
+func waitRefreshes(t *testing.T, rc *refreshCount, ok, fail int) {
+	t.Helper()
+	testwait.Until(t, fmt.Sprintf("%d refreshes reported", ok+fail), func() bool {
+		o, f := rc.get()
+		return o+f >= ok+fail
+	}, func() string {
+		o, f := rc.get()
+		return fmt.Sprintf("ok=%d fail=%d", o, f)
+	})
+	if o, f := rc.get(); o != ok || f != fail {
+		t.Fatalf("refresh counts ok=%d fail=%d, want %d/%d", o, f, ok, fail)
+	}
+}
+
 type syncBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -167,7 +182,8 @@ func TestJWKSTTL(t *testing.T) {
 	ks := loadKeyset()
 	clk := clock.NewFake(testNow)
 	mf := newMemFetcher(jwksBytes(jwk("rs256", "RS256", &ks.rsa1.PublicKey)))
-	j := newTestJWKS(t, mf, clk, nil, nil)
+	rc := &refreshCount{}
+	j := newTestJWKS(t, mf, clk, rc, nil)
 
 	mustLookup(t, j, "rs256")
 	clk.Advance(testTTL - time.Second)
@@ -177,8 +193,13 @@ func TestJWKSTTL(t *testing.T) {
 	}
 	clk.Advance(time.Second)
 	mustLookup(t, j, "rs256")
+	waitRefreshes(t, rc, 2, 0)
 	if n := mf.count(); n != 2 {
 		t.Fatalf("fetches after TTL = %d, want 2", n)
+	}
+	mustLookup(t, j, "rs256")
+	if n := mf.count(); n != 2 {
+		t.Fatalf("fetches on refreshed keys = %d, want 2", n)
 	}
 }
 
@@ -310,11 +331,9 @@ func TestJWKSFailureKeepsLastGood(t *testing.T) {
 			tc.fail(mf)
 			clk.Advance(testTTL)
 			mustLookup(t, j, "rs256")
+			waitRefreshes(t, rc, 1, 1)
 			if n := mf.count(); n != 2 {
 				t.Fatalf("fetches after failed refresh = %d, want 2", n)
-			}
-			if ok, fail := rc.get(); ok != 1 || fail != 1 {
-				t.Fatalf("refresh counts ok=%d fail=%d, want 1/1", ok, fail)
 			}
 
 			mustLookup(t, j, "rs256")
@@ -324,6 +343,7 @@ func TestJWKSFailureKeepsLastGood(t *testing.T) {
 
 			clk.Advance(testMinRefresh)
 			mustLookup(t, j, "rs256")
+			waitRefreshes(t, rc, 1, 2)
 			if n := mf.count(); n != 3 {
 				t.Fatalf("fetches after cooldown = %d, want 3", n)
 			}
