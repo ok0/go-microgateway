@@ -4,7 +4,6 @@ import (
 	"path"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 )
 
@@ -57,45 +56,26 @@ func CopiedSource(p string, src []byte) []Finding {
 // DirectRequires returns the module paths of the require directives in gomod that are not marked indirect. Both single-line and block forms are read, and quoted paths are unquoted. The paths keep their file order.
 func DirectRequires(gomod []byte) []string {
 	var out []string
-	inBlock := false
-	for _, line := range strings.Split(string(gomod), "\n") {
-		t := strings.TrimSpace(line)
-		switch {
-		case inBlock:
-			if t == ")" {
-				inBlock = false
-				continue
-			}
-			if mod, ok := directRequire(t); ok {
-				out = append(out, mod)
-			}
-		case t == "require (":
-			inBlock = true
-		case strings.HasPrefix(t, "require "):
-			if mod, ok := directRequire(strings.TrimSpace(strings.TrimPrefix(t, "require "))); ok {
-				out = append(out, mod)
-			}
+	entries, _ := goModEntries(gomod) // an unterminated block still yields the entries read before it
+	for _, e := range entries {
+		if e.Verb != "require" {
+			continue
+		}
+		if mod, ok := directRequire(e.Args, e.Comment); ok {
+			out = append(out, mod)
 		}
 	}
 	return out
 }
 
-// directRequire parses one require entry such as `example.com/m v1.0.0 // indirect` and reports its module path and whether it is a direct requirement.
-func directRequire(entry string) (string, bool) {
-	body, comment, hasComment := strings.Cut(entry, "//")
-	fields := strings.Fields(body)
+// directRequire parses one require entry from its args, the entry without the comment, and its comment, the text after //. For example `example.com/m v1.0.0` with comment `indirect`. It reports the module path and whether it is a direct requirement.
+func directRequire(args, comment string) (string, bool) {
+	fields := strings.Fields(args)
 	if len(fields) == 0 {
 		return "", false
 	}
-	if hasComment {
-		c := strings.TrimSpace(comment)
-		if c == "indirect" || strings.HasPrefix(c, "indirect;") {
-			return "", false
-		}
+	if comment == "indirect" || strings.HasPrefix(comment, "indirect;") {
+		return "", false
 	}
-	mod := fields[0]
-	if q, err := strconv.Unquote(mod); err == nil {
-		mod = q
-	}
-	return mod, true
+	return unquote(fields[0]), true
 }
