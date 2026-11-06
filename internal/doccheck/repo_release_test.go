@@ -362,18 +362,40 @@ func TestModuleDependencies(t *testing.T) {
 	for _, p := range DependencyFindings(core, redis) {
 		t.Error(p)
 	}
-	checks := []struct{ dir, want string }{
-		{root, "github.com/ok0/go-microgateway"},
-		{filepath.Join(root, "redis"), "github.com/ok0/go-microgateway/redis"},
+	out, err := run(t, root, []string{"GOWORK=off"}, "go", "list", "-m")
+	if err != nil {
+		t.Fatalf("go list -m in %s: %v\n%s", root, err, out)
 	}
-	for _, c := range checks {
-		out, err := run(t, c.dir, []string{"GOWORK=off"}, "go", "list", "-m")
-		if err != nil {
-			t.Fatalf("go list -m in %s: %v\n%s", c.dir, err, out)
-		}
-		if got := strings.TrimSpace(string(out)); got != c.want {
-			t.Errorf("go list -m in %s = %q, want %q", c.dir, got, c.want)
-		}
+	if got := strings.TrimSpace(string(out)); got != "github.com/ok0/go-microgateway" {
+		t.Errorf("go list -m in %s = %q, want %q", root, got, "github.com/ok0/go-microgateway")
+	}
+	redisDir := filepath.Join(root, "redis")
+	env := []string{"GOWORK=" + filepath.Join(root, "go.work")}
+	out, err = run(t, redisDir, env, "go", "list", "-m")
+	if err != nil {
+		t.Fatalf("go list -m in %s: %v\n%s", redisDir, err, out)
+	}
+	mods := outputLines(out)
+	slices.Sort(mods)
+	wantMods := []string{"github.com/ok0/go-microgateway", "github.com/ok0/go-microgateway/redis"}
+	if !slices.Equal(mods, wantMods) {
+		t.Errorf("go list -m in the workspace = %q, want %q", mods, wantMods)
+	}
+	out, err = run(t, redisDir, env, "go", "list", "-m", "-f", "{{.Dir}}", "github.com/ok0/go-microgateway")
+	if err != nil {
+		t.Fatalf("go list -m -f in %s: %v\n%s", redisDir, err, out)
+	}
+	coreDir := strings.TrimSpace(string(out))
+	wantInfo, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotInfo, err := os.Stat(coreDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(gotInfo, wantInfo) {
+		t.Errorf("core module in the workspace resolves to %s, want the checkout %s", coreDir, root)
 	}
 	readme := readAt(t, root, "README.md")
 	for _, dep := range slices.Concat(core, redis) {
@@ -386,30 +408,41 @@ func TestModuleDependencies(t *testing.T) {
 	}
 }
 
+func TestModulesInstallable(t *testing.T) {
+	root := repoRoot(t)
+	core, err := ParseGoMod(readAt(t, root, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	redis, err := ParseGoMod(readAt(t, root, "redis/go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := slices.Concat(ModuleFindings(core, redis), WorkFindings(readAt(t, root, "go.work"), core, redis))
+	for _, f := range findings {
+		t.Errorf("%s:%d: %s (%s)", f.Path, f.Line, f.Text, f.Pattern)
+	}
+	if got := redis.Requires["github.com/ok0/go-microgateway"]; got != "v0.1.0" {
+		t.Errorf("redis/go.mod requires github.com/ok0/go-microgateway %s, want v0.1.0", got)
+	}
+}
+
 func TestIgnoreFiles(t *testing.T) {
 	root := repoRoot(t)
 	gitignore := readLines(t, root, ".gitignore")
 	dockerignore := readLines(t, root, ".dockerignore")
-	for _, want := range []string{".docs/", plannedDir + "/", "go.work*", "bin/"} {
-		if !slices.Contains(gitignore, want) {
-			t.Errorf(".gitignore lacks %q", want)
-		}
+	for _, p := range ignoreFileProblems(gitignore, dockerignore) {
+		t.Error(p)
 	}
-	for _, want := range []string{".git", ".github", ".docs", "go.work*", "bin", "*.test", "*.out", "**/testdata/fuzz"} {
-		if !slices.Contains(dockerignore, want) {
-			t.Errorf(".dockerignore lacks %q", want)
-		}
-	}
-	if !slices.Contains(dockerignore, plannedDir) && !slices.Contains(dockerignore, plannedDir+"/") {
-		t.Errorf(".dockerignore lacks the planning directory")
-	}
-	for _, name := range repoFiles(t) {
+	files := repoFiles(t)
+	for _, name := range files {
 		switch {
 		case strings.HasPrefix(name, ".docs/"), strings.HasPrefix(name, plannedDir+"/"), strings.HasPrefix(name, "bin/"):
 			t.Errorf("repository file under an ignored directory: %s", name)
-		case strings.HasPrefix(path.Base(name), "go.work"):
-			t.Errorf("repository go.work file: %s", name)
 		}
+	}
+	for _, p := range trackedWorkProblems(files) {
+		t.Error(p)
 	}
 }
 
@@ -504,8 +537,8 @@ func workflowProblems(wf map[string]any, makefile []byte, floor string) []string
 	add := func(format string, args ...any) {
 		problems = append(problems, fmt.Sprintf(format, args...))
 	}
-	if got := mapOf(wf["env"])["GOWORK"]; got != "off" {
-		add("top-level env GOWORK = %v, want off", got)
+	if _, ok := mapOf(wf["env"])["GOWORK"]; ok {
+		add("top-level env sets GOWORK; set the command mode per job")
 	}
 	jobs := mapOf(wf["jobs"])
 	for _, name := range []string{"lint", "test", "coverage", "tidy", "integration", "realnet", "docker"} {
@@ -526,6 +559,36 @@ func workflowProblems(wf map[string]any, makefile []byte, floor string) []string
 			}
 			if u, ok := step["uses"].(string); ok {
 				uses = append(uses, u)
+			}
+		}
+	}
+
+	for _, name := range slices.Sorted(maps.Keys(jobs)) {
+		job := mapOf(jobs[name])
+		for i, raw := range listOf(job["steps"]) {
+			step := mapOf(raw)
+			env := stepEnv(wf, job, step)
+			dir := "."
+			if wd, ok := step["working-directory"].(string); ok {
+				dir = wd
+			} else if step["uses"] == any("golangci/golangci-lint-action@v9") {
+				if wd, ok := mapOf(step["with"])["working-directory"].(string); ok {
+					dir = wd
+				}
+			}
+			var cmds []goCommand
+			if step["uses"] == any("golangci/golangci-lint-action@v9") {
+				_, set := env["GOWORK"]
+				cmds = []goCommand{{Dir: dir, GOWORK: env["GOWORK"], Set: set, Text: "golangci-lint"}}
+			} else if runText, ok := step["run"].(string); ok {
+				text, err := ExpandMakeRun(runText, makefile, env)
+				if err != nil {
+					text = runText
+				}
+				cmds = goCommands(text, dir, env)
+			}
+			for _, p := range modeProblems(cmds, "$(CURDIR)/go.work", "${{ github.workspace }}/go.work") {
+				add("job %s step %d: %s", name, i, p)
 			}
 		}
 	}
@@ -719,36 +782,65 @@ func TestWorkflowVersionPolicy(t *testing.T) {
 	matrixOf := func(wf map[string]any, name string) map[string]any {
 		return mapOf(mapOf(jobMap(wf, name)["strategy"])["matrix"])
 	}
+	setStepEnv := func(job string, match func(step map[string]any) bool, env map[string]any) (func(wf map[string]any), *bool) {
+		found := new(bool)
+		return func(wf map[string]any) {
+			for _, raw := range listOf(jobMap(wf, job)["steps"]) {
+				if match(mapOf(raw)) {
+					mapOf(raw)["env"] = env
+					*found = true
+					return
+				}
+			}
+		}, found
+	}
+	named := func(name string) func(step map[string]any) bool {
+		return func(step map[string]any) bool { return step["name"] == any(name) }
+	}
+	redisDir := func(step map[string]any) bool {
+		return mapOf(step["with"])["working-directory"] == any("redis")
+	}
+	redisTestOff, redisTestFound := setStepEnv("test", named("test redis module"), map[string]any{"GOWORK": "off"})
+	redisLintOff, redisLintFound := setStepEnv("lint", redisDir, map[string]any{"GOWORK": "off"})
 	cases := []struct {
 		name   string
 		mutate func(wf map[string]any)
 		want   string
+		found  *bool
 	}{
-		{"real", nil, ""},
+		{"real", nil, "", nil},
 		{"no-redis-6.2", func(wf map[string]any) {
 			matrixOf(wf, "integration")["redis"] = []any{"redis:7.4"}
-		}, "redis:6.2"},
+		}, "redis:6.2", nil},
 		{"no-redis-7.4", func(wf map[string]any) {
 			matrixOf(wf, "integration")["redis"] = []any{"redis:6.2"}
-		}, "redis:7.4"},
+		}, "redis:7.4", nil},
 		{"fixed-image", func(wf map[string]any) {
 			mapOf(mapOf(jobMap(wf, "integration")["services"])["redis"])["image"] = "redis:6.2"
-		}, "matrix.redis"},
+		}, "matrix.redis", nil},
 		{"no-floor", func(wf map[string]any) {
 			matrixOf(wf, "test")["go"] = []any{"1.27.x", "stable"}
-		}, "floor"},
+		}, "floor", nil},
 		{"no-stable", func(wf map[string]any) {
 			matrixOf(wf, "test")["go"] = []any{"1.27.0", "1.27.3"}
-		}, "stable"},
+		}, "stable", nil},
 		{"unpinned-job", func(wf map[string]any) {
 			setupGoWith(jobMap(wf, "coverage"))["go-version"] = "1.27.x"
-		}, "coverage"},
+		}, "coverage", nil},
 		{"inexact-pin", func(wf map[string]any) {
 			mapOf(wf["env"])["GO_VERSION"] = "1.27.x"
-		}, "GO_VERSION"},
+		}, "GO_VERSION", nil},
 		{"fail-fast", func(wf map[string]any) {
 			delete(mapOf(jobMap(wf, "test")["strategy"]), "fail-fast")
-		}, "fail-fast"},
+		}, "fail-fast", nil},
+		{"top-level-gowork", func(wf map[string]any) {
+			mapOf(wf["env"])["GOWORK"] = "off"
+		}, "top-level", nil},
+		{"core-test-auto", func(wf map[string]any) {
+			delete(mapOf(jobMap(wf, "test")["env"]), "GOWORK")
+		}, "core command", nil},
+		{"redis-test-off", redisTestOff, "redis command", redisTestFound},
+		{"redis-lint-off", redisLintOff, "redis command", redisLintFound},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -758,6 +850,9 @@ func TestWorkflowVersionPolicy(t *testing.T) {
 			}
 			if c.mutate != nil {
 				c.mutate(wf)
+			}
+			if c.found != nil && !*c.found {
+				t.Fatal("mutation target step not found")
 			}
 			problems := workflowProblems(wf, makefile, goFloor(t, root))
 			if c.want == "" {
@@ -821,8 +916,8 @@ func TestWorkflowIntegrationResolution(t *testing.T) {
 	if _, err := ExpandMakeRun("make nosuch", makefile(tagged), env); err == nil {
 		t.Error("ExpandMakeRun of a missing make target returned no error")
 	}
-	const variable = "cd redis && MICROGATEWAY_REDIS_ADDR=$(MICROGATEWAY_REDIS_ADDR) $(GO) test -race -count=1 -tags integration ./..."
-	withGo := []byte("GO := GOWORK=off go\nintegration:\n\t" + variable + "\n")
+	const variable = "cd redis && MICROGATEWAY_REDIS_ADDR=$(MICROGATEWAY_REDIS_ADDR) $(GO_REDIS) test -race -count=1 -tags integration ./..."
+	withGo := []byte("GO_REDIS := GOWORK=$(CURDIR)/go.work go\nintegration:\n\t" + variable + "\n")
 	withoutGo := []byte("integration:\n\t" + variable + "\n")
 	if !integrationRunOK(stepsOf("make integration"), withGo, env) {
 		t.Errorf("variable recipe %q failed the integration predicate", variable)
@@ -831,13 +926,21 @@ func TestWorkflowIntegrationResolution(t *testing.T) {
 		t.Error("recipe with an unresolved MICROGATEWAY_REDIS_ADDR passed the integration predicate")
 	}
 	if integrationRunOK(stepsOf("make integration"), withoutGo, env) {
-		t.Error("recipe with an undefined GO passed the integration predicate")
+		t.Error("recipe with an undefined GO_REDIS passed the integration predicate")
 	}
 }
 
 func TestDockerfile(t *testing.T) {
 	root := repoRoot(t)
-	lines := strings.Split(string(readAt(t, root, "Dockerfile")), "\n")
+	for _, p := range dockerfileProblems(readAt(t, root, "Dockerfile"), readAt(t, root, "Makefile")) {
+		t.Error(p)
+	}
+}
+
+// dockerfileProblems returns the problems of the Dockerfile: the final distroless stage, the build stage's module copies and go commands in their command modes, and the build of the Redis binary with the Makefile's linker flags.
+func dockerfileProblems(dockerfile, makefile []byte) []string {
+	var problems []string
+	lines := strings.Split(string(dockerfile), "\n")
 	var froms []int
 	for i, line := range lines {
 		if instructionOf(line) == "FROM" {
@@ -845,11 +948,11 @@ func TestDockerfile(t *testing.T) {
 		}
 	}
 	if len(froms) < 2 {
-		t.Fatalf("Dockerfile has %d FROM instructions, want at least 2", len(froms))
+		return []string{fmt.Sprintf("Dockerfile has %d FROM instructions, want at least 2", len(froms))}
 	}
 	last := froms[len(froms)-1]
 	if fields := strings.Fields(lines[last]); len(fields) != 2 || fields[1] != distrolessImage {
-		t.Errorf("last FROM is %q, want %s", lines[last], distrolessImage)
+		problems = append(problems, fmt.Sprintf("last FROM is %q, want %s", lines[last], distrolessImage))
 	}
 
 	build := strings.Join(lines[:last], "\n")
@@ -858,18 +961,18 @@ func TestDockerfile(t *testing.T) {
 		final = append(final, strings.TrimSpace(line))
 	}
 	if !slices.Contains(final, "USER nonroot") {
-		t.Error("final stage lacks USER nonroot")
+		problems = append(problems, "final stage lacks USER nonroot")
 	}
 	for _, line := range final {
 		if instructionOf(line) == "RUN" {
-			t.Errorf("final stage runs %q", line)
+			problems = append(problems, fmt.Sprintf("final stage runs %q", line))
 		}
 	}
 	if !slices.Contains(final, `ENTRYPOINT ["/microgateway"]`) {
-		t.Error(`final stage lacks ENTRYPOINT ["/microgateway"]`)
+		problems = append(problems, `final stage lacks ENTRYPOINT ["/microgateway"]`)
 	}
 	if !slices.Contains(final, "EXPOSE 8080 9901") {
-		t.Error("final stage lacks EXPOSE 8080 9901")
+		problems = append(problems, "final stage lacks EXPOSE 8080 9901")
 	}
 	cmdOK := false
 	for _, line := range final {
@@ -878,22 +981,144 @@ func TestDockerfile(t *testing.T) {
 		}
 	}
 	if !cmdOK {
-		t.Error(`final stage CMD lacks "run", "-config", "/etc/microgateway/config.yaml"`)
+		problems = append(problems, `final stage CMD lacks "run", "-config", "/etc/microgateway/config.yaml"`)
 	}
 
-	for _, want := range []string{"CGO_ENABLED=0", "GOWORK=off", "-trimpath", "-s -w", "./cmd/microgateway"} {
+	for _, want := range []string{"CGO_ENABLED=0", "-trimpath", "-s -w", "./cmd/microgateway"} {
 		if !strings.Contains(build, want) {
-			t.Errorf("build stage lacks %q", want)
+			problems = append(problems, fmt.Sprintf("build stage lacks %q", want))
 		}
 	}
 	if !workdirRE.MatchString(build) {
-		t.Error("build stage does not enter the redis module")
+		problems = append(problems, "build stage does not enter the redis module")
 	}
 
-	mk := readAt(t, root, "Makefile")
-	ldflags := strings.ReplaceAll(makeVariable(mk, "LDFLAGS"), "$(CLI)", makeVariable(mk, "CLI"))
+	ldflags := strings.ReplaceAll(makeVariable(makefile, "LDFLAGS"), "$(CLI)", makeVariable(makefile, "CLI"))
 	if got, want := flagNames(build), flagNames(ldflags); !slices.Equal(got, want) {
-		t.Errorf("Dockerfile -X names %q, Makefile LDFLAGS names %q", got, want)
+		problems = append(problems, fmt.Sprintf("Dockerfile -X names %q, Makefile LDFLAGS names %q", got, want))
+	}
+
+	var copies [][]string
+	var cmds []goCommand
+	beforeRun := true
+	base, cur := "", ""
+	for _, line := range lines[:last] {
+		switch instructionOf(line) {
+		case "COPY":
+			if beforeRun {
+				copies = append(copies, copySources(line))
+			}
+		case "WORKDIR":
+			if f := strings.Fields(line); len(f) > 1 {
+				cur = f[1]
+				if base == "" {
+					base = cur
+				}
+			}
+		case "RUN":
+			beforeRun = false
+			_, text, _ := strings.Cut(strings.TrimSpace(line), " ")
+			rel := path.Clean(strings.Trim(strings.TrimPrefix(cur, base), "/"))
+			cmds = append(cmds, goCommands(text, rel, nil)...)
+		}
+	}
+	for _, group := range [][]string{{"go.work", "go.mod", "go.sum"}, {"redis/go.mod", "redis/go.sum"}} {
+		if !slices.ContainsFunc(copies, func(srcs []string) bool { return containsAll(srcs, group) }) {
+			problems = append(problems, fmt.Sprintf("build stage does not copy %s before its first RUN", strings.Join(group, ", ")))
+		}
+	}
+	problems = append(problems, modeProblems(cmds, path.Join(base, "go.work"))...)
+	if !slices.ContainsFunc(cmds, func(c goCommand) bool {
+		return c.Dir == "redis" && strings.HasPrefix(c.Text, "go build") && strings.Contains(c.Text, "./cmd/microgateway")
+	}) {
+		problems = append(problems, "build stage does not build ./cmd/microgateway in the redis module")
+	}
+	return problems
+}
+
+// copySources returns the source operands of a COPY instruction line: its operands without flags and without the destination.
+func copySources(line string) []string {
+	f := strings.Fields(line)[1:]
+	for len(f) > 0 && strings.HasPrefix(f[0], "--") {
+		f = f[1:]
+	}
+	if len(f) < 2 {
+		return nil
+	}
+	return f[:len(f)-1]
+}
+
+// containsAll reports whether every name of want is in have.
+func containsAll(have, want []string) bool {
+	for _, w := range want {
+		if !slices.Contains(have, w) {
+			return false
+		}
+	}
+	return true
+}
+
+func TestDockerfileModes(t *testing.T) {
+	root := repoRoot(t)
+	dockerfile := string(readAt(t, root, "Dockerfile"))
+	makefile := readAt(t, root, "Makefile")
+	cases := []struct {
+		name, old, with, want string
+	}{
+		{"real", "", "", ""},
+		{"copy without go.work", "COPY go.work go.mod go.sum ./", "COPY go.mod go.sum ./", "go.work"},
+		{"build with GOWORK off", "GOWORK=/src/go.work go build", "GOWORK=off go build", "redis command"},
+		{"build without workspace", "GOWORK=/src/go.work go build", "go build", "redis command"},
+		{"download with GOWORK off", "GOWORK=/src/go.work go mod download", "GOWORK=off go mod download", "redis command"},
+		{"final stage as root", "USER nonroot", "USER root", "USER nonroot"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			src := dockerfile
+			if c.old != "" {
+				src = replaceOnce(t, dockerfile, c.old, c.with)
+			}
+			problems := dockerfileProblems([]byte(src), makefile)
+			if c.want == "" {
+				if len(problems) != 0 {
+					t.Errorf("unmutated Dockerfile reports problems: %q", problems)
+				}
+				return
+			}
+			if !slices.ContainsFunc(problems, func(p string) bool { return strings.Contains(p, c.want) }) {
+				t.Errorf("want a problem containing %q, got %q", c.want, problems)
+			}
+		})
+	}
+}
+
+func TestContributingCommandModes(t *testing.T) {
+	root := repoRoot(t)
+	doc, err := Load(filepath.Join(root, "CONTRIBUTING.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _, _, ok := section(doc, "Command modes")
+	if !ok {
+		t.Fatal("CONTRIBUTING.md has no Command modes section")
+	}
+	for _, want := range []string{"GOWORK=off", "go.work", "go.work.sum", "redis/", "./...", "make tidy-check"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("Command modes section lacks %q", want)
+		}
+	}
+	for _, banned := range []string{"git tag", "git push", "release-prepare", "release-check", "release-verify", "Releasing"} {
+		if strings.Contains(body, banned) {
+			t.Errorf("Command modes section contains %q", banned)
+		}
+	}
+	for _, rel := range []string{"README.md", "CONTRIBUTING.md"} {
+		text := string(readAt(t, root, rel))
+		for _, banned := range []string{"replace github.com/ok0/go-microgateway", "No `go.work` file is committed", "Run every Go command with `GOWORK=off`"} {
+			if strings.Contains(text, banned) {
+				t.Errorf("%s contains %q", rel, banned)
+			}
+		}
 	}
 }
 

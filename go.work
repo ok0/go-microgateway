@@ -1,0 +1,12 @@
+// Local development: the Redis module builds and tests against the core module
+// in this checkout. The replace maps the core version that redis/go.mod requires
+// to the checkout, so workspace builds need neither a published core nor network.
+
+go 1.27.0
+
+use (
+	.
+	./redis
+)
+
+replace github.com/ok0/go-microgateway v0.1.0 => ./

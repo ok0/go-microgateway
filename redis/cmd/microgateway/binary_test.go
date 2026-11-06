@@ -25,7 +25,12 @@ func buildBinary(t *testing.T, ldflags string) string {
 	}
 	args = append(args, ".")
 	cmd := exec.Command("go", args...)
-	cmd.Env = append(os.Environ(), "GOWORK=off")
+	// The binary is built with the repository's workspace, against the core in the checkout.
+	work, err := filepath.Abs(filepath.Join("..", "..", "..", "go.work"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Env = append(os.Environ(), "GOWORK="+work)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}

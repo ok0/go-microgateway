@@ -3,7 +3,6 @@ name: ci
 on: [push, pull_request]
 
 env:
-  GOWORK: "off"
   GO_VERSION: "1.27.3"
 
 permissions:
@@ -12,6 +11,8 @@ permissions:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    env:
+      GOWORK: "off"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -24,6 +25,8 @@ jobs:
         with:
           version: v2.14.0
           working-directory: redis
+        env:
+          GOWORK: ${{ github.workspace }}/go.work
 
   test:
     strategy:
@@ -32,6 +35,8 @@ jobs:
         go: ["1.27.0", "stable"]
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      GOWORK: "off"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -46,12 +51,18 @@ jobs:
       - name: build redis module
         run: go build ./...
         working-directory: redis
+        env:
+          GOWORK: ${{ github.workspace }}/go.work
       - name: vet redis module
         run: go vet ./...
         working-directory: redis
+        env:
+          GOWORK: ${{ github.workspace }}/go.work
       - name: test redis module
         run: go test -race ./...
         working-directory: redis
+        env:
+          GOWORK: ${{ github.workspace }}/go.work
 
   coverage:
     runs-on: ubuntu-latest

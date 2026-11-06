@@ -1,6 +1,6 @@
 .docs/
 .ensemble/
-go.work*
+go.work.sum
 bin/
 *.test
 *.out

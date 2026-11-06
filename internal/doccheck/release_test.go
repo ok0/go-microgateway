@@ -258,16 +258,16 @@ func TestExpandMakeRun(t *testing.T) {
 }
 
 func TestExpandMakeRunVariables(t *testing.T) {
-	const goMake = "GO := GOWORK=off go\nT = -tags $(TAG)\nTAG ?= integration\nx:\n\tcd redis && $(GO) test -race ${T} ./...\n"
+	const goMake = "GO_REDIS := GOWORK=$(CURDIR)/go.work go\nT = -tags $(TAG)\nTAG ?= integration\nx:\n\tcd redis && $(GO_REDIS) test -race ${T} ./...\n"
 	cases := []struct {
 		name, makefile, run string
 		env                 map[string]string
 		contains, errWant   string
 		exact               string
 	}{
-		{name: "assignments and conditional default", makefile: goMake, run: "make x", contains: "cd redis && GOWORK=off go test -race -tags integration ./..."},
+		{name: "assignments and conditional default", makefile: goMake, run: "make x", contains: "cd redis && GOWORK=$(CURDIR)/go.work go test -race -tags integration ./..."},
 		{name: "environment overrides conditional", makefile: goMake, run: "make x", env: map[string]string{"TAG": "realnet"}, contains: "-tags realnet"},
-		{name: "makefile assignment wins over environment", makefile: goMake, run: "make x", env: map[string]string{"GO": "other"}, contains: "GOWORK=off go test"},
+		{name: "makefile assignment wins over environment", makefile: goMake, run: "make x", env: map[string]string{"GO_REDIS": "other"}, contains: "GOWORK=$(CURDIR)/go.work go test"},
 		{name: "dollar escapes", makefile: "x:\n\techo $$HOME $$$$\n", run: "make x", contains: "echo $HOME $$"},
 		{name: "undefined variable", makefile: "x:\n\techo $(NOPE)\n", run: "make x", errWant: "NOPE"},
 		{name: "variable from environment", makefile: "x:\n\techo $(NOPE)\n", run: "make x", env: map[string]string{"NOPE": "v"}, contains: "echo v"},
