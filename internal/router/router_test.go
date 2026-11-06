@@ -153,6 +153,42 @@ func TestLookupNoMatch(t *testing.T) {
 	}
 }
 
+func TestLookupRejectsDotAndEmptySegments(t *testing.T) {
+	rt, err := New([]Entry{
+		{Matcher: Matcher{Path: "/", PathType: PathPrefix}, Value: "root"},
+		{Matcher: Matcher{Path: "/public", PathType: PathPrefix}, Value: "public"},
+	})
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+	cases := []struct {
+		path  string
+		match bool
+	}{
+		{path: "/public/../admin/x"},
+		{path: "/public/./x"},
+		{path: "/public//x"},
+		{path: "/.."},
+		{path: "/a/."},
+		{path: "//"},
+		{path: "/a/../"},
+		{path: "/", match: true},
+		{path: "/public", match: true},
+		{path: "/public/", match: true},
+		{path: "/public/x", match: true},
+		{path: "/public/x/", match: true},
+		{path: "/a/.b", match: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			_, _, ok := rt.Lookup(newRequest("foo.test", "GET", tc.path, nil))
+			if ok != tc.match {
+				t.Errorf("Lookup(%q) matched = %v, want %v", tc.path, ok, tc.match)
+			}
+		})
+	}
+}
+
 func TestNewErrors(t *testing.T) {
 	cases := []struct {
 		name string

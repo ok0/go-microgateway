@@ -118,37 +118,23 @@ func applyHeaderOps(h http.Header, ops config.HeaderOps) {
 	}
 }
 
+// rewritePath strips or replaces the prefix from with to. from and to are canonical escaped paths, as config validation requires, and both are compared and joined with the escaped request path.
 func rewritePath(u *url.URL, from, to string) {
 	from = strings.TrimSuffix(from, "/")
-	matches := func(p string) bool {
-		return from == "" || p == from || strings.HasPrefix(p, from+"/")
-	}
-	if !matches(u.Path) {
-		return
-	}
-	if u.RawPath == "" {
-		u.Path = join(to, u.Path[len(from):])
-		return
-	}
-	escFrom := ""
-	if from != "" {
-		escFrom = (&url.URL{Path: from}).EscapedPath()
-	}
 	esc := u.EscapedPath()
-	if esc != escFrom && !strings.HasPrefix(esc, escFrom+"/") {
-		u.Path = join(to, u.Path[len(from):])
-		u.RawPath = ""
+	if from != "" && esc != from && !strings.HasPrefix(esc, from+"/") {
 		return
 	}
-	raw := join((&url.URL{Path: to}).EscapedPath(), esc[len(escFrom):])
+	raw := join(to, esc[len(from):])
 	p, err := url.PathUnescape(raw)
 	if err != nil {
-		u.Path = join(to, u.Path[len(from):])
-		u.RawPath = ""
 		return
 	}
 	u.Path = p
-	u.RawPath = raw
+	u.RawPath = ""
+	if (&url.URL{Path: p}).EscapedPath() != raw {
+		u.RawPath = raw
+	}
 }
 
 func join(to, rest string) string {

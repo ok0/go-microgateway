@@ -42,6 +42,8 @@ type Identity struct {
 type Info struct {
 	Route    string
 	Upstream string
+	// Error is the gateway error code of a request rejected before routing; empty otherwise.
+	Error string
 }
 
 // WithIdentity returns a context carrying the caller identity id.

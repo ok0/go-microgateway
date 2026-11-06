@@ -99,6 +99,10 @@ func TestRewritePath(t *testing.T) {
 		{"replace prefix child", "/v2", "/api/v2", "/v2/items", "", "/api/v2/items", ""},
 		{"replace prefix exact", "/v2", "/api/v2", "/v2", "", "/api/v2", ""},
 		{"replace trailing slash", "/old/", "/new/", "/old/x", "", "/new/x", ""},
+		{"strip keeps escaped semicolon", "/orders", "", "/orders/a;b", "/orders/a%3Bb", "/a;b", "/a%3Bb"},
+		{"strip escaped prefix", "/caf%C3%B6", "", "/caf\xc3\xb6/x", "", "/x", ""},
+		{"replace into escaped prefix", "/v1", "/a%3Bb", "/v1/x", "", "/a;b/x", "/a%3Bb/x"},
+		{"replace keeps sibling", "/v1", "/v2", "/v10", "", "/v10", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

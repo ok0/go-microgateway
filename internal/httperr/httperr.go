@@ -32,6 +32,8 @@ const (
 	CodeBadRequest           = "bad_request"
 	CodeStoreUnavailable     = "store_unavailable"
 	CodeCacheNotConfigured   = "cache_not_configured"
+	// CodeInvalidPath is the code for a request path rejected by path canonicalization.
+	CodeInvalidPath = "invalid_path"
 )
 
 // StatusClientClosed is the status for a request the client closed before the gateway responded. Nothing is written for it.
@@ -135,6 +137,8 @@ func Message(code string) string {
 		return "the cache store is unavailable"
 	case CodeCacheNotConfigured:
 		return "no response cache is configured"
+	case CodeInvalidPath:
+		return "request path is not valid"
 	default:
 		return "error"
 	}

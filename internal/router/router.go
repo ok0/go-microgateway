@@ -266,7 +266,7 @@ func rankPattern(a, b *route) int {
 	return cmpRoute(a, b)
 }
 
-// Lookup returns the value of the route that matches r, with its captured path parameters, and reports whether one matched. A request without a URL, or whose path does not start with a slash, matches nothing.
+// Lookup returns the value of the route that matches r, with its captured path parameters, and reports whether one matched. A request without a URL, whose path does not start with a slash, or whose path contains a dot segment or an empty segment, matches nothing.
 func (rt *Router) Lookup(r *http.Request) (value any, params Params, ok bool) {
 	if r.URL == nil {
 		return nil, nil, false
@@ -276,6 +276,9 @@ func (rt *Router) Lookup(r *http.Request) (value any, params Params, ok bool) {
 		path = "/"
 	}
 	if !strings.HasPrefix(path, "/") {
+		return nil, nil, false
+	}
+	if !cleanPath(path) {
 		return nil, nil, false
 	}
 	host := normalizeHost(r.Host)
@@ -296,6 +299,24 @@ func (rt *Router) Lookup(r *http.Request) (value any, params Params, ok bool) {
 		return rt.any.lookup(path, r)
 	}
 	return nil, nil, false
+}
+
+// cleanPath reports whether p has no "." or ".." segment and no empty segment before its last one.
+func cleanPath(p string) bool {
+	rest := p[1:]
+	for {
+		seg, next, last := nextSeg(rest)
+		if seg == "." || seg == ".." {
+			return false
+		}
+		if seg == "" && !last {
+			return false
+		}
+		if last {
+			return true
+		}
+		rest = next
+	}
 }
 
 func normalizeHost(h string) string {

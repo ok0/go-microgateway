@@ -21,6 +21,7 @@ import (
 	"github.com/ok0/go-microgateway/internal/middleware"
 	"github.com/ok0/go-microgateway/internal/proxy"
 	"github.com/ok0/go-microgateway/internal/reqctx"
+	"github.com/ok0/go-microgateway/internal/reqpath"
 	"github.com/ok0/go-microgateway/internal/retry"
 	"github.com/ok0/go-microgateway/internal/router"
 	"github.com/ok0/go-microgateway/internal/state"
@@ -384,6 +385,15 @@ func revealHeaders(m map[string]config.Secret) map[string]string {
 }
 
 func (s *Snapshot) dispatch(w http.ResponseWriter, r *http.Request) {
+	p, err := reqpath.Canonicalize(r.URL)
+	if err != nil {
+		if in := reqctx.InfoFrom(r.Context()); in != nil {
+			in.Error = httperr.CodeInvalidPath
+		}
+		httperr.Write(w, r, http.StatusBadRequest, httperr.CodeInvalidPath, httperr.Message(httperr.CodeInvalidPath))
+		return
+	}
+	r = withPath(r, p)
 	v, params, ok := s.Router.Lookup(r)
 	if !ok {
 		s.notFound.ServeHTTP(w, r)
@@ -398,6 +408,15 @@ func (s *Snapshot) dispatch(w http.ResponseWriter, r *http.Request) {
 		ctx = reqctx.WithParams(ctx, params)
 	}
 	re.handler.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// withPath returns a shallow copy of r whose URL is a copy carrying the canonical path p. r and r.URL are not modified.
+func withPath(r *http.Request, p reqpath.Path) *http.Request {
+	c := r.WithContext(r.Context())
+	u := *r.URL
+	u.Path, u.RawPath = p.Decoded, p.Raw
+	c.URL = &u
+	return c
 }
 
 // Activate publishes the host sets of the upstreams. Call it once, after the state transaction

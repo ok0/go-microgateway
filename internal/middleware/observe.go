@@ -67,6 +67,9 @@ func Observe(logger *slog.Logger, clk clock.Clock, accessLog bool, m *RequestMet
 					if info.Upstream != "" {
 						attrs = append(attrs, slog.String("upstream", info.Upstream))
 					}
+					if info.Error != "" {
+						attrs = append(attrs, slog.String("error", info.Error))
+					}
 					attrs = append(attrs,
 						slog.Int("status", status),
 						slog.Int64("bytes", sw.bytes),
