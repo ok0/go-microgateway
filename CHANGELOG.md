@@ -22,13 +22,19 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - The `microgateway` binary with `run`, `validate` and `version` commands.
 - The Redis module, which provides the Redis-backed stores.
 - Packaging: a Makefile, a Dockerfile for a distroless non-root image, and a CI workflow.
+- Cache stores have a `Delete` operation that removes one stored variant without recording a purge. Custom `store.Cache` implementations must implement it; the store conformance tests cover it, and failures are counted in `store_errors` with the `delete` operation.
+- `microgateway version` reports the module version when the binary was installed with `go install` at a release version, and `dev` for a build without a version.
+- Release targets: `make release-prepare` sets the core version of the Redis module and of `go.work`, `make release-check` runs the read-only release checks offline, and `make release-verify` installs a published release in a clean environment (opt-in, needs the network).
 
 ### Changed
 
 - Rewrite prefixes (`strip_prefix`, `replace_prefix.from` and `replace_prefix.to`) must be canonical paths.
 - The access log has an `error` field for requests rejected because of their path.
+- The Redis module requires the core module at the same release version, and no `go.mod` has a `replace` directive. A committed `go.work` builds the Redis module against the core in a checkout. Both modules are released together with one version number, tagged `vX.Y.Z` and `redis/vX.Y.Z`.
+- Once a JWKS key set is loaded, a token whose `kid` is in it is verified without waiting on a key set refresh. Only the first load and a `kid` that is not in the set wait for a fetch, bounded by the JWKS fetch timeout.
 
 ### Security
 
 - Request paths are canonicalized before routing. Ambiguous paths get `400 invalid_path`.
 - Equivalent path spellings share one route, one cache entry and one rate-limit bucket.
+- A 304 revalidation applies the storability rules to the merged response. A 304 that makes it non-storable, for example with `private` or `no-store`, removes the stored variant, is not shared with coalesced requests and is reported as `stored=false`.

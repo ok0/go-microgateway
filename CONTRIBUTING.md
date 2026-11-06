@@ -76,7 +76,7 @@ Commit messages follow Conventional Commits, for example `feat(cache): ...`, `fi
 
 Some checks are opt-in because they are slow, need a real network, or need an external service. They are skipped unless their environment variable is set:
 
-- `MICROGATEWAY_HEAVY=1` enables the long benchmark and fuzz runs, the soak tests and the integration tests.
+- `MICROGATEWAY_HEAVY=1` enables the long benchmark and fuzz runs, the soak tests, the integration tests and the release install check.
 - `MICROGATEWAY_SOAK` sets the soak duration, for example `60s`.
 - `MICROGATEWAY_LOAD=1` enables the load tests.
 - `MICROGATEWAY_CACHE_FULL=1` enables the full cache test matrix in `redis`.
@@ -84,7 +84,7 @@ Some checks are opt-in because they are slow, need a real network, or need an ex
 - `MICROGATEWAY_REDIS_CLUSTER` and `MICROGATEWAY_REDIS_SENTINEL` select the cluster and Sentinel topologies of the integration tests.
 - The `realnet` build tag enables the tests that use the real network.
 
-`make perf`, `make soak`, `make fuzz`, `make integration` and `make realnet` refuse to run without the variables they need and say which one is missing.
+`make perf`, `make soak`, `make fuzz`, `make integration`, `make release-verify` and `make realnet` refuse to run without the variables they need and say which one is missing.
 
 ## Release verification
 
@@ -103,6 +103,21 @@ Run these checks before a release. The heavy checks are not part of `make check`
 | 9. Real network | `make realnet`, and `GOWORK=off go test -race -count=5 -tags realnet ./internal/e2e`, and `-run TestConnectTimeoutRealClockTCP` | Local machine with the VPN off | Every command passes | Yes |
 | 10. Container | `make docker`, then `docker run --rm microgateway:<version> version`, then a run with a mounted configuration | Docker | The version output matches `bin/microgateway version`, and the process runs as a non-root user | Yes |
 | 11. Lint and toolchain | `make lint` with golangci-lint v2.14.0 in both modules; build and test with a Go 1.27 toolchain | Go 1.27 toolchain | Every command passes | No |
-| 12. Tags | After all checks pass, the owner may create the local tags `v0.1.0` for the core module and `redis/v0.1.0` for the Redis module | Repository owner | Local tags exist for both modules | No |
+| 12. Release | The steps in [Releasing](#releasing), after all checks pass | Repository owner | The core tag `v0.1.0`, then a commit with the core's lines in `redis/go.sum`, then the tag `redis/v0.1.0`, all pushed | No |
 
 Each check names whether it is heavy. Checks marked heavy need the environment they name and are not run in continuous integration.
+
+## Releasing
+
+The core module and the Redis module are released together with one version number. Release `vX.Y.Z` is the tag `vX.Y.Z` for the core module and the tag `redis/vX.Y.Z` for the Redis module, and `redis/go.mod` at `redis/vX.Y.Z` requires the core at `vX.Y.Z`. The first release is `v0.1.0`. No `replace` directive is ever committed.
+
+Steps 3 to 6 are user steps for the repository owner. Automated agents never tag, push or add remotes.
+
+1. Run `make release-prepare VERSION=vX.Y.Z`. It sets the core version that `redis/go.mod` requires and the core version that `go.work` replaces to `vX.Y.Z`, together and offline, and creates no tag.
+2. Run `make check` and `make release-check VERSION=vX.Y.Z`, rename the CHANGELOG `Unreleased` heading to the version and date, and commit.
+3. User step: tag that commit for the core and push the tag with `git tag vX.Y.Z` and `git push origin vX.Y.Z`.
+4. User step: in `redis/`, run `GOWORK=off go mod tidy`, which resolves the published core and adds its lines to `redis/go.sum`, and commit.
+5. User step: tag that commit for the Redis module and push it with the branch with `git tag redis/vX.Y.Z` and `git push origin main redis/vX.Y.Z`.
+6. User step: run `MICROGATEWAY_HEAVY=1 make release-verify VERSION=vX.Y.Z`. It needs the network and free ports 8080 and 9901. It installs with the README command from an empty `GOPATH` and module cache outside the checkout, checks that `microgateway version` prints `vX.Y.Z`, and validates and runs `examples/redis.yaml`.
+
+The core is tagged first because `redis/go.sum` must record the hash of the published core, which exists only once the core tag is pushed. Between steps 1 and 4, `redis/go.sum` lacks the core's lines; workspace builds do not need them. `make release-check` is read-only and offline: it checks the versions in `redis/go.mod` and `go.work`, the module layout, the pairing of the core and Redis tags, and the README install command.

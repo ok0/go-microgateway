@@ -92,21 +92,39 @@ The stages and their order are described in [docs/architecture.md](docs/architec
 
 ## Install
 
-Library, core only:
-
-```sh
-go get github.com/ok0/go-microgateway
-```
-
-Embedding with the core module imports no Redis client. A program that also uses the Redis store imports `github.com/ok0/go-microgateway/redis`, which is a separate module.
-
-Binary: the core module never imports a Redis client, so the binary that links the Redis store is built from the `redis` module:
+### Binary
 
 ```sh
 go install github.com/ok0/go-microgateway/redis/cmd/microgateway@latest
 ```
 
-or, from a checkout (the committed `go.work` builds the Redis module against the core in the checkout):
+The binary includes the Redis backends. It is built from the `redis` module because the core module never imports a Redis client. Use a release version such as `@v0.1.0` instead of `@latest` to pin it.
+
+```sh
+microgateway version
+```
+
+A binary installed at a release version reports that version. Releases are made as described in [Releasing](CONTRIBUTING.md#releasing).
+
+### Libraries
+
+Core module only:
+
+```sh
+go get github.com/ok0/go-microgateway
+```
+
+With the Redis store:
+
+```sh
+go get github.com/ok0/go-microgateway/redis
+```
+
+Embedding with the core module imports no Redis client. The Redis module requires the core module at the same release version, so both resolve to one release.
+
+### From a checkout
+
+Build the Redis module against the core in the checkout. The committed `go.work` makes this work:
 
 ```sh
 cd redis && go build -o microgateway ./cmd/microgateway
@@ -117,6 +135,8 @@ or `make build`, which writes the binary to `bin/microgateway`:
 ```sh
 make build
 ```
+
+`make build VERSION=vX.Y.Z` sets the version the binary reports; without it the binary reports `dev`.
 
 ## Quick start
 
@@ -178,7 +198,7 @@ The core has no Redis client. Only the `redis` module imports `github.com/redis/
 - [Embedding](docs/embedding.md): using the gateway from Go, mounting it in `net/http`, custom middleware and custom stores.
 - [Operations](docs/operations.md): the binary's commands and signals, the admin endpoint, metrics, logs and errors.
 - [Examples](examples/): runnable configurations and the embedding program.
-- [Contributing](CONTRIBUTING.md) (including the [release verification checklist](CONTRIBUTING.md#release-verification)): building, testing and the rules for changes.
+- [Contributing](CONTRIBUTING.md) (including the [release verification checklist](CONTRIBUTING.md#release-verification) and [releasing](CONTRIBUTING.md#releasing)): building, testing and the rules for changes.
 - [Security policy](SECURITY.md): supported versions and how to report a vulnerability.
 - [Changelog](CHANGELOG.md): notable changes by release.
 
