@@ -316,6 +316,17 @@ index_finish(KEYS[1], H)
 return 'ok'
 `
 
+const luaCacheDelete = `
+local index = KEYS[1]
+local sec = ARGV[1]
+local H = epochs(KEYS[2], KEYS[3])
+local r = parse_v(redis.call('HGET', index, 'v:' .. sec))
+if not (r and live(r, H) and slot_matches(KEYS[4 + r.slot], r.fid)) then return 0 end
+drop_variant(index, sec, r, KEYS[4 + r.slot])
+index_finish(index, H)
+return 1
+`
+
 const luaCachePurgeKey = `
 local soft = ARGV[1] == '1'
 local gen = ARGV[2]

@@ -521,6 +521,32 @@ func sortedUnique(list []string) []string {
 	return slices.Compact(out)
 }
 
+// Delete implements store.Cache. It runs one script on the bucket of primary that removes the variant record and
+// its slot and recomputes the lifetime of the index.
+func (s *Store) Delete(ctx context.Context, primary, secondary string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := store.ValidateDelete(primary, secondary); err != nil {
+		return false, err
+	}
+	if s.closed.Load() {
+		return false, fmt.Errorf("redis: store is closed: %w", store.ErrUnavailable)
+	}
+	pk := s.primaryKeys(primary)
+	keys := []string{pk.index, pk.eh, pk.es}
+	keys = append(keys, pk.slots[:]...)
+	out, err := s.pipe(ctx, []scriptCall{{s.sc.cDelete, keys, s.clock(secondary)}})
+	if err != nil {
+		return false, s.fail(ctx, "delete", err)
+	}
+	n, ok := out[0].(int64)
+	if !ok || (n != 0 && n != 1) {
+		return false, unexpectedReply("delete")
+	}
+	return n == 1, nil
+}
+
 // Purge implements store.Cache.
 func (s *Store) Purge(ctx context.Context, p store.Purge) (store.PurgeResult, error) {
 	if err := ctx.Err(); err != nil {

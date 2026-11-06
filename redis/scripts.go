@@ -122,7 +122,7 @@ type scriptSet struct {
 	tb, sw                                        *goredis.Script
 	cGet, cPend, cJoin, cCommit, cAbandon         *goredis.Script
 	cPurgeKey, cPurgeAll, cTagCounter, cTagBucket *goredis.Script
-	cTagMark, cTagPrimary, cTagPrune              *goredis.Script
+	cTagMark, cTagPrimary, cTagPrune, cDelete     *goredis.Script
 }
 
 func newScriptSet(clock string) scriptSet {
@@ -144,6 +144,7 @@ func newScriptSet(clock string) scriptSet {
 		cTagMark:    cache(luaCacheTagMark),
 		cTagPrimary: cache(luaCacheTagPrimary),
 		cTagPrune:   cache(luaCacheTagPrune),
+		cDelete:     cache(luaCacheDelete),
 	}
 }
 

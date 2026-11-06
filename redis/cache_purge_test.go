@@ -258,7 +258,7 @@ type miniState struct {
 func storeScripts(t *testing.T, ss scriptSet) []*goredis.Script {
 	t.Helper()
 	all := []*goredis.Script{ss.tb, ss.sw, ss.cGet, ss.cPend, ss.cJoin, ss.cCommit, ss.cAbandon, ss.cPurgeKey,
-		ss.cPurgeAll, ss.cTagCounter, ss.cTagBucket, ss.cTagMark, ss.cTagPrimary, ss.cTagPrune}
+		ss.cPurgeAll, ss.cTagCounter, ss.cTagBucket, ss.cTagMark, ss.cTagPrimary, ss.cTagPrune, ss.cDelete}
 	if n := reflect.TypeOf(ss).NumField(); n != len(all) {
 		t.Fatalf("scriptSet has %d fields, storeScripts names %d", n, len(all))
 	}

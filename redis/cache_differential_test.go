@@ -297,6 +297,24 @@ func (w *dfWorld) racing() {
 	w.afterPurge(p)
 }
 
+func (w *dfWorld) del() {
+	ctx := context.Background()
+	p := dfPrimaries[w.pick(len(dfPrimaries))]
+	sec := dfSecondaries[w.pick(len(dfSecondaries))]
+	h := w.pick(2)
+	rd, err := w.h[h].Delete(ctx, p, sec)
+	if err != nil {
+		w.fatalf("redis delete %s/%s: %v", p, sec, err)
+	}
+	md, err := w.ref.Delete(ctx, p, sec)
+	if err != nil {
+		w.fatalf("memstore delete %s/%s: %v", p, sec, err)
+	}
+	if rd != md {
+		w.fatalf("delete %s/%s: redis %t, memstore %t", p, sec, rd, md)
+	}
+}
+
 func (w *dfWorld) step() {
 	switch r := w.pick(100); {
 	case r < 35:
@@ -307,6 +325,8 @@ func (w *dfWorld) step() {
 		w.purge()
 	case r < 82:
 		w.racing()
+	case r < 88:
+		w.del()
 	default:
 		w.move()
 	}
