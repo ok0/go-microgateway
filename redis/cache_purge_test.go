@@ -4,10 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/alicebob/miniredis/v2"
+	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/ok0/go-microgateway/store"
 )
@@ -236,12 +240,148 @@ func ptNoBulkReads(t *testing.T, p *respProxy, keys ...string) {
 	}
 }
 
+// miniKey is one key of a miniredis database: its type, its value and its remaining lifetime.
+type miniKey struct {
+	typ  string
+	str  string
+	hash map[string]string
+	ttl  time.Duration
+}
+
+// miniState is the data of database 0 of a miniredis server and the store scripts loaded on it.
+type miniState struct {
+	keys    map[string]miniKey
+	scripts []*goredis.Script
+}
+
+// storeScripts returns every script of ss, and fails the test if ss has a field the list does not name.
+func storeScripts(t *testing.T, ss scriptSet) []*goredis.Script {
+	t.Helper()
+	all := []*goredis.Script{ss.tb, ss.sw, ss.cGet, ss.cPend, ss.cJoin, ss.cCommit, ss.cAbandon, ss.cPurgeKey,
+		ss.cPurgeAll, ss.cTagCounter, ss.cTagBucket, ss.cTagMark, ss.cTagPrimary, ss.cTagPrune}
+	if n := reflect.TypeOf(ss).NumField(); n != len(all) {
+		t.Fatalf("scriptSet has %d fields, storeScripts names %d", n, len(all))
+	}
+	return all
+}
+
+// miniSnapshot reads every key of database 0 of m through the in-process API, and which of scripts are loaded
+// (through c, a client connected to m directly).
+func miniSnapshot(t *testing.T, m *miniredis.Miniredis, c goredis.UniversalClient, scripts []*goredis.Script) miniState {
+	t.Helper()
+	st := miniState{keys: map[string]miniKey{}}
+	for _, k := range m.Keys() {
+		mk := miniKey{typ: m.Type(k), ttl: m.TTL(k)}
+		switch mk.typ {
+		case "string":
+			v, err := m.Get(k)
+			if err != nil {
+				t.Fatalf("GET %s: %v", k, err)
+			}
+			mk.str = v
+		case "hash":
+			fields, err := m.HKeys(k)
+			if err != nil {
+				t.Fatalf("HKEYS %s: %v", k, err)
+			}
+			mk.hash = make(map[string]string, len(fields))
+			for _, f := range fields {
+				mk.hash[f] = m.HGet(k, f)
+			}
+		default:
+			t.Fatalf("%s has type %s; the snapshot reads hash and string keys", k, mk.typ)
+		}
+		st.keys[k] = mk
+	}
+	for _, sc := range scripts {
+		ok, err := sc.Exists(context.Background(), c).Result()
+		if err != nil {
+			t.Fatalf("SCRIPT EXISTS: %v", err)
+		}
+		if len(ok) != 1 {
+			t.Fatalf("SCRIPT EXISTS returned %d results, want 1", len(ok))
+		}
+		if ok[0] {
+			st.scripts = append(st.scripts, sc)
+		}
+	}
+	return st
+}
+
+// miniRestore writes st into m, which must be empty and on the same server time as the server st was read from,
+// and loads st's scripts through a client connected to m directly, so no proxy in front of m sees the restore.
+func miniRestore(t *testing.T, m *miniredis.Miniredis, st miniState) {
+	t.Helper()
+	if n := len(m.Keys()); n != 0 {
+		t.Fatalf("restore into a server with %d keys, want 0", n)
+	}
+	for k, mk := range st.keys {
+		switch mk.typ {
+		case "string":
+			if err := m.Set(k, mk.str); err != nil {
+				t.Fatalf("SET %s: %v", k, err)
+			}
+		case "hash":
+			var fv []string
+			for f, v := range mk.hash {
+				fv = append(fv, f, v)
+			}
+			m.HSet(k, fv...)
+		}
+		if mk.ttl > 0 {
+			m.SetTTL(k, mk.ttl)
+		}
+	}
+	if len(st.scripts) > 0 {
+		c := newTestClient(t, m.Addr(), 0)
+		for _, sc := range st.scripts {
+			if err := sc.Load(context.Background(), c).Err(); err != nil {
+				t.Fatalf("SCRIPT LOAD: %v", err)
+			}
+		}
+	}
+}
+
+// ptFixture is the store state a large purge case starts from. It is filled once through the real fill path and
+// restored into each case's own server.
+type ptFixture struct {
+	state miniState
+	total int
+	short []string
+}
+
+// ptBuild fills a fresh server through a proxied store with fill and checks the fill's traffic: no HSCAN and no
+// bulk read on the tag keys, and no slot violation (at cleanup). A copy restored into another fresh server must read
+// back equal to the filled server.
+func ptBuild(t *testing.T, fill func(s *Store) (int, []string)) ptFixture {
+	t.Helper()
+	m := newMini(t)
+	s, p := ckProxied(t, m, "mgtest")
+	set, repl, _, _ := s.tagKeys(ptBigTag)
+	total, short := fill(s)
+	ptNoBulkReads(t, p, set, repl)
+	for _, key := range []string{set, repl} {
+		if n := ptHscanCalls(t, p, key); n != 0 {
+			t.Fatalf("fill sent %d HSCAN calls on %s, want 0", n, key)
+		}
+	}
+	scripts := storeScripts(t, s.sc)
+	fx := ptFixture{state: miniSnapshot(t, m, newTestClient(t, m.Addr(), 0), scripts), total: total, short: short}
+	m2 := newMini(t)
+	miniRestore(t, m2, fx.state)
+	if got := miniSnapshot(t, m2, newTestClient(t, m2.Addr(), 0), scripts); !reflect.DeepEqual(got, fx.state) {
+		t.Fatal("a restored copy of the fixture differs from the filled server")
+	}
+	return fx
+}
+
 type ptBigCase struct {
 	pager *pagerConfig
 	size  int
 	n     int
 	soft  bool
 	mut   string
+	fx    *ptFixture
 }
 
 func ptBigRun(t *testing.T, c ptBigCase) {
@@ -249,14 +389,18 @@ func ptBigRun(t *testing.T, c ptBigCase) {
 	ctx := context.Background()
 	m := newMini(t)
 	mc := &miniClock{m: m, now: miniStart}
+	miniRestore(t, m, c.fx.state)
 	s, p := ckProxied(t, m, "mgtest")
 	p.SetHscanPager(c.pager)
 	set, repl, _, _ := s.tagKeys(ptBigTag)
-	shortTTL := 0
+	total, short := c.fx.total, c.fx.short
+	wantShort := 0
 	if c.mut == "expire" {
-		shortTTL = 10
+		wantShort = 20
 	}
-	total, short := ptBigFill(t, s, c.n, shortTTL)
+	if len(short) != wantShort {
+		t.Fatalf("fixture has %d short-lived entries, want %d", len(short), wantShort)
+	}
 	first := ptBigFirstPage(s, c.n, c.size)
 	want := total
 	for _, sh := range short {
@@ -360,18 +504,26 @@ func ptBigRun(t *testing.T, c ptBigCase) {
 	}
 }
 
-func ptDownRun(t *testing.T, all, soft bool) {
+func ptDownFill(t *testing.T, s *Store) int {
 	t.Helper()
-	ctx := context.Background()
-	m := newMini(t)
-	s, p := ckProxied(t, m, "mgtest")
-	keys := make([]string, 0, 1000)
 	for i := 0; i < 1000; i++ {
 		k := fmt.Sprintf("kd-%04d", i)
-		keys = append(keys, k)
 		if !ckFill(t, s, k, "a", nil, ckEntry(k), time.Minute) {
 			t.Fatalf("%s not stored", k)
 		}
+	}
+	return 1000
+}
+
+func ptDownRun(t *testing.T, fx *ptFixture, all, soft bool) {
+	t.Helper()
+	ctx := context.Background()
+	m := newMini(t)
+	miniRestore(t, m, fx.state)
+	s, p := ckProxied(t, m, "mgtest")
+	keys := make([]string, 0, 1000)
+	for i := 0; i < 1000; i++ {
+		keys = append(keys, fmt.Sprintf("kd-%04d", i))
 	}
 	pur := store.Purge{Kind: store.PurgeKeys, Keys: keys, Soft: soft, Retain: time.Hour}
 	failAt := 2
@@ -421,6 +573,10 @@ func ptDownRun(t *testing.T, all, soft bool) {
 
 func TestPurgeLargeTag(t *testing.T) {
 	t.Parallel()
+	big := ptBuild(t, func(s *Store) (int, []string) { return ptBigFill(t, s, 1100, 0) })
+	bigShort := ptBuild(t, func(s *Store) (int, []string) { return ptBigFill(t, s, 1100, 10) })
+	small := ptBuild(t, func(s *Store) (int, []string) { return ptBigFill(t, s, 100, 0) })
+	down := ptBuild(t, func(s *Store) (int, []string) { return ptDownFill(t, s), nil })
 	pagers := []struct {
 		name string
 		cfg  *pagerConfig
@@ -433,18 +589,26 @@ func TestPurgeLargeTag(t *testing.T) {
 		{"duplicate", &pagerConfig{Duplicate: true}, 100, 1100},
 	}
 	for _, pg := range pagers {
+		fx := &big
+		if pg.n == 100 {
+			fx = &small
+		}
 		for _, soft := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/soft=%t", pg.name, soft), func(t *testing.T) {
 				t.Parallel()
-				ptBigRun(t, ptBigCase{pager: pg.cfg, size: pg.size, n: pg.n, soft: soft})
+				ptBigRun(t, ptBigCase{pager: pg.cfg, size: pg.size, n: pg.n, soft: soft, fx: fx})
 			})
 		}
 	}
 	for _, mut := range []string{"replicaGone", "setGone", "refusedFill", "expire", "down"} {
+		fx := &big
+		if mut == "expire" {
+			fx = &bigShort
+		}
 		for _, soft := range []bool{false, true} {
 			t.Run(fmt.Sprintf("midscan/%s/soft=%t", mut, soft), func(t *testing.T) {
 				t.Parallel()
-				ptBigRun(t, ptBigCase{pager: &pagerConfig{}, size: 100, n: 1100, soft: soft, mut: mut})
+				ptBigRun(t, ptBigCase{pager: &pagerConfig{}, size: 100, n: 1100, soft: soft, mut: mut, fx: fx})
 			})
 		}
 	}
@@ -456,7 +620,7 @@ func TestPurgeLargeTag(t *testing.T) {
 			}
 			t.Run(fmt.Sprintf("%s/soft=%t", name, soft), func(t *testing.T) {
 				t.Parallel()
-				ptDownRun(t, all, soft)
+				ptDownRun(t, &down, all, soft)
 			})
 		}
 	}
