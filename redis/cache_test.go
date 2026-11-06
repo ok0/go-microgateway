@@ -146,6 +146,7 @@ func ctSameLookup(t *testing.T, step string, x, y store.Lookup) {
 }
 
 func TestCacheCallOrder(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	m := newMini(t)
 	s, p := ckProxied(t, m, "mgtest")
@@ -343,6 +344,7 @@ func TestCacheCallOrder(t *testing.T) {
 }
 
 func TestCacheTTLTable(t *testing.T) {
+	t.Parallel()
 	ttls := []time.Duration{time.Second, time.Hour, 24 * time.Hour, store.MaxTTL, time.Microsecond + time.Nanosecond, 1500 * time.Microsecond, 999 * time.Microsecond}
 	for _, ttl := range ttls {
 		for _, physical := range []bool{true, false} {
@@ -424,6 +426,7 @@ func ctTTLReplace(t *testing.T) {
 }
 
 func TestCacheClockStepBack(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"keys", "tags", "all"} {
 		for _, soft := range []bool{false, true} {
 			for _, mini := range []bool{true, false} {
@@ -516,6 +519,7 @@ func ctStepBack(t *testing.T, kind string, soft, mini bool) {
 }
 
 func TestCacheHorizonAndRange(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fixed := func([]string) (string, bool) { return "s", true }
 
@@ -631,6 +635,7 @@ func ctBoundCase(t *testing.T, allow int64) {
 }
 
 func TestCacheVaryAndRoundTrips(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fixed := func(sec string) func([]string) (string, bool) {
 		return func([]string) (string, bool) { return sec, true }
@@ -776,6 +781,7 @@ func TestCacheVaryAndRoundTrips(t *testing.T) {
 }
 
 func TestCacheKeysAndSlots(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	t.Run("exact names", func(t *testing.T) {
@@ -920,6 +926,7 @@ func TestCacheKeysAndSlots(t *testing.T) {
 }
 
 func TestCacheScriptFlush(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	m := newMini(t)
 	s, p := ckProxied(t, m, "mgtest")
@@ -970,6 +977,7 @@ func TestCacheScriptFlush(t *testing.T) {
 }
 
 func TestCacheClockSkewIrrelevant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	m := newMini(t)
 	prefix := uniquePrefix(t)
@@ -1000,6 +1008,7 @@ func TestCacheClockSkewIrrelevant(t *testing.T) {
 }
 
 func TestCacheCloseNoLeak(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	pw := uniqueSecret(t, "pw-")
 	m := newMini(t)

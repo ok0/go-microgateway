@@ -71,6 +71,7 @@ func newPagedClient(t *testing.T, target string, cfg *pagerConfig) (*respProxy, 
 }
 
 func TestRespProxyHscanPager(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	t.Run("Pages", func(t *testing.T) {
@@ -293,6 +294,7 @@ func TestRespProxyHscanPager(t *testing.T) {
 }
 
 func TestRespProxySlotAudit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	m := newMini(t)
 	p := newRespProxy(t, m.Addr())

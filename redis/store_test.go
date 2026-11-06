@@ -61,6 +61,7 @@ func newStoreWithReadTimeout(t *testing.T, addr string, readTimeout time.Duratio
 }
 
 func TestTakeOrder(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	t.Run("CanceledContext", func(t *testing.T) {
@@ -151,6 +152,7 @@ func TestTakeOrder(t *testing.T) {
 }
 
 func TestFailuresAreUnavailable(t *testing.T) {
+	t.Parallel()
 	t.Run("LoadingReply", func(t *testing.T) {
 		m := newMini(t)
 		s := newTestStore(t, m.Addr(), 0, "mgtest")
@@ -221,6 +223,7 @@ func (testTimeoutErr) Timeout() bool   { return true }
 func (testTimeoutErr) Temporary() bool { return false }
 
 func TestDescribe(t *testing.T) {
+	t.Parallel()
 	const secret = "secret-xyz"
 	const sha = "0123abcd"
 	cases := []struct {
@@ -262,6 +265,7 @@ func TestDescribe(t *testing.T) {
 }
 
 func TestHangBoundedByDeadline(t *testing.T) {
+	t.Parallel()
 	want := "redis: take: timeout: " + store.ErrUnavailable.Error()
 	t.Run("ContextDeadline", func(t *testing.T) {
 		addr, _ := blackhole(t)
@@ -340,6 +344,7 @@ func TestHangBoundedByDeadline(t *testing.T) {
 }
 
 func TestNoRetryOnAmbiguousFailure(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	tb := store.Limit{Algorithm: store.TokenBucket, Count: 1, Period: time.Hour, Burst: 3}
 	checkSetup := func(t *testing.T, p *respProxy) {
@@ -414,6 +419,7 @@ func TestNoRetryOnAmbiguousFailure(t *testing.T) {
 }
 
 func TestScriptFlush(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	m := newMini(t)
 	p := newRespProxy(t, m.Addr())
@@ -444,6 +450,7 @@ func TestScriptFlush(t *testing.T) {
 }
 
 func TestPrefixIsolation(t *testing.T) {
+	t.Parallel()
 	m := newMini(t)
 	p1a := newTestStore(t, m.Addr(), 0, "p1")
 	p2 := newTestStore(t, m.Addr(), 0, "p2")
@@ -462,6 +469,7 @@ func TestPrefixIsolation(t *testing.T) {
 }
 
 func TestKeyLayoutAndSlots(t *testing.T) {
+	t.Parallel()
 	m := newMini(t)
 	s := newTestStore(t, m.Addr(), 0, DefaultKeyPrefix)
 	const key = "r:abcd1234:ip:1.2.3.4"
@@ -517,6 +525,7 @@ func TestKeyLayoutAndSlots(t *testing.T) {
 }
 
 func TestClockSkewIrrelevant(t *testing.T) {
+	t.Parallel()
 	m := newMini(t)
 	a := newTestStore(t, m.Addr(), 0, "mgtest")
 	b := newTestStore(t, m.Addr(), 0, "mgtest")

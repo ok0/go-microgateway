@@ -935,6 +935,7 @@ func ckKeys(t *testing.T, c goredis.UniversalClient, prefix string) []string {
 }
 
 // ckExpiryMs returns the absolute expiry of key in unix milliseconds (PEXPIRETIME), or -1 with no expiry.
+// PEXPIRETIME needs Redis 7.0: use it on miniredis; real-server callers use serverExpiryMs.
 func ckExpiryMs(t *testing.T, c goredis.UniversalClient, key string) int64 {
 	t.Helper()
 	ms, err := c.Do(context.Background(), "PEXPIRETIME", key).Int64()
@@ -942,6 +943,53 @@ func ckExpiryMs(t *testing.T, c goredis.UniversalClient, key string) int64 {
 		t.Fatalf("PEXPIRETIME %s: %v", key, err)
 	}
 	return ms
+}
+
+func expiryMsIfLive(t *testing.T, c goredis.UniversalClient, key string) (int64, time.Duration, bool) {
+	t.Helper()
+	ctx := context.Background()
+	for attempt := 0; attempt < 100; attempt++ {
+		pipe := c.Pipeline()
+		t0 := pipe.Time(ctx)
+		pttl := pipe.PTTL(ctx, key)
+		t1 := pipe.Time(ctx)
+		if _, err := pipe.Exec(ctx); err != nil {
+			t.Fatalf("PTTL %q: %v", key, err)
+		}
+		if t0.Val().UnixMilli() == t1.Val().UnixMilli() {
+			if pttl.Val() < 0 {
+				return 0, pttl.Val(), false
+			}
+			return t0.Val().UnixMilli() + pttl.Val().Milliseconds(), pttl.Val(), true
+		}
+	}
+	t.Fatal("no PTTL bracketed by TIME readings within one millisecond in 100 attempts")
+	return 0, 0, false
+}
+
+func realExpiryMs(t *testing.T, c goredis.UniversalClient, key string) int64 {
+	t.Helper()
+	e, pttl, live := expiryMsIfLive(t, c, key)
+	if !live {
+		t.Fatalf("PTTL %q = %s, want a live expiry", key, pttl)
+	}
+	return e
+}
+
+// serverExpiryMs returns the absolute expiry of key in unix milliseconds on a Redis server, or -1 with no expiry,
+// without PEXPIRETIME: it reads PTTL between two TIME readings in the same millisecond, which is exact on Redis 6.2
+// and later. It fails the test when key does not exist.
+func serverExpiryMs(t *testing.T, c goredis.UniversalClient, key string) int64 {
+	t.Helper()
+	e, pttl, live := expiryMsIfLive(t, c, key)
+	switch {
+	case live:
+		return e
+	case pttl == -1:
+		return -1
+	}
+	t.Fatalf("PTTL %q = %d, want an existing key", key, pttl)
+	return 0
 }
 
 // ckProxied builds a store on m through a respProxy. Slot co-location violations recorded by the proxy fail the test

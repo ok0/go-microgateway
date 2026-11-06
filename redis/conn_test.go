@@ -284,6 +284,7 @@ func (r *deadlineRecorder) SyscallConn() (syscall.RawConn, error) {
 }
 
 func TestLimitsOf(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		cfg  *config.RedisStore
@@ -401,6 +402,7 @@ func TestConnLimitsOnStoreClock(t *testing.T) {
 }
 
 func TestGatewayStoreReadLimit(t *testing.T) {
+	t.Parallel()
 	m := newMini(t)
 	p := newHoldPeer(t, m.Addr())
 	const limit = 300 * time.Millisecond
@@ -437,6 +439,7 @@ func TestGatewayStoreReadLimit(t *testing.T) {
 }
 
 func TestCanceledCallFreesConnAtReadLimit(t *testing.T) {
+	t.Parallel()
 	const limit = 300 * time.Millisecond
 	t.Run("store", func(t *testing.T) {
 		m := newMini(t)

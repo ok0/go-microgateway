@@ -323,6 +323,7 @@ func dfRun(t *testing.T, seed, ops int, physical bool) {
 }
 
 func TestCacheDifferential(t *testing.T) {
+	t.Parallel()
 	t.Log(dfNamedDifferences)
 	_, seeds, ops := ttScale()
 	for seed := 1; seed <= seeds; seed++ {

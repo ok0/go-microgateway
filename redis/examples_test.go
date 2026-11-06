@@ -19,6 +19,7 @@ func rootExamplesEnv(name string) (string, bool) {
 }
 
 func TestRootExamplesValidate(t *testing.T) {
+	t.Parallel()
 	paths, err := filepath.Glob(filepath.Join("..", "examples", "*.yaml"))
 	if err != nil {
 		t.Fatal(err)

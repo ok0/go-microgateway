@@ -216,6 +216,7 @@ func runMultiInstance(t *testing.T, srv redisServer) {
 }
 
 func TestMultiInstance(t *testing.T) {
+	t.Parallel()
 	m := newMini(t)
 	mc := &miniClock{m: m, now: miniStart}
 	runMultiInstance(t, redisServer{addr: m.Addr(), exact: true, advance: func(_ *testing.T, d time.Duration) { mc.Advance(d) }, now: func(*testing.T) time.Time { return mc.now }})
@@ -349,6 +350,7 @@ func runMixed(t *testing.T, srv redisServer, n int) {
 }
 
 func TestMixedMultiInstance(t *testing.T) {
+	t.Parallel()
 	m := newMini(t)
 	mc := &miniClock{m: m, now: miniStart}
 	srv := redisServer{addr: m.Addr(), exact: true, advance: func(_ *testing.T, d time.Duration) { mc.Advance(d) }, now: func(*testing.T) time.Time { return mc.now }}
@@ -459,6 +461,7 @@ type gcFixture struct {
 	cacheTop string
 	routes   string
 	gws      []*microgateway.Gateway
+	expiryMs func(key string) int64
 }
 
 func newGCFixture(t *testing.T, n int) *gcFixture {
@@ -473,6 +476,7 @@ func newGCFixture(t *testing.T, n int) *gcFixture {
 		cacheTop: "  store: shared\n",
 		routes:   gcRoute("r", "stale_while_revalidate: 1h", "stale_if_error: 1h"),
 	}
+	f.expiryMs = func(key string) int64 { return ckExpiryMs(t, f.client, key) }
 	t.Cleanup(func() { deletePrefix(t, f.client, f.prefix) })
 	f.stores = redisStoreYAML("shared", []string{m.Addr()}, fmt.Sprintf("db: 0\nkey_prefix: %s\n", f.prefix), "")
 	for i := 0; i < n; i++ {
@@ -649,7 +653,10 @@ func gcMatrix(t *testing.T, n int, sel string, library, soft bool, v gcValidator
 }
 
 func (f *gcFixture) gwSnapshot() map[string]string {
-	return gcSnapshot(f.t, f.client, f.prefix)
+	if f.expiryMs == nil {
+		f.t.Fatal("gc fixture has no expiry reader")
+	}
+	return gcSnapshot(f.t, f.client, f.prefix, f.expiryMs)
 }
 
 func gcSoftRevalidation(t *testing.T, n int) {
@@ -826,6 +833,12 @@ func gcMemoryScope(t *testing.T) {
 }
 
 func TestCacheMultiInstance(t *testing.T) {
+	t.Parallel()
+	t.Run("snapshot-detects-changes", func(t *testing.T) {
+		m := newMini(t)
+		c := newTestClient(t, m.Addr(), 0)
+		checkSnapshotDetects(t, c, uniquePrefix(t), func(key string) int64 { return ckExpiryMs(t, c, key) })
+	})
 	for _, n := range []int{2, 3} {
 		t.Run(fmt.Sprintf("gateways=%d", n), func(t *testing.T) {
 			for _, sel := range []string{"url", "tag", "all"} {
@@ -889,6 +902,7 @@ func exampleGet(t *testing.T, g http.Handler, path, remote string, hdr http.Head
 }
 
 func TestRedisExampleRunThrough(t *testing.T) {
+	t.Parallel()
 	m := newMini(t)
 	m.RequireAuth("example-redis-password")
 

@@ -83,10 +83,12 @@ func runDifferential(t *testing.T, newBackend func(t *testing.T) (timedStore, ti
 }
 
 func TestDifferential(t *testing.T) {
+	t.Parallel()
 	runDifferential(t, miniBackend)
 }
 
 func TestDifferentialInjected(t *testing.T) {
+	t.Parallel()
 	runDifferential(t, func(t *testing.T) (timedStore, time.Time) {
 		m := newMini(t)
 		return injectedBackend(t, m.Addr(), 0)
@@ -94,6 +96,7 @@ func TestDifferentialInjected(t *testing.T) {
 }
 
 func TestDifferentialFarFuture(t *testing.T) {
+	t.Parallel()
 	runDifferentialSeeds(t, func(t *testing.T) (timedStore, time.Time) {
 		start := time.Date(2200, 1, 1, 0, 0, 0, 123456000, time.UTC)
 		m := miniredis.RunT(t)

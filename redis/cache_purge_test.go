@@ -69,6 +69,7 @@ func ptDel(t *testing.T, s *Store, key string) {
 }
 
 func TestPurgeCounts(t *testing.T) {
+	t.Parallel()
 	m := newMini(t)
 	mc := &miniClock{m: m, now: miniStart}
 	s := cacheStore(t, m.Addr(), 0, "mgtest")
@@ -419,6 +420,7 @@ func ptDownRun(t *testing.T, all, soft bool) {
 }
 
 func TestPurgeLargeTag(t *testing.T) {
+	t.Parallel()
 	pagers := []struct {
 		name string
 		cfg  *pagerConfig
@@ -433,6 +435,7 @@ func TestPurgeLargeTag(t *testing.T) {
 	for _, pg := range pagers {
 		for _, soft := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/soft=%t", pg.name, soft), func(t *testing.T) {
+				t.Parallel()
 				ptBigRun(t, ptBigCase{pager: pg.cfg, size: pg.size, n: pg.n, soft: soft})
 			})
 		}
@@ -440,6 +443,7 @@ func TestPurgeLargeTag(t *testing.T) {
 	for _, mut := range []string{"replicaGone", "setGone", "refusedFill", "expire", "down"} {
 		for _, soft := range []bool{false, true} {
 			t.Run(fmt.Sprintf("midscan/%s/soft=%t", mut, soft), func(t *testing.T) {
+				t.Parallel()
 				ptBigRun(t, ptBigCase{pager: &pagerConfig{}, size: 100, n: 1100, soft: soft, mut: mut})
 			})
 		}
@@ -451,6 +455,7 @@ func TestPurgeLargeTag(t *testing.T) {
 				name = "all1000"
 			}
 			t.Run(fmt.Sprintf("%s/soft=%t", name, soft), func(t *testing.T) {
+				t.Parallel()
 				ptDownRun(t, all, soft)
 			})
 		}
@@ -561,6 +566,7 @@ func ptLossRun(t *testing.T, kind string, soft bool, lk ptLoss, when string) {
 }
 
 func TestPurgeLossMatrix(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"keys", "tags", "all"} {
 		for _, soft := range []bool{false, true} {
 			for _, lk := range ptLossKinds {
@@ -639,6 +645,7 @@ func ptInterleave(t *testing.T, kind string, soft, third bool, point hookPoint, 
 }
 
 func TestFillInterleavings(t *testing.T) {
+	t.Parallel()
 	points := []struct {
 		name  string
 		point hookPoint
@@ -665,6 +672,7 @@ func TestFillInterleavings(t *testing.T) {
 }
 
 func TestFillTolerance(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	m := newMini(t)
 	mc := &miniClock{m: m, now: miniStart}
@@ -713,6 +721,7 @@ func TestFillTolerance(t *testing.T) {
 }
 
 func TestFillAbandoned(t *testing.T) {
+	t.Parallel()
 	points := []struct {
 		name  string
 		point hookPoint
@@ -773,6 +782,7 @@ func ptAbandon(t *testing.T, point hookPoint) {
 }
 
 func TestPurgeLateAndDisconnected(t *testing.T) {
+	t.Parallel()
 	sel := func([]string) (string, bool) { return "s", true }
 	for _, kind := range []string{"keys", "tags", "all"} {
 		for _, soft := range []bool{false, true} {

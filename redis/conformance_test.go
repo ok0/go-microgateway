@@ -47,10 +47,12 @@ func injectedHarness(addr func(t *testing.T) (string, int)) storetest.Harness[st
 }
 
 func TestConformance(t *testing.T) {
+	t.Parallel()
 	storetest.RateLimiter(t, miniHarness())
 }
 
 func TestConformanceInjected(t *testing.T) {
+	t.Parallel()
 	storetest.RateLimiter(t, injectedHarness(func(t *testing.T) (string, int) {
 		m := newMini(t)
 		return m.Addr(), 0
@@ -58,10 +60,12 @@ func TestConformanceInjected(t *testing.T) {
 }
 
 func TestCacheConformance(t *testing.T) {
+	t.Parallel()
 	storetest.Cache(t, miniCacheHarness())
 }
 
 func TestCacheConformanceInjected(t *testing.T) {
+	t.Parallel()
 	storetest.Cache(t, injectedCacheHarness(func(t *testing.T) (string, int) {
 		m := newMini(t)
 		return m.Addr(), 0

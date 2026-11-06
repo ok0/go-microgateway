@@ -100,6 +100,7 @@ func runTTLContract(t *testing.T, s *Store, now func() time.Time, advance func(t
 }
 
 func TestTTLMatchesContract(t *testing.T) {
+	t.Parallel()
 	start := miniStart.Add(300 * time.Microsecond)
 	m := miniredis.RunT(t)
 	m.SetTime(start)
@@ -117,6 +118,7 @@ func TestTTLMatchesContract(t *testing.T) {
 }
 
 func TestFloodExpires(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	m := newMini(t)
 	mc := &miniClock{m: m, now: miniStart}
@@ -138,6 +140,7 @@ func TestFloodExpires(t *testing.T) {
 }
 
 func TestExpiryIsLossless(t *testing.T) {
+	t.Parallel()
 	mA := newMini(t)
 	mB := newMini(t)
 	clkA := &miniClock{m: mA, now: miniStart}

@@ -94,6 +94,7 @@ func requireSeries(t *testing.T, body, name string, labels map[string]string, wa
 }
 
 func TestOutagePolicies(t *testing.T) {
+	t.Parallel()
 	for _, policy := range []string{"allow", "deny", "local"} {
 		t.Run(policy, func(t *testing.T) {
 			runOutage(t, policy)
@@ -179,6 +180,7 @@ func gcCheckBypass(t *testing.T, label string, rec *httptest.ResponseRecorder) {
 }
 
 func TestCacheOutage(t *testing.T) {
+	t.Parallel()
 	m := newMini(t)
 	p := newRespProxy(t, m.Addr())
 	fake := clock.NewFake(miniStart)

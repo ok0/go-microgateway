@@ -62,6 +62,7 @@ func checkSentinels(t *testing.T, dial, read, write, pool, idle time.Duration, d
 // TestClientOptionSentinels pins how go-redis interprets the sentinel values: -2 becomes its "no deadline call"
 // value -1, and a negative dial timeout, the pool wait and -1 for idle connections are kept as given.
 func TestClientOptionSentinels(t *testing.T) {
+	t.Parallel()
 	addrs := []string{"127.0.0.1:1"}
 	build := func(t *testing.T, cfg *config.RedisStore) any {
 		t.Helper()
@@ -111,6 +112,7 @@ func TestClientOptionSentinels(t *testing.T) {
 }
 
 func TestClientOptions(t *testing.T) {
+	t.Parallel()
 	pw := uniqueSecret(t, "pw-")
 	spw := uniqueSecret(t, "spw-")
 	tlsCfg := &tls.Config{ServerName: "redis.test"}
@@ -297,6 +299,7 @@ func TestClientOptions(t *testing.T) {
 }
 
 func TestNewFromConfigErrors(t *testing.T) {
+	t.Parallel()
 	pw := uniqueSecret(t, "pw-")
 	spw := uniqueSecret(t, "spw-")
 	addrs := []string{"127.0.0.1:6379"}
@@ -334,6 +337,7 @@ func TestNewFromConfigErrors(t *testing.T) {
 }
 
 func TestNewFromConfigModes(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		cfg  *config.RedisStore
@@ -375,6 +379,7 @@ func TestNewFromConfigModes(t *testing.T) {
 }
 
 func TestNewFromConfigNoRoundTrip(t *testing.T) {
+	t.Parallel()
 	addr, accepted := blackhole(t)
 	s, err := NewFromConfig(&config.RedisStore{Mode: "standalone", Addresses: []string{addr}}, nil)
 	if err != nil {
@@ -389,6 +394,7 @@ func TestNewFromConfigNoRoundTrip(t *testing.T) {
 }
 
 func TestTLS(t *testing.T) {
+	t.Parallel()
 	certFile, keyFile, _ := testcert.Write(t, t.TempDir())
 	dir := t.TempDir()
 
@@ -518,6 +524,7 @@ func storeWithAuth(t *testing.T, addr, username, password string, db int) *Store
 }
 
 func TestAuthAndDB(t *testing.T) {
+	t.Parallel()
 	pw := uniqueSecret(t, "pw-")
 	wrong := uniqueSecret(t, "wpw-")
 	limit := store.Limit{Algorithm: store.TokenBucket, Count: 1, Period: time.Hour, Burst: 1}
@@ -576,10 +583,12 @@ func TestAuthAndDB(t *testing.T) {
 }
 
 func TestOptionCapabilities(t *testing.T) {
+	t.Parallel()
 	checkEq(t, "capabilities", capabilities, store.CapRateLimit|store.CapCache)
 }
 
 func TestOptionYAML(t *testing.T) {
+	t.Parallel()
 	pw := uniqueSecret(t, "pw-")
 	m := newMini(t)
 	m.RequireAuth(pw)
@@ -606,6 +615,7 @@ func TestOptionYAML(t *testing.T) {
 }
 
 func TestOptionUnregistered(t *testing.T) {
+	t.Parallel()
 	m := newMini(t)
 	doc := gwDoc(
 		redisStoreYAML("shared", []string{m.Addr()}, "", ""),
@@ -629,6 +639,7 @@ func (c *countingStore) Close() error {
 }
 
 func TestReloadReuseAndRecreate(t *testing.T) {
+	t.Parallel()
 	m := newMini(t)
 	srv := upstream(t)
 	var built []*countingStore
@@ -682,6 +693,7 @@ func TestReloadReuseAndRecreate(t *testing.T) {
 }
 
 func TestCacheStoreWiring(t *testing.T) {
+	t.Parallel()
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Cache-Control", "max-age=60")
 		_, _ = io.WriteString(w, "cached")

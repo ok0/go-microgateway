@@ -448,36 +448,32 @@ return string.format('%.17g', estimate(tonumber(ARGV[2]), tonumber(ARGV[3]), ton
 	t.Run("RenameKeepsTTL", func(t *testing.T) {
 		a := probeKey(t, c, "RenameKeepsTTL/a")
 		b := probeKey(t, c, "RenameKeepsTTL/b")
+		expiryMs := func(key string) int64 { return serverExpiryMs(t, c, key) }
 		if env.setTime != nil {
 			env.setTime(miniStart)
-		} else if !serverAtLeast(t, c, 7, 0) {
-			t.Skip("PEXPIRETIME needs Redis 7.0; the renamed deadline is checked exactly by PexpireatAbsolute")
+			expiryMs = func(key string) int64 { return ckExpiryMs(t, c, key) }
 		}
-		script := goredis.NewScript(luaNowMs + "redis.call('SET', KEYS[1], 'a'); redis.call('PEXPIREAT', KEYS[1], string.format('%.0f', nowMs + 200000)); redis.call('SET', KEYS[2], 'b'); redis.call('PEXPIREAT', KEYS[2], string.format('%.0f', nowMs + 60000)); redis.call('RENAME', KEYS[1], KEYS[2]); return {redis.call('EXISTS', KEYS[1]), redis.call('PEXPIRETIME', KEYS[2]), string.format('%.0f', nowMs + 200000)}")
+		script := goredis.NewScript(luaNowMs + "redis.call('SET', KEYS[1], 'a'); redis.call('PEXPIREAT', KEYS[1], string.format('%.0f', nowMs + 200000)); redis.call('SET', KEYS[2], 'b'); redis.call('PEXPIREAT', KEYS[2], string.format('%.0f', nowMs + 60000)); redis.call('RENAME', KEYS[1], KEYS[2]); return {redis.call('EXISTS', KEYS[1]), string.format('%.0f', nowMs + 200000)}")
 		reply, err := script.Run(ctx, c, []string{a, b}).Slice()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(reply) != 3 {
-			t.Fatalf("reply %v, want three elements", reply)
+		if len(reply) != 2 {
+			t.Fatalf("reply %v, want two elements", reply)
 		}
 		if reply[0] != int64(0) {
 			t.Fatalf("EXISTS source after RENAME = %v, want 0", reply[0])
 		}
-		back, ok := reply[1].(int64)
+		wText, ok := reply[1].(string)
 		if !ok {
-			t.Fatalf("reply[1] %v (%T), want int64", reply[1], reply[1])
-		}
-		wText, ok := reply[2].(string)
-		if !ok {
-			t.Fatalf("reply[2] %v (%T), want string", reply[2], reply[2])
+			t.Fatalf("reply[1] %v (%T), want string", reply[1], reply[1])
 		}
 		want, err := strconv.ParseInt(wText, 10, 64)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if back != want {
-			t.Fatalf("PEXPIRETIME destination = %d, want the source deadline %d (the overwritten 60000 ms deadline must not survive)", back, want)
+		if back := expiryMs(b); back != want {
+			t.Fatalf("absolute expiry of the destination = %d, want the source deadline %d (the overwritten 60000 ms deadline must not survive)", back, want)
 		}
 	})
 
@@ -978,6 +974,7 @@ func runSpikeSequences(t *testing.T, newBackend func(t *testing.T) (timedStore, 
 }
 
 func TestSpike(t *testing.T) {
+	t.Parallel()
 	t.Run("Fidelity", func(t *testing.T) {
 		m := newMini(t)
 		c := newTestClient(t, m.Addr(), 0)

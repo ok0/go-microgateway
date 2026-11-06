@@ -100,37 +100,6 @@ func scanPrefix(t *testing.T, c goredis.UniversalClient, prefix string) []string
 	}
 }
 
-func expiryMsIfLive(t *testing.T, c goredis.UniversalClient, key string) (int64, time.Duration, bool) {
-	t.Helper()
-	ctx := context.Background()
-	for attempt := 0; attempt < 100; attempt++ {
-		pipe := c.Pipeline()
-		t0 := pipe.Time(ctx)
-		pttl := pipe.PTTL(ctx, key)
-		t1 := pipe.Time(ctx)
-		if _, err := pipe.Exec(ctx); err != nil {
-			t.Fatalf("PTTL %q: %v", key, err)
-		}
-		if t0.Val().UnixMilli() == t1.Val().UnixMilli() {
-			if pttl.Val() < 0 {
-				return 0, pttl.Val(), false
-			}
-			return t0.Val().UnixMilli() + pttl.Val().Milliseconds(), pttl.Val(), true
-		}
-	}
-	t.Fatal("no PTTL bracketed by TIME readings within one millisecond in 100 attempts")
-	return 0, 0, false
-}
-
-func realExpiryMs(t *testing.T, c goredis.UniversalClient, key string) int64 {
-	t.Helper()
-	e, pttl, live := expiryMsIfLive(t, c, key)
-	if !live {
-		t.Fatalf("PTTL %q = %s, want a live expiry", key, pttl)
-	}
-	return e
-}
-
 func durCeilMs(d time.Duration) int64 {
 	return (int64(d) + int64(time.Millisecond) - 1) / int64(time.Millisecond)
 }
@@ -552,14 +521,10 @@ func checkCacheServerTime(t *testing.T, addr string) {
 	if entry == "" || index == "" {
 		t.Fatalf("keys after the fill: entry %q, index %q", entry, index)
 	}
-	if serverAtLeast(t, c, 7, 0) {
-		for _, k := range []string{entry, index} {
-			if ms := ckExpiryMs(t, c, k); ms != ceilMs(deadline) {
-				t.Errorf("%s: PEXPIRETIME %d, want %d", k, ms, ceilMs(deadline))
-			}
+	for _, k := range []string{entry, index} {
+		if ms := serverExpiryMs(t, c, k); ms != ceilMs(deadline) {
+			t.Errorf("%s: absolute expiry %d, want %d", k, ms, ceilMs(deadline))
 		}
-	} else {
-		t.Log("PEXPIRETIME needs Redis 7.0: the absolute expiry is checked only by the expiry wait below")
 	}
 	testwait.Until(t, "the entry to expire on the server clock", func() bool {
 		return ckGet(t, s, "st", "s").Entry == nil
@@ -780,6 +745,7 @@ func igFixtureOf(t *testing.T, addr string, n int) *gcFixture {
 		cacheTop: "  store: shared\n",
 		routes:   gcRoute("r", "stale_while_revalidate: 1h", "stale_if_error: 1h"),
 	}
+	f.expiryMs = func(key string) int64 { return serverExpiryMs(t, f.client, key) }
 	t.Cleanup(func() { deletePrefix(t, f.client, f.prefix) })
 	f.stores = redisStoreYAML("shared", []string{addr}, fmt.Sprintf("db: 15\nkey_prefix: %s\n", prefix), "")
 	for i := 0; i < n; i++ {
@@ -1229,6 +1195,12 @@ func TestIntegrationSuite(t *testing.T) {
 	t.Run("CacheLargeTag", func(t *testing.T) {
 		t.Run("hard", func(t *testing.T) { igLargeRun(t, addr, false) })
 		t.Run("soft", func(t *testing.T) { igLargeRun(t, addr, true) })
+	})
+
+	t.Run("SnapshotDetectsChanges", func(t *testing.T) {
+		prefix := uniquePrefix(t)
+		t.Cleanup(func() { deletePrefix(t, c, prefix) })
+		checkSnapshotDetects(t, c, prefix, func(key string) int64 { return serverExpiryMs(t, c, key) })
 	})
 
 	t.Run("CacheTwoGateways", func(t *testing.T) {

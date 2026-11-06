@@ -48,6 +48,7 @@ func containsSecretForm(text string, secrets ...string) bool {
 }
 
 func TestSecretsNeverLeak(t *testing.T) {
+	t.Parallel()
 	pw := uniqueSecret(t, "pw-")
 	spw := uniqueSecret(t, "spw-")
 	wpw := uniqueSecret(t, "wpw-")
@@ -176,6 +177,7 @@ func gcSecretBypass(t *testing.T, label string, rec *httptest.ResponseRecorder) 
 }
 
 func TestCacheSecretsNeverLeak(t *testing.T) {
+	t.Parallel()
 	pw := uniqueSecret(t, "pw-")
 	spw := uniqueSecret(t, "spw-")
 	wpw := uniqueSecret(t, "wpw-")
@@ -389,6 +391,7 @@ func TestCacheSecretsNeverLeak(t *testing.T) {
 }
 
 func TestStoreFormatting(t *testing.T) {
+	t.Parallel()
 	pw := uniqueSecret(t, "pw-")
 	spw := uniqueSecret(t, "spw-")
 	addr, _ := blackhole(t)

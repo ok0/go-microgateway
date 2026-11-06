@@ -209,7 +209,7 @@
 // Default tests use miniredis only. Running with the integration build tag and
 // MICROGATEWAY_REDIS_ADDR=host:port (Redis 6.2 or later, database 15, which
 // must be empty) runs the authoritative suite, including the cache conformance,
-// server clock, script flush, purge loss, large tag and two-gateway cases.
+// server clock, script flush, purge loss, large tag and two-gateway cases. CI runs the suite on Redis 6.2 and 7.4.
 // MICROGATEWAY_REDIS_SENTINEL set to <master>@host:port[,host:port] enables the
 // sentinel cases, and MICROGATEWAY_REDIS_CLUSTER set to host:port[,...] enables
 // the cluster cases; without them those cases are skipped. A local server can be
@@ -267,11 +267,16 @@
 //   - RENAME gives the destination the expiry of the source and drops the expiry
 //     of the overwritten destination. The probe checks this on the server it runs
 //     against. Covered by TestIntegrationSuite/Fidelity/RenameKeepsTTL.
-//   - PEXPIRETIME exists from Redis 7.0. The tests that read absolute expiries
-//     through it run on miniredis and on Redis 7 and later. On Redis 6.2 the
-//     probe that checks it is skipped, and the server clock case omits its
-//     PEXPIRETIME check. Covered by TestIntegrationSuite/Fidelity/PexpireatAbsolute
-//     and TestIntegrationSuite/CacheServerTime.
+//   - PEXPIRETIME exists from Redis 7.0. Default tests read absolute expiries
+//     through it on miniredis. Against a real server every absolute expiry the
+//     tests read (the server clock case, the two-gateway store snapshot, the
+//     rename probe) comes from PTTL between two TIME readings in the same
+//     millisecond, which is exact on Redis 6.2 and later. The only test that
+//     sends PEXPIRETIME to a real server is the probe of the command itself,
+//     which runs on Redis 7.0 and later and is skipped on older servers. Covered
+//     by TestIntegrationSuite/Fidelity/PexpireatAbsolute,
+//     TestIntegrationSuite/SnapshotDetectsChanges and
+//     TestIntegrationSuite/CacheServerTime.
 //   - TIME on miniredis reads the clock that the test sets. The cache takes every
 //     time reading from TIME. Covered by TestIntegrationSuite/Fidelity/Time and
 //     TestIntegrationSuite/CacheServerTime, which reads the real server clock.

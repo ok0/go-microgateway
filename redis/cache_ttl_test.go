@@ -94,6 +94,7 @@ func ttCheck(t *testing.T, c goredis.UniversalClient, now time.Time, want map[st
 }
 
 func TestCacheKeyLifetimes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	m := newMini(t)
 	mc := &miniClock{m: m, now: miniStart}
@@ -306,6 +307,7 @@ func TestCacheKeyLifetimes(t *testing.T) {
 }
 
 func TestCacheFloodExpires(t *testing.T) {
+	t.Parallel()
 	flood, _, _ := ttScale()
 	ctx := context.Background()
 	m := newMini(t)
@@ -411,6 +413,7 @@ func ttTrace(t *testing.T, physical bool) []string {
 }
 
 func TestCacheExpiryLossless(t *testing.T) {
+	t.Parallel()
 	physical := ttTrace(t, true)
 	logical := ttTrace(t, false)
 	if len(physical) == 0 {

@@ -18,6 +18,7 @@ import (
 )
 
 func TestConcurrentFirstUseNoInitWait(t *testing.T) {
+	t.Parallel()
 	m := newMini(t)
 	fake := clock.NewFake(miniStart)
 	s, err := newFromConfig(&config.RedisStore{Mode: "standalone", Addresses: []string{m.Addr()}}, nil, fake)
@@ -74,6 +75,7 @@ func TestConcurrentFirstUseNoInitWait(t *testing.T) {
 }
 
 func TestDialHostNameIndependentOfFallback(t *testing.T) {
+	t.Parallel()
 	m := newMini(t)
 	_, port, err := net.SplitHostPort(m.Addr())
 	if err != nil {
@@ -92,6 +94,7 @@ func TestDialHostNameIndependentOfFallback(t *testing.T) {
 }
 
 func TestClusterTimerFeaturesOff(t *testing.T) {
+	t.Parallel()
 	m := newMini(t)
 	opts, err := clientOptions(&config.RedisStore{Mode: "cluster", Addresses: []string{m.Addr()}}, nil, clock.NewFake(miniStart))
 	if err != nil {

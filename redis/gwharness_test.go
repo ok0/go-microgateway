@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -456,7 +457,7 @@ func gcFetch(t *testing.T, h http.Handler, e gcEntry) (*httptest.ResponseRecorde
 	return rec, gcStatus(t, rec)
 }
 
-func gcSnapshot(t *testing.T, c goredis.UniversalClient, prefix string) map[string]string {
+func gcSnapshot(t *testing.T, c goredis.UniversalClient, prefix string, expiryMs func(key string) int64) map[string]string {
 	t.Helper()
 	ctx := context.Background()
 	out := make(map[string]string)
@@ -488,8 +489,76 @@ func gcSnapshot(t *testing.T, c goredis.UniversalClient, prefix string) map[stri
 				t.Fatalf("GET %s: %v", k, err)
 			}
 			val = v
+		default:
+			t.Fatalf("%s has type %s; the snapshot reads hash and string keys", k, typ)
 		}
-		out[k] = fmt.Sprintf("%s pexpireat=%d\n%s", typ, ckExpiryMs(t, c, k), val)
+		out[k] = fmt.Sprintf("%s pexpireat=%d\n%s", typ, expiryMs(k), val)
 	}
 	return out
+}
+
+// checkSnapshotDetects writes keys under prefix and checks that gcSnapshot reads their absolute expiries exactly
+// through expiryMs, is stable on an unchanged store, and changes with any expiry, value or key-set change.
+func checkSnapshotDetects(t *testing.T, c goredis.UniversalClient, prefix string, expiryMs func(key string) int64) {
+	t.Helper()
+	ctx := context.Background()
+	now, err := c.Time(ctx).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := now.Add(time.Hour).UnixMilli()
+	h, s, n := prefix+":snap:h", prefix+":snap:s", prefix+":snap:n"
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(c.HSet(ctx, h, "a", "1", "b", "2").Err())
+	must(c.PExpireAt(ctx, h, time.UnixMilli(at)).Err())
+	must(c.Set(ctx, s, "v", 0).Err())
+	must(c.PExpireAt(ctx, s, time.UnixMilli(at+1)).Err())
+	must(c.Set(ctx, n, "x", 0).Err())
+	snap := func() map[string]string { return gcSnapshot(t, c, prefix, expiryMs) }
+	before := snap()
+	want := map[string]string{
+		h: fmt.Sprintf("hash pexpireat=%d\na=1\nb=2\n", at),
+		s: fmt.Sprintf("string pexpireat=%d\nv", at+1),
+		n: "string pexpireat=-1\nx",
+	}
+	if !reflect.DeepEqual(before, want) {
+		t.Fatalf("snapshot = %q, want %q", before, want)
+	}
+	if after := snap(); !reflect.DeepEqual(after, before) {
+		t.Fatalf("snapshot of an unchanged store = %q, want %q", after, before)
+	}
+	changed := func(what string, change, restore func() error) {
+		t.Helper()
+		must(change())
+		if reflect.DeepEqual(snap(), before) {
+			t.Fatalf("snapshot did not detect %s", what)
+		}
+		must(restore())
+		if after := snap(); !reflect.DeepEqual(after, before) {
+			t.Fatalf("snapshot after restoring %s = %q, want %q", what, after, before)
+		}
+	}
+	changed("an expiry moved by 1 ms",
+		func() error { return c.PExpireAt(ctx, s, time.UnixMilli(at+2)).Err() },
+		func() error { return c.PExpireAt(ctx, s, time.UnixMilli(at+1)).Err() })
+	changed("an expiry removed",
+		func() error { return c.Persist(ctx, s).Err() },
+		func() error { return c.PExpireAt(ctx, s, time.UnixMilli(at+1)).Err() })
+	changed("an expiry added",
+		func() error { return c.PExpireAt(ctx, n, time.UnixMilli(at)).Err() },
+		func() error { return c.Persist(ctx, n).Err() })
+	changed("a hash field value",
+		func() error { return c.HSet(ctx, h, "b", "3").Err() },
+		func() error { return c.HSet(ctx, h, "b", "2").Err() })
+	changed("a string value",
+		func() error { return c.SetRange(ctx, s, 0, "w").Err() },
+		func() error { return c.SetRange(ctx, s, 0, "v").Err() })
+	changed("a key added",
+		func() error { return c.Set(ctx, prefix+":snap:z", "1", 0).Err() },
+		func() error { return c.Del(ctx, prefix+":snap:z").Err() })
 }
