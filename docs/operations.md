@@ -6,6 +6,8 @@ This guide covers running the `microgateway` binary: its commands and flags, sig
 
 The binary is built from the Redis module, which registers the `redis` store type in addition to the in-memory stores:
 
+The `redis` store needs Redis 6.2 or later; CI tests it on Redis 6.2 and 7.4.
+
 ```
 cd redis && go build -o microgateway ./cmd/microgateway
 ```

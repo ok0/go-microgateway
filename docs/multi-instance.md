@@ -177,7 +177,7 @@ The replica also writes these log messages:
 
 ## Redis tuning and operations
 
-- **Version.** Use Redis 6.2 or later. The gateway's scripts depend on script effects replication.
+- **Version.** Use Redis 6.2 or later; the multi-instance tests run on Redis 6.2 and 7.4. The gateway's scripts depend on script effects replication.
 - **Dedicated instance.** Run a Redis instance for the gateway, or at least one with its own memory limit, so that no other workload competes for memory. Set `maxmemory-policy` to `allkeys-lru` as the fallback policy. Every key the gateway writes carries an expiry, and the cache keeps each bookkeeping value in two keys with the same lifetime. Losing one of the two keys changes no cache lookup. Losing both keys of one pair is not covered: a purged entry may then be served again. Size the memory so that eviction does not reach cache keys. Rate-limit counters are not cache entries: evicting one resets that client's counter.
 - **Memory sizing.** Estimate the memory as the number of live cache entries times the average entry size, plus one counter key for each active client on each limited route. A cache entry holds its body, which is limited by `cache.max_body_bytes` (default `1048576`), and its headers and bookkeeping. The `cache.memory.max_bytes` setting limits only the in-memory cache, not Redis.
 - **Persistence.** Persistence is not required. After a restart that loses the data, the counters start at zero and the cache refills.

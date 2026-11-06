@@ -85,7 +85,7 @@ The stages and their order are described in [docs/architecture.md](docs/architec
 ## Requirements
 
 - Go 1.27 or later, as declared in `go.mod` of both modules; releases are built and tested with Go 1.27.
-- Redis 6.2 or later, for the Redis store only. The core module does not need Redis.
+- Redis 6.2 or later, for the Redis store only; CI tests it on Redis 6.2 and 7.4. The core module does not need Redis.
 - Platforms supported by the Go toolchain.
 
 ## Install

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"go/version"
 	"io/fs"
 	"maps"
 	"os"
@@ -493,25 +494,35 @@ func TestWorkflow(t *testing.T) {
 	if err := yaml.Unmarshal(readAt(t, root, ".github/workflows/ci.yml"), &wf); err != nil {
 		t.Fatal(err)
 	}
+	for _, problem := range workflowProblems(wf, readAt(t, root, "Makefile"), goFloor(t, root)) {
+		t.Error(problem)
+	}
+}
+
+func workflowProblems(wf map[string]any, makefile []byte, floor string) []string {
+	var problems []string
+	add := func(format string, args ...any) {
+		problems = append(problems, fmt.Sprintf(format, args...))
+	}
 	if got := mapOf(wf["env"])["GOWORK"]; got != "off" {
-		t.Errorf("top-level env GOWORK = %v, want off", got)
+		add("top-level env GOWORK = %v, want off", got)
 	}
 	jobs := mapOf(wf["jobs"])
 	for _, name := range []string{"lint", "test", "coverage", "tidy", "integration", "realnet", "docker"} {
 		if _, ok := jobs[name]; !ok {
-			t.Errorf("workflow has no %s job", name)
+			add("workflow has no %s job", name)
 		}
 	}
 	var uses []string
 	for _, name := range slices.Sorted(maps.Keys(jobs)) {
 		job := mapOf(jobs[name])
 		if v, ok := job["continue-on-error"]; ok && !isFalse(v) {
-			t.Errorf("job %s sets continue-on-error to %v", name, v)
+			add("job %s sets continue-on-error to %v", name, v)
 		}
 		for _, raw := range listOf(job["steps"]) {
 			step := mapOf(raw)
 			if v, ok := step["continue-on-error"]; ok && !isFalse(v) {
-				t.Errorf("a step of job %s sets continue-on-error to %v", name, v)
+				add("a step of job %s sets continue-on-error to %v", name, v)
 			}
 			if u, ok := step["uses"].(string); ok {
 				uses = append(uses, u)
@@ -519,28 +530,107 @@ func TestWorkflow(t *testing.T) {
 		}
 	}
 
-	matrix := mapOf(mapOf(mapOf(jobs["test"])["strategy"])["matrix"])
-	if n := len(listOf(matrix["go"])); n != 2 {
-		t.Errorf("test matrix has %d go versions, want 2", n)
+	exactPatch := regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
+	pin := mapOf(wf["env"])["GO_VERSION"]
+	pinText, _ := pin.(string)
+	if !exactPatch.MatchString(pinText) || version.Compare("go"+pinText, "go"+floor) < 0 {
+		add("workflow env GO_VERSION = %v, want an exact patch release not older than the go.mod floor %s", pin, floor)
 	}
+	for _, name := range []string{"lint", "coverage", "tidy", "integration", "realnet"} {
+		found, pinned := false, true
+		for _, raw := range listOf(mapOf(jobs[name])["steps"]) {
+			step := mapOf(raw)
+			if step["uses"] != any("actions/setup-go@v7") {
+				continue
+			}
+			found = true
+			if mapOf(step["with"])["go-version"] != any("${{ env.GO_VERSION }}") {
+				pinned = false
+			}
+		}
+		if !found || !pinned {
+			add("job %s does not set up Go at the pinned ${{ env.GO_VERSION }}", name)
+		}
+	}
+
+	testJob := mapOf(jobs["test"])
+	if !isFalse(mapOf(testJob["strategy"])["fail-fast"]) {
+		add("test matrix does not set fail-fast: false")
+	}
+	matrix := mapOf(mapOf(testJob["strategy"])["matrix"])
+	var goEntries []string
+	for _, v := range listOf(matrix["go"]) {
+		goEntries = append(goEntries, fmt.Sprint(v))
+	}
+	if !slices.Contains(goEntries, floor) {
+		add("test matrix go lacks the go.mod floor %s", floor)
+	}
+	if !slices.Contains(goEntries, "stable") {
+		add("test matrix go lacks stable")
+	}
+	for _, e := range goEntries {
+		if e != floor && e != "stable" {
+			add("test matrix go has %v, want exactly [%s stable]", goEntries, floor)
+			break
+		}
+	}
+	setupFromMatrix, rootRace, redisRace := false, false, false
+	for _, raw := range listOf(testJob["steps"]) {
+		step := mapOf(raw)
+		if step["uses"] == any("actions/setup-go@v7") && mapOf(step["with"])["go-version"] == any("${{ matrix.go }}") {
+			setupFromMatrix = true
+		}
+		if run, _ := step["run"].(string); run == "go test -race ./..." {
+			if step["working-directory"] == nil {
+				rootRace = true
+			}
+			if step["working-directory"] == any("redis") {
+				redisRace = true
+			}
+		}
+	}
+	if !setupFromMatrix {
+		add("test job does not set up Go from matrix.go")
+	}
+	if !rootRace || !redisRace {
+		add("test job does not run go test -race in both modules")
+	}
+
 	for _, want := range []string{"ubuntu-latest", "macos-latest"} {
 		if !slices.Contains(listOf(matrix["os"]), any(want)) {
-			t.Errorf("test matrix os lacks %s", want)
+			add("test matrix os lacks %s", want)
 		}
 	}
 
 	integration := mapOf(jobs["integration"])
-	image, _ := mapOf(mapOf(integration["services"])["redis"])["image"].(string)
-	if !strings.HasPrefix(image, "redis:6.2") {
-		t.Errorf("integration redis service image = %q, want redis:6.2", image)
+	if !isFalse(mapOf(integration["strategy"])["fail-fast"]) {
+		add("integration matrix does not set fail-fast: false")
+	}
+	var redisEntries []string
+	for _, v := range listOf(mapOf(mapOf(integration["strategy"])["matrix"])["redis"]) {
+		redisEntries = append(redisEntries, fmt.Sprint(v))
+	}
+	if !slices.Contains(redisEntries, "redis:6.2") {
+		add("integration matrix lacks redis:6.2")
+	}
+	if !slices.Contains(redisEntries, "redis:7.4") {
+		add("integration matrix lacks redis:7.4")
+	}
+	for _, e := range redisEntries {
+		if e != "redis:6.2" && e != "redis:7.4" {
+			add("integration matrix redis has %v, want exactly [redis:6.2 redis:7.4]", redisEntries)
+			break
+		}
+	}
+	if image, _ := mapOf(mapOf(integration["services"])["redis"])["image"].(string); image != "${{ matrix.redis }}" {
+		add("integration redis service image = %q, want ${{ matrix.redis }}", image)
 	}
 	if !slices.Contains(jobEnv(integration, "MICROGATEWAY_HEAVY"), any("1")) {
-		t.Error(`integration job does not set MICROGATEWAY_HEAVY to "1"`)
+		add("integration job does not set MICROGATEWAY_HEAVY to \"1\"")
 	}
 	if !slices.ContainsFunc(jobEnv(integration, "MICROGATEWAY_REDIS_ADDR"), nonEmptyString) {
-		t.Error("integration job does not set a non-empty MICROGATEWAY_REDIS_ADDR")
+		add("integration job does not set a non-empty MICROGATEWAY_REDIS_ADDR")
 	}
-	makefile := readAt(t, root, "Makefile")
 	var expanded []string
 	for _, raw := range listOf(integration["steps"]) {
 		run, _ := mapOf(raw)["run"].(string)
@@ -549,13 +639,13 @@ func TestWorkflow(t *testing.T) {
 		}
 	}
 	if !integrationRunOK(listOf(integration["steps"]), makefile, stepEnv(wf, integration, nil)) {
-		t.Errorf("integration job runs no race-enabled integration-tagged go test in the redis module; expanded runs: %q", expanded)
+		add("integration job runs no race-enabled integration-tagged go test in the redis module; expanded runs: %q", expanded)
 	}
 	for _, name := range slices.Sorted(maps.Keys(jobs)) {
 		for i, raw := range listOf(mapOf(jobs[name])["steps"]) {
 			run, _ := mapOf(raw)["run"].(string)
 			if _, err := ExpandMakeRun(run, makefile, stepEnv(wf, mapOf(jobs[name]), mapOf(raw))); err != nil {
-				t.Errorf("job %s step %d: %v", name, i, err)
+				add("job %s step %d: %v", name, i, err)
 			}
 		}
 	}
@@ -564,17 +654,17 @@ func TestWorkflow(t *testing.T) {
 	seen := map[string]bool{}
 	for _, u := range uses {
 		if !slices.Contains(allowed, u) {
-			t.Errorf("workflow uses %q, which is not an allowed action", u)
+			add("workflow uses %q, which is not an allowed action", u)
 		}
 		seen[u] = true
 	}
 	for _, a := range allowed {
 		if !seen[a] {
-			t.Errorf("no step uses %s", a)
+			add("no step uses %s", a)
 		}
 	}
 
-	lintVersion := makeVariable(readAt(t, root, "Makefile"), "GOLANGCI_LINT_VERSION")
+	lintVersion := makeVariable(makefile, "GOLANGCI_LINT_VERSION")
 	lintPinned := false
 	for _, raw := range listOf(mapOf(jobs["lint"])["steps"]) {
 		step := mapOf(raw)
@@ -583,7 +673,128 @@ func TestWorkflow(t *testing.T) {
 		}
 	}
 	if !lintPinned {
-		t.Errorf("lint job golangci action version is not the Makefile GOLANGCI_LINT_VERSION %q", lintVersion)
+		add("lint job golangci action version is not the Makefile GOLANGCI_LINT_VERSION %q", lintVersion)
+	}
+	return problems
+}
+
+func goFloor(t *testing.T, root string) string {
+	t.Helper()
+	var floors []string
+	for _, rel := range []string{"go.mod", "redis/go.mod"} {
+		floor := ""
+		for _, line := range strings.Split(string(readAt(t, root, rel)), "\n") {
+			if f, ok := strings.CutPrefix(strings.TrimSpace(line), "go "); ok {
+				floor = strings.TrimSpace(f)
+				break
+			}
+		}
+		if floor == "" {
+			t.Fatalf("%s has no go directive", rel)
+		}
+		floors = append(floors, floor)
+	}
+	if floors[0] != floors[1] {
+		t.Fatalf("go.mod declares go %s but redis/go.mod declares go %s", floors[0], floors[1])
+	}
+	return floors[0]
+}
+
+func setupGoWith(job map[string]any) map[string]any {
+	for _, raw := range listOf(job["steps"]) {
+		if mapOf(raw)["uses"] == any("actions/setup-go@v7") {
+			return mapOf(mapOf(raw)["with"])
+		}
+	}
+	return nil
+}
+
+func TestWorkflowVersionPolicy(t *testing.T) {
+	root := repoRoot(t)
+	src := readAt(t, root, ".github/workflows/ci.yml")
+	makefile := readAt(t, root, "Makefile")
+	jobMap := func(wf map[string]any, name string) map[string]any {
+		return mapOf(mapOf(wf["jobs"])[name])
+	}
+	matrixOf := func(wf map[string]any, name string) map[string]any {
+		return mapOf(mapOf(jobMap(wf, name)["strategy"])["matrix"])
+	}
+	cases := []struct {
+		name   string
+		mutate func(wf map[string]any)
+		want   string
+	}{
+		{"real", nil, ""},
+		{"no-redis-6.2", func(wf map[string]any) {
+			matrixOf(wf, "integration")["redis"] = []any{"redis:7.4"}
+		}, "redis:6.2"},
+		{"no-redis-7.4", func(wf map[string]any) {
+			matrixOf(wf, "integration")["redis"] = []any{"redis:6.2"}
+		}, "redis:7.4"},
+		{"fixed-image", func(wf map[string]any) {
+			mapOf(mapOf(jobMap(wf, "integration")["services"])["redis"])["image"] = "redis:6.2"
+		}, "matrix.redis"},
+		{"no-floor", func(wf map[string]any) {
+			matrixOf(wf, "test")["go"] = []any{"1.27.x", "stable"}
+		}, "floor"},
+		{"no-stable", func(wf map[string]any) {
+			matrixOf(wf, "test")["go"] = []any{"1.27.0", "1.27.3"}
+		}, "stable"},
+		{"unpinned-job", func(wf map[string]any) {
+			setupGoWith(jobMap(wf, "coverage"))["go-version"] = "1.27.x"
+		}, "coverage"},
+		{"inexact-pin", func(wf map[string]any) {
+			mapOf(wf["env"])["GO_VERSION"] = "1.27.x"
+		}, "GO_VERSION"},
+		{"fail-fast", func(wf map[string]any) {
+			delete(mapOf(jobMap(wf, "test")["strategy"]), "fail-fast")
+		}, "fail-fast"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var wf map[string]any
+			if err := yaml.Unmarshal(src, &wf); err != nil {
+				t.Fatal(err)
+			}
+			if c.mutate != nil {
+				c.mutate(wf)
+			}
+			problems := workflowProblems(wf, makefile, goFloor(t, root))
+			if c.want == "" {
+				if len(problems) != 0 {
+					t.Errorf("unmutated workflow reports problems: %q", problems)
+				}
+				return
+			}
+			if !slices.ContainsFunc(problems, func(p string) bool { return strings.Contains(p, c.want) }) {
+				t.Errorf("want a problem containing %q, got %q", c.want, problems)
+			}
+		})
+	}
+}
+
+func TestVersionFacts(t *testing.T) {
+	root := repoRoot(t)
+	var wf map[string]any
+	if err := yaml.Unmarshal(readAt(t, root, ".github/workflows/ci.yml"), &wf); err != nil {
+		t.Fatal(err)
+	}
+	pin := fmt.Sprint(mapOf(wf["env"])["GO_VERSION"])
+	for _, rel := range []string{"README.md", "CONTRIBUTING.md", "docs/operations.md"} {
+		text := string(readAt(t, root, rel))
+		for _, want := range []string{"Redis 6.2 or later", "Redis 6.2 and 7.4"} {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s does not contain %q", rel, want)
+			}
+		}
+	}
+	for _, rel := range []string{"README.md", "CONTRIBUTING.md"} {
+		if !strings.Contains(string(readAt(t, root, rel)), "Go 1.27 or later") {
+			t.Errorf("%s does not contain %q", rel, "Go 1.27 or later")
+		}
+	}
+	if want := "GOTOOLCHAIN=go" + pin; !strings.Contains(string(readAt(t, root, "CONTRIBUTING.md")), want) {
+		t.Errorf("CONTRIBUTING.md does not contain %q", want)
 	}
 }
 

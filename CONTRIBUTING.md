@@ -4,9 +4,9 @@ This guide describes how to build, test and check changes to go-microgateway, an
 
 ## Prerequisites
 
-- Go 1.27 or later. Releases are built with Go 1.27.
+- Go 1.27 or later. CI tests the `go.mod` floor, Go 1.27.0, and the current stable release; every other job uses go1.27.3, which you reproduce with `GOTOOLCHAIN=go1.27.3`. Releases are built with Go 1.27.
 - Docker, optional. It is needed only for `make docker`.
-- Redis 6.2 or later, optional. It is needed only for the Redis integration tests.
+- Redis 6.2 or later, optional. It is needed only for the Redis integration tests, which CI runs on Redis 6.2 and 7.4.
 - golangci-lint v2.14.0, for `make lint`.
 
 ## Building and testing
