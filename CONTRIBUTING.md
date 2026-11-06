@@ -11,7 +11,7 @@ This guide describes how to build, test and check changes to go-microgateway, an
 
 ## Building and testing
 
-The repository holds two Go modules: the core module at the root and the Redis module in `redis/`. Run every Go command with `GOWORK=off`. No `go.work` file is committed, and changes must not depend on one.
+The repository holds two Go modules: the core module at the root and the Redis module in `redis/`. Core commands and Redis module commands run in different modes; see [Command modes](#command-modes).
 
 The Makefile wraps the common commands:
 
@@ -22,18 +22,32 @@ The Makefile wraps the common commands:
 - `make cover` runs the tests with coverage and enforces the coverage gate.
 - `make cover-ci` runs `make cover` with verbose redis tests and keeps the log in `bin/cover/cover.log`; `make cover-times` then lists its slowest tests. CI's coverage job uses them.
 - `make lint` runs golangci-lint v2.14.0 in both modules.
-- `make tidy-check` checks that `go mod tidy` changes nothing in either module.
+- `make tidy-check` checks that `go mod tidy` changes nothing in either module; see [Command modes](#command-modes) for the Redis module.
 - `make hygiene` runs the repository hygiene checks, which include the copied-source check.
 - `make check` runs `vet`, `cover`, `lint`, `tidy-check` and `hygiene`.
 
-The same commands by hand, from the repository root and from `redis/`:
+The same commands by hand, from the repository root for the core module and from `redis/` for the Redis module:
 
 ```sh
 GOWORK=off go build ./...
-GOWORK=off go test ./...
 GOWORK=off go vet ./...
-cd redis && GOWORK=off go test ./...
+GOWORK=off go test ./...
+cd redis && go test ./...
 ```
+
+## Command modes
+
+Core commands run from the repository root with `GOWORK=off`. The core builds from its own `go.mod` alone, as a consumer's build does, and the dependency check proves that the core has no Redis dependency.
+
+Redis module commands run from `redis/` with the workspace on. The committed `go.work` uses `.` and `./redis`, and maps the core version that `redis/go.mod` requires to the checkout. The Redis module therefore builds and tests against the working-tree core, without a published core or network. `go` finds `go.work` by itself from `redis/`, and the Makefile sets `GOWORK=$(CURDIR)/go.work` explicitly. If your environment sets `GOWORK=off`, set `GOWORK` to the repository's `go.work` for Redis module commands.
+
+Never run a `./...` pattern from the root in workspace mode. It then spans both modules, and core checks would include the Redis module and its client. `GOFLAGS=-mod=mod` is refused in workspace mode. `go.work.sum` is ignored and never committed.
+
+A Redis module command with `GOWORK=off` resolves the core from the module proxy, so it works only for a published core version.
+
+`make tidy-check` runs `go mod tidy -diff` in the core and `scripts/tidy-redis.sh` for the Redis module. The script tidies a temporary copy of `redis/go.mod` and `redis/go.sum` against the checkout, offline, and ignores the core's own `go.sum` lines.
+
+No tagging, pushing or release steps are described here.
 
 ## Test rules
 
@@ -82,9 +96,9 @@ Run these checks before a release. The heavy checks are not part of `make check`
 | 2. Soaks | `make soak` with `MICROGATEWAY_HEAVY=1 MICROGATEWAY_SOAK=60s` | Local machine | `TestSoakFullChain` and `TestSoakCacheMixed` pass, and the goroutine and heap targets hold | Yes |
 | 3. Fuzzing | `make fuzz` with `MICROGATEWAY_HEAVY=1` | Local machine | Every `Fuzz` target runs for 30 s with no failure | Yes |
 | 4. Idle-timer stress | `GOWORK=off go test -race -count=20 -run 'TestCloseStopsIdleTimers\|TestCloseInUseConnClosedByReadLoop' ./internal/upstream`, run while three other `GOWORK=off go test -race ./internal/upstream` runs execute concurrently | Local machine | Zero failures | Yes |
-| 5. Cache and purge load | `MICROGATEWAY_LOAD=1 GOWORK=off go test -race -count=1 -run 'TestCoalesceScale\|TestCacheMixedLoad\|TestPurgeLoad' ./internal/cache`; the same variables with `-run 'TestPurgeMarkerCapDefault\|TestInstancesMixedLoad\|TestHostGaugesChurnLoad' ./internal/e2e`; `MICROGATEWAY_LOAD=1 GOWORK=off go test -race -count=1 -run TestMixedMultiInstanceLoad .` in `redis`; `MICROGATEWAY_CACHE_FULL=1 GOWORK=off go test -count=1 ./...` in `redis`; `GOWORK=off go test -race -count=20 ./internal/cache ./internal/coalesce ./internal/memstore ./store/... ./internal/storeguard`; and the full-length `go test -run '^$' -bench . ./internal/cache ./internal/memstore` plus the same in `redis` | Local machine | Every command passes | Yes |
+| 5. Cache and purge load | `MICROGATEWAY_LOAD=1 GOWORK=off go test -race -count=1 -run 'TestCoalesceScale\|TestCacheMixedLoad\|TestPurgeLoad' ./internal/cache`; the same variables with `-run 'TestPurgeMarkerCapDefault\|TestInstancesMixedLoad\|TestHostGaugesChurnLoad' ./internal/e2e`; `MICROGATEWAY_LOAD=1 go test -race -count=1 -run TestMixedMultiInstanceLoad .` in `redis`; `MICROGATEWAY_CACHE_FULL=1 go test -count=1 ./...` in `redis`; `GOWORK=off go test -race -count=20 ./internal/cache ./internal/coalesce ./internal/memstore ./store/... ./internal/storeguard`; and the full-length `go test -run '^$' -bench . ./internal/cache ./internal/memstore` plus the same in `redis` | Local machine | Every command passes | Yes |
 | 6. Server and HTTP/2 | `GOWORK=off go test -race -count=20 ./internal/server ./internal/memnet`; three concurrent `GOWORK=off go test -race -count=3 ./internal/e2e`; and `go test -race -count=3` of `./internal/cli` with `./redis/cmd/microgateway` and `./redis`, run from `redis/` at the same time | Local machine | Every command passes | Yes |
-| 7. Real Redis | `make integration` with `MICROGATEWAY_HEAVY=1 MICROGATEWAY_REDIS_ADDR=<host:port>`; `GOWORK=off go test -race -count=5 -tags integration ./...` in `redis` | Redis 6.2 or later, empty database such as 15 | `TestIntegrationSuite` and `TestIntegrationTwoInstances` pass; cluster and Sentinel runs pass with `MICROGATEWAY_REDIS_CLUSTER` and `MICROGATEWAY_REDIS_SENTINEL` set | Yes |
+| 7. Real Redis | `make integration` with `MICROGATEWAY_HEAVY=1 MICROGATEWAY_REDIS_ADDR=<host:port>`; `go test -race -count=5 -tags integration ./...` in `redis` | Redis 6.2 or later, empty database such as 15 | `TestIntegrationSuite` and `TestIntegrationTwoInstances` pass; cluster and Sentinel runs pass with `MICROGATEWAY_REDIS_CLUSTER` and `MICROGATEWAY_REDIS_SENTINEL` set | Yes |
 | 8. Diagrams | Render the nine Mermaid diagrams in the README and the guides | A GitHub-compatible Mermaid renderer | Every diagram renders without a syntax error | Yes (manual) |
 | 9. Real network | `make realnet`, and `GOWORK=off go test -race -count=5 -tags realnet ./internal/e2e`, and `-run TestConnectTimeoutRealClockTCP` | Local machine with the VPN off | Every command passes | Yes |
 | 10. Container | `make docker`, then `docker run --rm microgateway:<version> version`, then a run with a mounted configuration | Docker | The version output matches `bin/microgateway version`, and the process runs as a non-root user | Yes |

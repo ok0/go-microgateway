@@ -106,10 +106,10 @@ Binary: the core module never imports a Redis client, so the binary that links t
 go install github.com/ok0/go-microgateway/redis/cmd/microgateway@latest
 ```
 
-or, from a checkout:
+or, from a checkout (the committed `go.work` builds the Redis module against the core in the checkout):
 
 ```sh
-cd redis && GOWORK=off go build -o microgateway ./cmd/microgateway
+cd redis && go build -o microgateway ./cmd/microgateway
 ```
 
 or `make build`, which writes the binary to `bin/microgateway`:
@@ -150,7 +150,7 @@ The repository holds two Go modules:
 - The core module `github.com/ok0/go-microgateway` is the root of the repository. It holds the gateway, the public `config` and `store` packages, the internal packages, and the core examples.
 - The Redis module `github.com/ok0/go-microgateway/redis` is in the `redis/` directory. It holds the Redis store, `redis.Option()`, the `microgateway` binary under `redis/cmd/microgateway`, and the Redis example program under `redis/examples`.
 
-The Redis module requires the core module at a version and includes `replace github.com/ok0/go-microgateway => ../` for local development. No `go.work` file is committed.
+The Redis module requires the core module at the same release version and has no `replace` directive. In a checkout, the committed `go.work` builds the Redis module against the core in the working tree; [CONTRIBUTING.md](CONTRIBUTING.md#command-modes) describes the command modes.
 
 ## Dependencies
 
@@ -162,7 +162,7 @@ Core module, direct dependencies:
 
 Redis module, direct dependencies:
 
-- `github.com/ok0/go-microgateway`, the core module, through the local `replace` or a version
+- `github.com/ok0/go-microgateway`, the core module, at the same release version
 - `github.com/redis/go-redis/v9` for the Redis store
 - `github.com/alicebob/miniredis/v2` for tests only
 
