@@ -281,6 +281,27 @@ func TestSemanticChecks(t *testing.T) {
 		{"retry before circuit breaker in pipeline", func(c *Config) {
 			c.Routes[0].Pipeline = []string{"retry", "circuit_breaker"}
 		}, "routes[0].pipeline[0]", "must be the last stage"},
+		{"strip prefix with dot segment", func(c *Config) {
+			c.Routes[0].Rewrite = Rewrite{StripPrefix: "/a/../b"}
+		}, "routes[0].rewrite.strip_prefix", "canonical path"},
+		{"strip prefix with empty segment", func(c *Config) {
+			c.Routes[0].Rewrite = Rewrite{StripPrefix: "/a//b"}
+		}, "routes[0].rewrite.strip_prefix", "canonical path"},
+		{"strip prefix with unneeded escape", func(c *Config) {
+			c.Routes[0].Rewrite = Rewrite{StripPrefix: "/a%7Eb"}
+		}, "routes[0].rewrite.strip_prefix", "canonical path"},
+		{"strip prefix with escaped slash", func(c *Config) {
+			c.Routes[0].Rewrite = Rewrite{StripPrefix: "/a%2Fb"}
+		}, "routes[0].rewrite.strip_prefix", "canonical path"},
+		{"replace from with escaped dot segment", func(c *Config) {
+			c.Routes[0].Rewrite = Rewrite{ReplacePrefix: ReplacePrefix{From: "/v1/%2e%2e", To: "/v2"}}
+		}, "routes[0].rewrite.replace_prefix.from", "canonical path"},
+		{"replace to with backslash", func(c *Config) {
+			c.Routes[0].Rewrite = Rewrite{ReplacePrefix: ReplacePrefix{From: "/v1", To: "/v2\\x"}}
+		}, "routes[0].rewrite.replace_prefix.to", "canonical path"},
+		{"replace to with dot segment", func(c *Config) {
+			c.Routes[0].Rewrite = Rewrite{ReplacePrefix: ReplacePrefix{From: "/v1", To: "/v2/./x"}}
+		}, "routes[0].rewrite.replace_prefix.to", "canonical path"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -303,6 +324,30 @@ func TestSemanticChecks(t *testing.T) {
 func TestBaseValid(t *testing.T) {
 	if err := base().Validate(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRewritePrefixCanonicalAccepted(t *testing.T) {
+	cases := []struct {
+		name    string
+		rewrite Rewrite
+	}{
+		{"strip root", Rewrite{StripPrefix: "/"}},
+		{"strip without slash", Rewrite{StripPrefix: "/api"}},
+		{"strip with trailing slash", Rewrite{StripPrefix: "/api/"}},
+		{"strip with semicolon", Rewrite{StripPrefix: "/a;b"}},
+		{"strip with escaped semicolon", Rewrite{StripPrefix: "/a%3Bb"}},
+		{"strip with escaped non-ASCII", Rewrite{StripPrefix: "/caf%C3%B6"}},
+		{"replace with trailing slash target", Rewrite{ReplacePrefix: ReplacePrefix{From: "/v1", To: "/api/v2/"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := base()
+			c.Routes[0].Rewrite = tc.rewrite
+			if err := c.Validate(); err != nil {
+				t.Errorf("Validate() = %v, want nil", err)
+			}
+		})
 	}
 }
 

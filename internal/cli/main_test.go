@@ -227,6 +227,29 @@ func TestValidateInvalid(t *testing.T) {
 	}
 }
 
+func TestValidateNonCanonicalRewrite(t *testing.T) {
+	raw, err := os.ReadFile("../../config/testdata/rewrite_invalid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(raw)
+	code, _, errs := runCmd(t, "validate", "-config", "../../config/testdata/rewrite_invalid.yaml")
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; stderr:\n%s", code, errs)
+	}
+	wants := []string{
+		fmt.Sprintf("routes[0].rewrite.strip_prefix (line %d): ", lineOf(t, src, "strip_prefix: /a/../b")),
+		fmt.Sprintf("routes[1].rewrite.replace_prefix.from (line %d): ", lineOf(t, src, "from: /b//c")),
+		fmt.Sprintf("routes[1].rewrite.replace_prefix.to (line %d): ", lineOf(t, src, "to: /x%2Fy")),
+		fmt.Sprintf("routes[2].upstream (line %d): ", lineOf(t, src, "upstream: missing")),
+	}
+	for _, w := range wants {
+		if !strings.Contains(errs, w) {
+			t.Errorf("stderr missing line with prefix %q\nstderr:\n%s", w, errs)
+		}
+	}
+}
+
 func TestValidateMissingFile(t *testing.T) {
 	code, _, errs := runCmd(t, "validate", "-config", "testdata/does-not-exist.yaml")
 	if code == 0 {

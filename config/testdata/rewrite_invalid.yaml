@@ -1,0 +1,30 @@
+version: 1
+listeners:
+  - name: public
+    address: ":8080"
+upstreams:
+  - name: users
+    hosts:
+      - url: "http://127.0.0.1:9001"
+routes:
+  - name: a
+    match:
+      path: /a
+      path_type: prefix
+    upstream: users
+    rewrite:
+      strip_prefix: /a/../b
+  - name: b
+    match:
+      path: /b
+      path_type: prefix
+    upstream: users
+    rewrite:
+      replace_prefix:
+        from: /b//c
+        to: /x%2Fy
+  - name: c
+    match:
+      path: /c
+      path_type: prefix
+    upstream: missing

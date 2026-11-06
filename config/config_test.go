@@ -330,6 +330,47 @@ func TestInvalidMultiCollectsAll(t *testing.T) {
 	}
 }
 
+func TestRewritePrefixFileErrors(t *testing.T) {
+	data, err := os.ReadFile("testdata/rewrite_invalid.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(data)
+	_, err = LoadFile("testdata/rewrite_invalid.yaml")
+	errs := fieldErrors(t, err)
+	want := []struct {
+		path      string
+		key       string
+		canonical bool
+	}{
+		{"routes[0].rewrite.strip_prefix", "strip_prefix: /a/../b", true},
+		{"routes[1].rewrite.replace_prefix.from", "from: /b//c", true},
+		{"routes[1].rewrite.replace_prefix.to", "to: /x%2Fy", true},
+		{"routes[2].upstream", "upstream: missing", false},
+	}
+	if len(errs) != len(want) {
+		t.Fatalf("got %d errors, want %d: %v", len(errs), len(want), err)
+	}
+	for _, w := range want {
+		found := false
+		for _, fe := range errs {
+			if fe.Path != w.path {
+				continue
+			}
+			found = true
+			if fe.Line != lineOf(src, w.key) {
+				t.Errorf("%s at line %d, want %d", w.path, fe.Line, lineOf(src, w.key))
+			}
+			if w.canonical && !strings.Contains(fe.Msg, "canonical path") {
+				t.Errorf("%s message %q does not mention canonical path", w.path, fe.Msg)
+			}
+		}
+		if !found {
+			t.Errorf("no error at %s; got %v", w.path, err)
+		}
+	}
+}
+
 func TestFullSchemaAccepted(t *testing.T) {
 	data, err := os.ReadFile("testdata/full.yaml")
 	if err != nil {

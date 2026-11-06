@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ok0/go-microgateway/internal/reqpath"
 	"github.com/ok0/go-microgateway/internal/router"
 	"github.com/ok0/go-microgateway/store"
 )
@@ -44,6 +45,9 @@ var (
 
 // msgCacheBeforeAuth is reported at the first "cache" entry of a pipeline that lists "auth" after it.
 const msgCacheBeforeAuth = `stage "cache" must come after "auth": cache hits would be served without authentication`
+
+// canonicalPathMsg is reported at a rewrite prefix that the request path canonicalization would change or reject.
+const canonicalPathMsg = "must be a canonical path: no \".\" or \"..\" segment, no empty segment, no backslash, no encoded \"/\" or \"\\\", no control byte, and escapes only for bytes that need them, in upper case"
 
 type checker struct {
 	errs []FieldError
@@ -551,12 +555,21 @@ func checkRewrite(ck *checker, p string, rw *Rewrite) {
 	if rw.StripPrefix != "" && !strings.HasPrefix(rw.StripPrefix, "/") {
 		ck.add(rp+".strip_prefix", `must start with "/"`)
 	}
+	if rw.StripPrefix != "" && strings.HasPrefix(rw.StripPrefix, "/") && !reqpath.IsCanonical(rw.StripPrefix) {
+		ck.add(rp+".strip_prefix", canonicalPathMsg)
+	}
 	rep := rw.ReplacePrefix
 	if (rep.From == "") != (rep.To == "") {
 		ck.add(rp+".replace_prefix", "from and to must both be set or both be empty")
 	}
 	if rep.From != "" && !strings.HasPrefix(rep.From, "/") {
 		ck.add(rp+".replace_prefix.from", `must start with "/"`)
+	}
+	if rep.From != "" && strings.HasPrefix(rep.From, "/") && !reqpath.IsCanonical(rep.From) {
+		ck.add(rp+".replace_prefix.from", canonicalPathMsg)
+	}
+	if rep.To != "" && !reqpath.IsCanonical(rep.To) {
+		ck.add(rp+".replace_prefix.to", canonicalPathMsg)
 	}
 	if rw.StripPrefix != "" && (rep.From != "" || rep.To != "") {
 		ck.add(rp, "strip_prefix and replace_prefix are mutually exclusive")
