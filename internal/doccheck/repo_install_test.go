@@ -143,6 +143,7 @@ func redisRequireReader(dir string) func(string) (string, error) {
 }
 
 func TestReleaseCheck(t *testing.T) {
+	requireFullHistory(t)
 	root := repoRoot(t)
 	if _, status := git(t, "rev-parse", "--is-inside-work-tree"); status != 0 {
 		t.Fatalf("git rev-parse: exit status %d", status)
@@ -160,6 +161,7 @@ func TestReleaseCheck(t *testing.T) {
 		version = redis.Requires[corePath]
 	}
 	tags := gitTags(t, root)
+	t.Logf("%d tags read: %s", len(tags), strings.Join(tags, " "))
 	mainDirs, err := cliMainDirs(root, repoFiles(t))
 	if err != nil {
 		t.Fatal(err)

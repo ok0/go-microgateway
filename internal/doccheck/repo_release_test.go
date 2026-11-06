@@ -67,6 +67,34 @@ func git(t *testing.T, args ...string) ([]byte, int) {
 	return nil, -1
 }
 
+// shallowOutput reads the output of git rev-parse --is-shallow-repository.
+func shallowOutput(out []byte) (bool, error) {
+	s := strings.TrimSpace(string(out))
+	switch s {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	}
+	return false, fmt.Errorf("git rev-parse --is-shallow-repository printed %q, not true or false", s)
+}
+
+// requireFullHistory fails the test when the repository is a shallow clone. The test reads all history and all tags, which a shallow clone does not have.
+func requireFullHistory(t *testing.T) {
+	t.Helper()
+	out, status := git(t, "rev-parse", "--is-shallow-repository")
+	if status != 0 {
+		t.Fatalf("git rev-parse --is-shallow-repository: exit status %d", status)
+	}
+	shallow, err := shallowOutput(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shallow {
+		t.Fatal(t.Name() + " needs all history and all tags, but this repository is a shallow clone; clone without --depth, run git fetch --unshallow --tags, or set fetch-depth: 0 on actions/checkout")
+	}
+}
+
 // run executes name with args in dir. The environment is the process environment without the heavy-check, soak and build-flag variables, plus env. It returns the combined output.
 func run(t *testing.T, dir string, env []string, name string, args ...string) ([]byte, error) {
 	t.Helper()
@@ -295,6 +323,7 @@ func TestTrackedFileHygiene(t *testing.T) {
 }
 
 func TestCommitMessageHygiene(t *testing.T) {
+	requireFullHistory(t)
 	refsOut, status := git(t, "for-each-ref", "--format=%(refname)")
 	if status != 0 {
 		t.Fatalf("git for-each-ref: exit status %d", status)
@@ -532,6 +561,128 @@ func TestWorkflow(t *testing.T) {
 	}
 }
 
+func TestCheckoutFindings(t *testing.T) {
+	cases := []struct {
+		name, steps string
+		want        int
+		subs        []string
+	}{
+		{"no with", "- uses: actions/checkout@v7\n", 1, []string{"fetch-depth: 0 (got none)"}},
+		{"depth 1", "- uses: actions/checkout@v7\n  with: {fetch-depth: 1}\n", 1, []string{"got 1"}},
+		{"depth string 1", "- uses: actions/checkout@v7\n  with: {fetch-depth: \"1\"}\n", 1, []string{"fetch-depth: 0"}},
+		{"depth empty", "- uses: actions/checkout@v7\n  with: {fetch-depth: }\n", 1, []string{"fetch-depth: 0"}},
+		{"depth 0 tags false", "- uses: actions/checkout@v7\n  with: {fetch-depth: 0, fetch-tags: false}\n", 1, []string{"fetch-tags: false"}},
+		{"depth 1 tags false", "- uses: actions/checkout@v7\n  with: {fetch-depth: 1, fetch-tags: false}\n", 2, []string{"fetch-depth: 0", "fetch-tags: false"}},
+		{"depth 0", "- uses: actions/checkout@v7\n  with: {fetch-depth: 0}\n", 0, nil},
+		{"depth string 0", "- uses: actions/checkout@v7\n  with: {fetch-depth: \"0\"}\n", 0, nil},
+		{"depth 0 tags true", "- uses: actions/checkout@v7\n  with: {fetch-depth: 0, fetch-tags: true}\n", 0, nil},
+		{"other action", "- uses: actions/setup-go@v7\n", 0, nil},
+		{"second step bad", "- uses: actions/checkout@v7\n  with: {fetch-depth: 0}\n- uses: actions/checkout@v7\n", 1, []string{"step 1 "}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var steps []any
+			if err := yaml.Unmarshal([]byte(c.steps), &steps); err != nil {
+				t.Fatal(err)
+			}
+			found := checkoutFindings(steps)
+			if len(found) != c.want {
+				t.Fatalf("checkoutFindings = %q, want %d findings", found, c.want)
+			}
+			for _, sub := range c.subs {
+				if !slices.ContainsFunc(found, func(f string) bool { return strings.Contains(f, sub) }) {
+					t.Errorf("no finding contains %q: %q", sub, found)
+				}
+			}
+		})
+	}
+}
+
+func TestWorkflowCheckoutDepthRequired(t *testing.T) {
+	root := repoRoot(t)
+	src := string(readAt(t, root, ".github/workflows/ci.yml"))
+	lines := strings.Split(src, "\n")
+	depthLines, checkoutLines := 0, 0
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "fetch-depth: 0" {
+			depthLines++
+		}
+		if strings.Contains(line, "uses: actions/checkout@") {
+			checkoutLines++
+		}
+	}
+	if depthLines == 0 || depthLines != checkoutLines {
+		t.Fatalf("ci.yml has %d fetch-depth: 0 lines and %d actions/checkout lines, want equal and non-zero", depthLines, checkoutLines)
+	}
+	makefile := readAt(t, root, "Makefile")
+	floor := goFloor(t, root)
+	var wf map[string]any
+	if err := yaml.Unmarshal([]byte(src), &wf); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range workflowProblems(wf, makefile, floor) {
+		if strings.Contains(p, "fetch-depth") {
+			t.Errorf("unmodified workflow reports %q", p)
+		}
+	}
+	for i, line := range lines {
+		if strings.TrimSpace(line) != "fetch-depth: 0" {
+			continue
+		}
+		mutated := strings.Join(slices.Delete(slices.Clone(lines), i, i+1), "\n")
+		var m map[string]any
+		if err := yaml.Unmarshal([]byte(mutated), &m); err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, p := range workflowProblems(m, makefile, floor) {
+			if strings.Contains(p, "fetch-depth: 0") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("removing line %d of ci.yml reports no fetch-depth: 0 problem", i+1)
+		}
+	}
+}
+
+func TestShallowOutput(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    bool
+		wantErr bool
+	}{
+		{"true\n", true, false},
+		{"false\n", false, false},
+		{"false", false, false},
+		{"", false, true},
+		{"--is-shallow-repository\n", false, true},
+		{"TRUE\n", false, true},
+		{"yes", false, true},
+	}
+	for _, c := range cases {
+		t.Run(fmt.Sprintf("%q", c.in), func(t *testing.T) {
+			got, err := shallowOutput([]byte(c.in))
+			if (err != nil) != c.wantErr {
+				t.Fatalf("shallowOutput(%q) error = %v, want error %t", c.in, err, c.wantErr)
+			}
+			if got != c.want {
+				t.Errorf("shallowOutput(%q) = %t, want %t", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+func TestContributingFullClone(t *testing.T) {
+	root := repoRoot(t)
+	body := string(readAt(t, root, "CONTRIBUTING.md"))
+	for _, want := range []string{"full clone", "shallow clone", "fetch-depth: 0", "TestReleaseCheck", "TestCommitMessageHygiene"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("CONTRIBUTING.md does not contain %q", want)
+		}
+	}
+}
+
 func workflowProblems(wf map[string]any, makefile []byte, floor string) []string {
 	var problems []string
 	add := func(format string, args ...any) {
@@ -560,6 +711,9 @@ func workflowProblems(wf map[string]any, makefile []byte, floor string) []string
 			if u, ok := step["uses"].(string); ok {
 				uses = append(uses, u)
 			}
+		}
+		for _, f := range checkoutFindings(listOf(job["steps"])) {
+			add("job %s: %s", name, f)
 		}
 	}
 
@@ -744,6 +898,31 @@ func workflowProblems(wf map[string]any, makefile []byte, floor string) []string
 		add("lint job golangci action version is not the Makefile GOLANGCI_LINT_VERSION %q", lintVersion)
 	}
 	return problems
+}
+
+// checkoutFindings reports each actions/checkout step that does not fetch all history and all tags: fetch-depth must be 0 and fetch-tags must not be false.
+func checkoutFindings(steps []any) []string {
+	var findings []string
+	for i, raw := range steps {
+		step := mapOf(raw)
+		uses, ok := step["uses"].(string)
+		if !ok || !strings.HasPrefix(uses, "actions/checkout@") {
+			continue
+		}
+		with := mapOf(step["with"])
+		depth, ok := with["fetch-depth"]
+		if !ok || (depth != any(0) && depth != any("0")) {
+			got := "none"
+			if ok {
+				got = fmt.Sprint(depth)
+			}
+			findings = append(findings, fmt.Sprintf("step %d (%s) does not set fetch-depth: 0 (got %s)", i, uses, got))
+		}
+		if v, ok := with["fetch-tags"]; ok && isFalse(v) {
+			findings = append(findings, fmt.Sprintf("step %d (%s) sets fetch-tags: false", i, uses))
+		}
+	}
+	return findings
 }
 
 func goFloor(t *testing.T, root string) string {
