@@ -30,7 +30,7 @@ func getOK(t *testing.T, client *http.Client, url string) {
 		t.Fatal(err)
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET %s status = %d, want 200", url, resp.StatusCode)
 	}
@@ -582,7 +582,7 @@ func churnGet(t *testing.T, client *http.Client, url string, want int) {
 		return
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if want != 0 && resp.StatusCode != want {
 		t.Errorf("GET %s status = %d, want %d", url, resp.StatusCode, want)
 	}
@@ -737,7 +737,7 @@ func startUpstreamReply(client *http.Client, req *http.Request) <-chan upstreamR
 			out <- upstreamReply{err: err}
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		raw, err := io.ReadAll(resp.Body)
 		if err != nil {
 			out <- upstreamReply{err: err}

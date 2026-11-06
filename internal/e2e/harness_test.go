@@ -242,13 +242,6 @@ func (n *memNetwork) failDials(t *testing.T, s *testServer, k int) {
 	n.failNext[s.Addr] = k
 }
 
-func (n *memNetwork) unrefuse(t *testing.T, s *testServer) {
-	t.Helper()
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	delete(n.refused, s.Addr)
-}
-
 func (n *memNetwork) dialCount(addr string) int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -466,7 +459,7 @@ func TestMemNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -520,7 +513,7 @@ func TestMemNetwork(t *testing.T) {
 			defer wg.Done()
 			resp, err := peakClient.Get(peakSrv.URL + "/")
 			if err == nil {
-				resp.Body.Close()
+				_ = resp.Body.Close()
 			}
 		}()
 	}

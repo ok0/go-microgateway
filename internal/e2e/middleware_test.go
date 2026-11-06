@@ -212,14 +212,14 @@ func TestAbortHandlerNotSwallowed(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	if resp, err := ts.Client().Get(ts.URL + "/x"); err == nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatal("expected the connection to be aborted")
 	}
 	resp, err := ts.Client().Get(ts.URL + "/x")
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -283,7 +283,7 @@ func TestRouteTimeoutSSE(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -398,7 +398,7 @@ func TestCORSThroughGateway(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return resp.StatusCode
 	}
 
@@ -424,7 +424,7 @@ func TestCORSThroughGateway(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("actual status = %d, want 200", resp.StatusCode)
 	}

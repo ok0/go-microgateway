@@ -137,7 +137,7 @@ routes:
 
 func decodeErr(t *testing.T, resp *http.Response) apiError {
 	t.Helper()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var body struct {
 		Error apiError `json:"error"`
 	}
@@ -159,7 +159,7 @@ func serve(t *testing.T, g *microgateway.Gateway, req *http.Request) (*http.Resp
 	if err := json.NewDecoder(resp.Body).Decode(&e); err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return resp, e
 }
 
@@ -313,7 +313,7 @@ func statusOf(client *http.Client, url string) int {
 	if err != nil {
 		return -1
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return resp.StatusCode
 }
@@ -399,7 +399,7 @@ func wsEchoHandler() http.Handler {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		if _, err := brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"); err != nil {
 			return
 		}
@@ -443,7 +443,7 @@ func startGet(client *http.Client, url string) <-chan getResult {
 			return
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		out <- getResult{status: resp.StatusCode, gen: resp.Header.Get("X-Gen")}
 	}()
 	return out
@@ -764,8 +764,12 @@ func auJWK(kid, alg string, pub any) map[string]any {
 		size := (k.Curve.Params().BitSize + 7) / 8
 		m["kty"] = "EC"
 		m["crv"] = k.Curve.Params().Name
-		m["x"] = b64(k.X.FillBytes(make([]byte, size)))
-		m["y"] = b64(k.Y.FillBytes(make([]byte, size)))
+		raw, err := k.Bytes()
+		if err != nil {
+			panic(err)
+		}
+		m["x"] = b64(raw[1 : 1+size])
+		m["y"] = b64(raw[1+size:])
 	case ed25519.PublicKey:
 		m["kty"] = "OKP"
 		m["crv"] = "Ed25519"
@@ -1092,7 +1096,7 @@ func rsGet(t *testing.T, client *http.Client, url, method string, body io.Reader
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)

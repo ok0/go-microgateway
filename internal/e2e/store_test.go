@@ -1169,7 +1169,7 @@ func TestStoreMultiInstanceIndependence(t *testing.T) {
 	})
 }
 
-var spDown = fmt.Errorf("store unreachable: %w", store.ErrUnavailable)
+var errSpDown = fmt.Errorf("store unreachable: %w", store.ErrUnavailable)
 
 const spStoreTimeout = 200 * time.Millisecond
 
@@ -1270,7 +1270,7 @@ func TestStorePolicyTable(t *testing.T) {
 				const client = "192.0.2.30:4000"
 				fake := rlFake()
 				shared := stShared(t, fake)
-				shared.SetMode(m.mode, spDown)
+				shared.SetMode(m.mode, errSpDown)
 				n := newMemNetwork()
 				be, hits := rlBackend(t, n)
 				var factoryCalls atomic.Int64
@@ -1361,7 +1361,7 @@ func TestStoreRecovery(t *testing.T) {
 	spExpectValue(t, g, 0, "microgateway_ratelimit_store_fallback_total", "route", "rl", "policy", "local")
 	rsCheckExposition(t, metricsText(t, g))
 
-	shared.SetMode(teststore.Fail, spDown)
+	shared.SetMode(teststore.Fail, errSpDown)
 	for i := range 3 {
 		rlExpectRemaining(t, stDo(t, g, "/rl", client), strconv.Itoa(9-i))
 	}
@@ -1424,7 +1424,7 @@ func TestStoreSharedGuard(t *testing.T) {
 	}
 	h := handles[0]
 
-	shared.SetMode(teststore.Fail, spDown)
+	shared.SetMode(teststore.Fail, errSpDown)
 	for range 3 {
 		spExpectUnavailable(t, stDo(t, g, "/a", client), "2")
 	}
@@ -2511,7 +2511,7 @@ func TestInstancesStoreFailureIndependent(t *testing.T) {
 	rlExpectRemaining(t, stDo(t, gB, "/rl", smClient), "3")
 	rlExpectRemaining(t, stDo(t, gC, "/rl", smClient), "2")
 
-	spy.SetMode("", teststore.Fail, spDown)
+	spy.SetMode("", teststore.Fail, errSpDown)
 
 	takesA := spy.CountHandle(idA, "take")
 	rlExpectRemaining(t, stDo(t, gA, "/rl", smClient), "4")
@@ -2649,7 +2649,7 @@ func TestInstancesMixedLoad(t *testing.T) {
 	var version, floor atomic.Int64
 	be := n.serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "max-age=60")
-		fmt.Fprint(w, version.Load())
+		_, _ = fmt.Fprint(w, version.Load())
 	}))
 	top := "stores:\n" + stStore("s", "") + "cache:\n  store: s\n"
 	routes := rlRoute("rl", fmt.Sprintf("    rate_limit:\n      rate: 1\n      per: 1h\n      burst: %d\n      store: s\n", burst)) +

@@ -895,7 +895,7 @@ func TestCacheStreamingGateway(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		first := make(chan string, 1)
 		go func() {
 			line, _ := bufio.NewReader(resp.Body).ReadString('\n')

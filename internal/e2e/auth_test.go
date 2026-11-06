@@ -121,12 +121,6 @@ func (f *auFetcher) setPanic(on bool) {
 	f.panics = on
 }
 
-func (f *auFetcher) setBlock(ch chan struct{}) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.block = ch
-}
-
 func (f *auFetcher) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

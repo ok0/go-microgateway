@@ -74,7 +74,7 @@ routes:
 					continue
 				}
 				_, _ = io.Copy(io.Discard, resp.Body)
-				resp.Body.Close()
+				_ = resp.Body.Close()
 				if resp.StatusCode != http.StatusOK {
 					failures.Add(1)
 				}
@@ -196,7 +196,7 @@ routes:
 				var e echo
 				derr := json.NewDecoder(resp.Body).Decode(&e)
 				_, _ = io.Copy(io.Discard, resp.Body)
-				resp.Body.Close()
+				_ = resp.Body.Close()
 				checked.Add(1)
 				if derr != nil || resp.StatusCode != http.StatusOK || resp.Header.Get("X-Gen") != e.Backend {
 					bad.Add(1)
@@ -301,7 +301,7 @@ routes:
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { sseResp.Body.Close() })
+	t.Cleanup(func() { _ = sseResp.Body.Close() })
 	lines := make(chan string, 8)
 	go func() {
 		defer close(lines)
@@ -370,8 +370,8 @@ routes:
 
 	wsEcho("again\n")
 
-	sseResp.Body.Close()
-	conn.Close()
+	_ = sseResp.Body.Close()
+	_ = conn.Close()
 	heldClient.CloseIdleConnections()
 	sseClient.CloseIdleConnections()
 	probe.CloseIdleConnections()
@@ -477,7 +477,7 @@ func runKeepAliveAcrossReload(t *testing.T, n testNetwork) {
 			t.Fatalf("%s: %v", step, err)
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("%s: status = %d, want 200", step, resp.StatusCode)
 		}

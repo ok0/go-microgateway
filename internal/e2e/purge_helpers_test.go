@@ -157,11 +157,6 @@ func jsonURLs(urls ...string) string {
 	return string(b)
 }
 
-func jsonTags(tags ...string) string {
-	b, _ := json.Marshal(tags)
-	return string(b)
-}
-
 var purgeSeriesLabels = [][2]string{
 	{"url", "hard"}, {"url", "soft"}, {"tag", "hard"}, {"tag", "soft"}, {"all", "hard"}, {"all", "soft"},
 }

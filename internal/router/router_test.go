@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func precedenceEntries() []Entry {
@@ -120,7 +122,7 @@ func TestPrecedence(t *testing.T) {
 			if s, _ := v.(string); s != tc.want {
 				t.Errorf("matched %q, want %q", s, tc.want)
 			}
-			if !(len(got) == 0 && len(tc.params) == 0) && !reflect.DeepEqual(got, tc.params) {
+			if (len(got) != 0 || len(tc.params) != 0) && !reflect.DeepEqual(got, tc.params) {
 				t.Errorf("params = %+v, want %+v", got, tc.params)
 			}
 		})
@@ -201,5 +203,8 @@ func BenchmarkLookup1000(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		rt.Lookup(req)
+	}
+	if os.Getenv("MICROGATEWAY_HEAVY") == "1" && b.N > 0 && b.Elapsed()/time.Duration(b.N) >= 2*time.Microsecond {
+		b.Fatalf("lookup %v/op, target < 2µs", b.Elapsed()/time.Duration(b.N))
 	}
 }

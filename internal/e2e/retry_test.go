@@ -157,7 +157,7 @@ func reDoAsync(client *http.Client, req *http.Request) <-chan reResult {
 			ch <- reResult{err: err}
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		data, err := io.ReadAll(resp.Body)
 		ch <- reResult{code: resp.StatusCode, hdr: resp.Header, body: data, err: err}
 	}()
@@ -917,7 +917,7 @@ func runRetryStreaming(t *testing.T, n testNetwork) {
 		if start.err != nil {
 			t.Fatal(start.err)
 		}
-		defer start.resp.Body.Close()
+		defer func() { _ = start.resp.Body.Close() }()
 		lines := reLines(start.resp.Body)
 		if got := reRecvLine(t, env, lines, "SSE first line"); got != "data: one\n" {
 			t.Fatalf("first line = %q, want \"data: one\"", got)
@@ -960,7 +960,7 @@ func runRetryStreaming(t *testing.T, n testNetwork) {
 		}
 		resp := start.resp
 		rd, _ := reRecv(t, "aborted body read", reReadAll(resp.Body), func() string { return env.state(t) })
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if string(rd.data) != "partial" || rd.err == nil {
 			t.Fatalf("body = %q (err %v), want \"partial\" followed by an error", rd.data, rd.err)
 		}

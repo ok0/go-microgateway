@@ -17,8 +17,6 @@ import (
 	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
-type rsLogs = captureHandler
-
 type h3Result struct {
 	code int
 	body string

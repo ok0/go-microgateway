@@ -47,7 +47,7 @@ func TestProxyThroughHTTPTestServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -82,7 +82,7 @@ func TestConcurrent(t *testing.T) {
 					return
 				}
 				_, _ = io.Copy(io.Discard, resp.Body)
-				resp.Body.Close()
+				_ = resp.Body.Close()
 				if resp.StatusCode != http.StatusOK {
 					t.Errorf("status = %d, want 200", resp.StatusCode)
 				}
@@ -110,7 +110,7 @@ func TestCloseNoLeak(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 	client.CloseIdleConnections()
 	ts.Close()
@@ -138,7 +138,7 @@ func TestErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	closedURL := "http://" + ln.Addr().String()
-	ln.Close()
+	_ = ln.Close()
 
 	cases := []struct {
 		name   string
@@ -365,7 +365,7 @@ func TestWebSocketEcho(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		if _, err := brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"); err != nil {
 			return
 		}
@@ -384,7 +384,7 @@ func TestWebSocketEcho(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if err := conn.SetDeadline(time.Now().Add(testwait.Guard(t))); err != nil {
 		t.Fatal(err)
 	}
@@ -443,7 +443,7 @@ func TestSSEIncremental(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	lines := make(chan string, 8)
 	go func() {

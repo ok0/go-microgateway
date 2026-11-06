@@ -303,7 +303,7 @@ func (r *healthRig) get(path string) (int, []byte) {
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		r.t.Fatal(err)
@@ -329,7 +329,7 @@ func (r *healthRig) getCanceled(path string) (context.CancelFunc, <-chan error) 
 	go func() {
 		resp, err := r.client.Do(req)
 		if err == nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 		}
 		done <- err
 	}()
