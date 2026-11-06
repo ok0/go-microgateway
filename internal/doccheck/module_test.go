@@ -1,6 +1,7 @@
 package doccheck
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,6 +11,50 @@ import (
 )
 
 const coreModFixture = "module github.com/ok0/go-microgateway\n\ngo 1.27.0\n"
+
+const validWorkFixture = "go 1.27.0\n\nuse (\n\t.\n\t./redis\n)\n\nreplace github.com/ok0/go-microgateway v0.1.0 => ./\n"
+
+var releaseVersionCases = []struct {
+	v  string
+	ok bool
+}{
+	{"v0.1.0", true},
+	{"v0.2.0-rc.1", true},
+	{"v1.10.0", true},
+	{"", false},
+	{"0.2.0", false},
+	{"v1", false},
+	{"v1.2", false},
+	{"v01.2.3", false},
+	{"latest", false},
+	{"(devel)", false},
+	{"v0.2.0+dirty", false},
+	{"v0.2.0-0.20260101000000-abcdefabcdef", false},
+	{"v0.0.0-20260101000000-abcdefabcdef", false},
+	{"v1.0.0-pre.0.20260101000000-abcdefabcdef", false},
+}
+
+func parseMod(t *testing.T, src string) GoMod {
+	t.Helper()
+	m, err := ParseGoMod([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+func tagReader(reqs map[string]string) func(string) (string, error) {
+	return func(tag string) (string, error) {
+		if v, ok := reqs[tag]; ok {
+			return v, nil
+		}
+		return "", errors.New("no redis/go.mod")
+	}
+}
+
+func installReadme(lines ...string) string {
+	return "# x\n\n```sh\n" + strings.Join(lines, "\n") + "\n```\n"
+}
 
 func redisModFixture(v string) string {
 	return "module github.com/ok0/go-microgateway/redis\n\ngo 1.27.0\n\nrequire github.com/ok0/go-microgateway " + v + "\n"
@@ -204,6 +249,174 @@ func TestWorkFindings(t *testing.T) {
 					return f.Pattern == "replace" && strings.Contains(f.Text, w)
 				}) {
 					t.Errorf("no replace finding mentions %q: %+v", w, found)
+				}
+			}
+		})
+	}
+}
+
+func TestReleaseVersion(t *testing.T) {
+	for _, c := range releaseVersionCases {
+		if got := releaseVersion(c.v); got != c.ok {
+			t.Errorf("releaseVersion(%q) = %t, want %t", c.v, got, c.ok)
+		}
+	}
+}
+
+func TestCompareRelease(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"v0.9.0", "v0.10.0", -1},
+		{"v0.2.0-rc.1", "v0.2.0", -1},
+		{"v0.2.0-rc.1", "v0.2.0-rc.2", -1},
+		{"v0.2.0-rc.2", "v0.2.0-rc.10", -1},
+		{"v0.2.0-1", "v0.2.0-alpha", -1},
+		{"v0.2.0-alpha", "v0.2.0-alpha.1", -1},
+		{"v1.0.0", "v1.0.0", 0},
+	}
+	for _, c := range cases {
+		if got := compareRelease(c.a, c.b); got != c.want {
+			t.Errorf("compareRelease(%s, %s) = %d, want %d", c.a, c.b, got, c.want)
+		}
+		if got := compareRelease(c.b, c.a); got != -c.want {
+			t.Errorf("compareRelease(%s, %s) = %d, want %d", c.b, c.a, got, -c.want)
+		}
+	}
+}
+
+func TestReleaseFindings(t *testing.T) {
+	cases := []struct {
+		name, version, redisVersion, workVersion string
+		wantPatterns                             []string
+		wantPaths                                map[string]string
+		wantText                                 []string
+	}{
+		{"matching release", "v0.1.0", "v0.1.0", "v0.1.0", nil, nil, nil},
+		{"redis and work behind", "v0.2.0", "v0.1.0", "v0.1.0", []string{"release-replace", "release-require"},
+			map[string]string{"release-require": "redis/go.mod", "release-replace": "go.work"}, []string{"v0.1.0", "v0.2.0"}},
+		{"matching second release", "v0.2.0", "v0.2.0", "v0.2.0", nil, nil, nil},
+		{"work at another version", "v0.2.0", "v0.2.0", "v0.3.0", []string{"release-replace", "replace", "replace-missing"},
+			map[string]string{"release-replace": "go.work", "replace": "go.work", "replace-missing": "go.work"}, []string{"v0.3.0"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			work := strings.Replace(validWorkFixture, "v0.1.0 =>", c.workVersion+" =>", 1)
+			found := ReleaseFindings(c.version, []byte(work), parseMod(t, coreModFixture), parseMod(t, redisModFixture(c.redisVersion)))
+			if got := findingPatterns(found); !slices.Equal(got, c.wantPatterns) {
+				t.Errorf("patterns = %q, want %q (findings %+v)", got, c.wantPatterns, found)
+			}
+			for _, f := range found {
+				if want, ok := c.wantPaths[f.Pattern]; !ok || f.Path != want {
+					t.Errorf("finding %+v has path %q, want %q", f, f.Path, want)
+				}
+			}
+			for _, w := range c.wantText {
+				if !slices.ContainsFunc(found, func(f Finding) bool { return strings.Contains(f.Text, w) }) {
+					t.Errorf("no finding mentions %q: %+v", w, found)
+				}
+			}
+		})
+	}
+
+	for _, c := range releaseVersionCases {
+		if c.ok {
+			continue
+		}
+		t.Run("rejected "+c.v, func(t *testing.T) {
+			found := ReleaseFindings(c.v, []byte(validWorkFixture), parseMod(t, coreModFixture), parseMod(t, redisModFixture("v0.1.0")))
+			if got := findingPatterns(found); !slices.Equal(got, []string{"release-version"}) {
+				t.Errorf("patterns = %q, want [release-version] (findings %+v)", got, found)
+			}
+			if len(found) == 1 && found[0].Path != "VERSION" {
+				t.Errorf("finding %+v has path %q, want VERSION", found[0], found[0].Path)
+			}
+		})
+	}
+}
+
+func TestTagFindings(t *testing.T) {
+	cases := []struct {
+		name         string
+		tags         []string
+		reqs         map[string]string
+		wantPatterns []string
+		wantPath     string
+		wantText     []string
+	}{
+		{name: "none"},
+		{name: "paired release", tags: []string{"v0.1.0", "redis/v0.1.0"}, reqs: map[string]string{"redis/v0.1.0": "v0.1.0"}},
+		{name: "release in progress", tags: []string{"v0.1.0"}},
+		{name: "unpaired highest", tags: []string{"v0.1.0", "redis/v0.1.0", "v0.2.0"}, reqs: map[string]string{"redis/v0.1.0": "v0.1.0"}},
+		{name: "unpaired older", tags: []string{"v0.1.0", "v0.2.0", "redis/v0.2.0"}, reqs: map[string]string{"redis/v0.2.0": "v0.2.0"},
+			wantPatterns: []string{"tag-redis-missing"}, wantPath: "v0.1.0"},
+		{name: "two unpaired older", tags: []string{"v0.1.0", "v0.2.0"},
+			wantPatterns: []string{"tag-redis-missing"}, wantPath: "v0.1.0"},
+		{name: "numeric order", tags: []string{"v0.9.0", "v0.10.0", "redis/v0.10.0"}, reqs: map[string]string{"redis/v0.10.0": "v0.10.0"},
+			wantPatterns: []string{"tag-redis-missing"}, wantPath: "v0.9.0"},
+		{name: "prerelease before release", tags: []string{"v0.2.0-rc.1", "v0.2.0", "redis/v0.2.0"}, reqs: map[string]string{"redis/v0.2.0": "v0.2.0"},
+			wantPatterns: []string{"tag-redis-missing"}, wantPath: "v0.2.0-rc.1"},
+		{name: "prerelease pair", tags: []string{"v0.2.0-rc.1", "redis/v0.2.0-rc.1", "v0.2.0-rc.2"}, reqs: map[string]string{"redis/v0.2.0-rc.1": "v0.2.0-rc.1"}},
+		{name: "redis without core", tags: []string{"redis/v0.1.0"}, reqs: map[string]string{"redis/v0.1.0": "v0.1.0"},
+			wantPatterns: []string{"tag-core-missing"}, wantPath: "redis/v0.1.0"},
+		{name: "redis requires older", tags: []string{"v0.2.0", "redis/v0.2.0"}, reqs: map[string]string{"redis/v0.2.0": "v0.1.0"},
+			wantPatterns: []string{"tag-require"}, wantPath: "redis/v0.2.0", wantText: []string{"v0.1.0", "v0.2.0"}},
+		{name: "redis go.mod unreadable", tags: []string{"v0.1.0", "redis/v0.1.0"},
+			wantPatterns: []string{"tag-read"}, wantPath: "redis/v0.1.0"},
+		{name: "other tags ignored", tags: []string{"backup", "vfoo", "redis/latest", "v1", "redis/v1"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			found := TagFindings(c.tags, tagReader(c.reqs))
+			if got := findingPatterns(found); !slices.Equal(got, c.wantPatterns) {
+				t.Errorf("patterns = %q, want %q (findings %+v)", got, c.wantPatterns, found)
+			}
+			for _, f := range found {
+				if f.Path != c.wantPath {
+					t.Errorf("finding %+v has path %q, want %q", f, f.Path, c.wantPath)
+				}
+			}
+			for _, w := range c.wantText {
+				if !slices.ContainsFunc(found, func(f Finding) bool { return strings.Contains(f.Text, w) }) {
+					t.Errorf("no finding mentions %q: %+v", w, found)
+				}
+			}
+		})
+	}
+}
+
+func TestInstallFindings(t *testing.T) {
+	const want = "github.com/ok0/go-microgateway/redis/cmd/microgateway"
+	mainDirs := []string{"redis/cmd/microgateway"}
+	cases := []struct {
+		name         string
+		readme       string
+		dirs         []string
+		wantPatterns []string
+	}{
+		{"latest", installReadme("go install " + want + "@latest"), mainDirs, nil},
+		{"release", installReadme("go install " + want + "@v0.1.0"), mainDirs, nil},
+		{"core path", installReadme("go install github.com/ok0/go-microgateway/cmd/microgateway@latest"), mainDirs, []string{"install-path"}},
+		{"no install line", installReadme(), mainDirs, []string{"install-missing"}},
+		{"major only", installReadme("go install " + want + "@v1"), mainDirs, []string{"install-version"}},
+		{"no v prefix", installReadme("go install " + want + "@0.1.0"), mainDirs, []string{"install-version"}},
+		{"pseudo version", installReadme("go install " + want + "@v0.1.0-0.20260101000000-abcdefabcdef"), mainDirs, []string{"install-version"}},
+		{"empty version", installReadme("go install " + want + "@"), mainDirs, []string{"install-version"}},
+		{"no version", installReadme("go install " + want), mainDirs, []string{"install-version"}},
+		{"two valid lines", installReadme("go install "+want+"@latest", "go install "+want+"@v0.1.0"), mainDirs, []string{"install-multiple"}},
+		{"no main package", installReadme("go install " + want + "@latest"), nil, []string{"install-main"}},
+		{"two main packages", installReadme("go install " + want + "@latest"), []string{"redis/cmd/microgateway", "redis/cmd/other"}, []string{"install-main"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			found := InstallFindings([]byte(c.readme), c.dirs)
+			if got := findingPatterns(found); !slices.Equal(got, c.wantPatterns) {
+				t.Errorf("patterns = %q, want %q (findings %+v)", got, c.wantPatterns, found)
+			}
+			for _, f := range found {
+				if f.Path != "README.md" {
+					t.Errorf("finding %+v has path %q, want README.md", f, f.Path)
 				}
 			}
 		})
