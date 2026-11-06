@@ -19,7 +19,8 @@ func buildBinary(t *testing.T, ldflags string) string {
 		t.Skip("go toolchain not available")
 	}
 	bin := filepath.Join(t.TempDir(), "microgateway")
-	args := []string{"build", "-o", bin}
+	// VCS stamping is off so the version subtests do not depend on tags of the checkout.
+	args := []string{"build", "-buildvcs=false", "-o", bin}
 	if ldflags != "" {
 		args = append(args, "-ldflags", ldflags)
 	}

@@ -12,7 +12,10 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
+	"runtime/debug"
 	"slices"
+	"strings"
 	"syscall"
 
 	"github.com/ok0/go-microgateway"
@@ -28,6 +31,35 @@ var (
 	commit  = "none"
 	date    = "unknown"
 )
+
+// readBuildInfo returns the build information of the running binary. Tests replace it.
+var readBuildInfo = debug.ReadBuildInfo
+
+var (
+	releaseVersionRE = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$`)
+	pseudoVersionRE  = regexp.MustCompile(`(^|\.)[0-9]{14}-[0-9A-Za-z]+$`)
+)
+
+// versionString returns the version the version command prints: the version set at link time; when none was set, the
+// main module version of the build information if it is a release version, as go install of a tagged version records it;
+// otherwise "dev". A pseudo-version, "(devel)", an empty version or missing build information give "dev".
+func versionString() string {
+	if version != "dev" {
+		return version
+	}
+	info, ok := readBuildInfo()
+	if !ok || info == nil {
+		return "dev"
+	}
+	v := info.Main.Version
+	if !releaseVersionRE.MatchString(v) {
+		return "dev"
+	}
+	if _, pre, found := strings.Cut(v, "-"); found && pseudoVersionRE.MatchString(pre) {
+		return "dev"
+	}
+	return v
+}
 
 const usage = `usage: microgateway <command> [flags]
 
@@ -81,7 +113,7 @@ func Main(ctx context.Context, env Env, opts ...microgateway.Option) int {
 	case "run":
 		return runServe(ctx, args[1:], stdout, stderr, lookup, env.Signals, env.Ready, env.Clock, opts)
 	case "version":
-		_, _ = fmt.Fprintf(stdout, "microgateway %s (commit %s, built %s)\n", version, commit, date)
+		_, _ = fmt.Fprintf(stdout, "microgateway %s (commit %s, built %s)\n", versionString(), commit, date)
 		return 0
 	case "help", "-h", "--help":
 		_, _ = fmt.Fprint(stdout, usage)

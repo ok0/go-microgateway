@@ -16,7 +16,7 @@ cd redis && go build -o microgateway ./cmd/microgateway
 |---------|-------|---------|
 | `run` | `-config`, `-log-level`, `-log-format` | Serves the gateway until it receives an interrupt or termination signal. |
 | `validate` | `-config` | Checks a configuration file and reports every problem it finds. |
-| `version` | none | Prints the version, commit and build date. |
+| `version` | none | Prints the version, commit and build date. A binary installed with `go install …@vX.Y.Z` reports `vX.Y.Z`; a build without a version, such as a plain `make build` or `go build`, reports `dev`. |
 
 Flags:
 
