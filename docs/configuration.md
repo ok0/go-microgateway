@@ -361,7 +361,7 @@ Each route matches requests and forwards them to one upstream. `priority` orders
 |---|---|---|---|---|
 | `routes[].match.hosts` | list of strings | none | host names or `*.` wildcards | Hosts the route matches; an empty list matches any host. |
 | `routes[].match.path` | string | `/` | a valid path that starts with `/` | Path to match. |
-| `routes[].match.path_type` | string | `prefix` | one of `exact`, `prefix`, `pattern` | How the path is compared. |
+| `routes[].match.path_type` | string | `prefix` | one of `exact`, `prefix`, `pattern` | How the path is compared. \`exact\` compares the canonical request path verbatim. \`prefix\` matches on segment boundaries and ignores a trailing slash in the prefix, so \`/public/\` and \`/public\` both match \`/public\`, \`/public/\` and \`/public/x\`, and neither matches \`/publicx\`. |
 | `routes[].match.methods` | list of strings | none | uppercase HTTP method tokens | Methods the route matches; an empty list matches any method. |
 | `routes[].match.headers` | map of strings (secret values) | none | header names; values are secrets | Header values that the request must carry. |
 
