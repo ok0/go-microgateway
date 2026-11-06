@@ -303,8 +303,10 @@ The block is optional. Its defaults apply when the block is present.
 | `auth.jwt[].jwks.url` | string (secret URL) | required | an `http` or `https` URL; userinfo and query values are redacted in output | Location of the remote key set. |
 | `auth.jwt[].jwks.algorithms` | list of strings | required | at least one entry; each one of `RS256`, `RS384`, `RS512`, `ES256`, `ES384`, `ES512`, `EdDSA`; no duplicates | Asymmetric algorithms accepted from the key set. |
 | `auth.jwt[].jwks.ttl` | duration | `10m` | must be positive | How long fetched keys are used before they are refreshed. |
-| `auth.jwt[].jwks.min_refresh_interval` | duration | `30s` | must be positive | Minimum time between two refreshes. |
+| `auth.jwt[].jwks.min_refresh_interval` | duration | `30s` | must be positive | Minimum time after a fetch attempt before a failed fetch is retried or an unknown `kid` starts a refresh. |
 | `auth.jwt[].jwks.timeout` | duration | `5s` | must be positive | Bounds one fetch of the key set. |
+
+Which requests wait for a fetch and which are served from the cached set is described in [JWKS key sets](middleware.md#jwks-key-sets).
 
 ### auth.api_keys[]
 

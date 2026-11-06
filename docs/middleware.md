@@ -19,7 +19,7 @@ A route enables authentication with `auth`. The `mode` selects the providers tha
 | `apikey` | API key providers | Keys matched by SHA-256 hash. |
 | `any` | JWT and API key providers | The first provider that verifies the presented credentials wins. |
 
-Providers are declared in the top-level `auth` block. A JWT provider checks the token signature, the `issuer` and one of the `audiences`. Static keys are declared under `keys`, and a remote key set is declared under `jwks`. A key set is fetched and cached by each gateway instance on its own.
+Providers are declared in the top-level `auth` block. A JWT provider checks the token signature, the `issuer` and one of the `audiences`. Static keys are declared under `keys`, and a remote key set is declared under `jwks`. A key set is fetched and cached by each gateway instance on its own; see [JWKS key sets](#jwks-key-sets).
 
 ```yaml
 auth:
@@ -90,6 +90,19 @@ routes:
         - clients
       allow_anonymous: true
 ```
+
+### JWKS key sets
+
+Each gateway instance fetches and caches the `jwks` key set of a provider on its own. The set is held in memory and never shared through a store, so every replica refreshes it independently.
+
+Until the first fetch succeeds, every request that needs the set waits for that fetch. If it fails or does not finish within `timeout`, those requests are rejected with 401, and the next request after `min_refresh_interval` fetches again.
+
+Once a set is loaded:
+
+- A token whose `kid` is in the set is verified at once with the cached set. A refresh in progress never delays it.
+- When the set is older than `ttl`, or the last refresh failed and `min_refresh_interval` has passed, the request that notices it starts one refresh in the background and is verified with the cached set.
+- A token whose `kid` is not in the set waits for the refresh already running, or starts one when `min_refresh_interval` has passed since the last attempt. The wait ends when the refresh finishes, which `timeout` bounds, or when the client goes away. Inside `min_refresh_interval`, with no refresh running, the token is rejected at once.
+- A failed or timed-out refresh keeps the last good set. A key removed at the provider keeps verifying until a refresh succeeds.
 
 ### Identity headers
 
