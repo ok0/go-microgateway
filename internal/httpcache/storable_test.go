@@ -170,6 +170,46 @@ func TestStorable(t *testing.T) {
 	}
 }
 
+func TestCheckSide(t *testing.T) {
+	t.Parallel()
+	credential := func(*http.Request) bool { return true }
+	cases := []struct {
+		name string
+		req  http.Header
+		resp http.Header
+		cred func(*http.Request) bool
+		want Verdict
+	}{
+		{"storable", http.Header{}, http.Header{"Cache-Control": {"max-age=60"}, "Etag": {`"v1"`}}, nil, Verdict{true, "", SideNone}},
+		{"request no-store", http.Header{"Cache-Control": {"no-store"}}, http.Header{"Cache-Control": {"max-age=60"}, "Etag": {`"v1"`}}, nil, Verdict{false, ReasonRequestNoStore, SideRequest}},
+		{"request no-store, response private", http.Header{"Cache-Control": {"no-store"}}, http.Header{"Cache-Control": {"private, max-age=60"}, "Etag": {`"v1"`}}, nil, Verdict{false, ReasonRequestNoStore, SideResponse}},
+		{"range", http.Header{"Range": {"bytes=0-1"}}, http.Header{"Cache-Control": {"max-age=60"}, "Etag": {`"v1"`}}, nil, Verdict{false, ReasonRange, SideRequest}},
+		{"authorization", http.Header{"Authorization": {"Bearer t"}}, http.Header{"Cache-Control": {"max-age=60"}, "Etag": {`"v1"`}}, nil, Verdict{false, ReasonCredentialed, SideRequest}},
+		{"authorization, public", http.Header{"Authorization": {"Bearer t"}}, http.Header{"Cache-Control": {"public, max-age=60"}, "Etag": {`"v1"`}}, nil, Verdict{true, "", SideNone}},
+		{"credential func", http.Header{}, http.Header{"Cache-Control": {"max-age=60"}, "Etag": {`"v1"`}}, credential, Verdict{false, ReasonCredentialed, SideRequest}},
+		{"authorization, private", http.Header{"Authorization": {"Bearer t"}}, http.Header{"Cache-Control": {"private, max-age=60"}, "Etag": {`"v1"`}}, nil, Verdict{false, ReasonPrivate, SideResponse}},
+		{"authorization, no freshness", http.Header{"Authorization": {"Bearer t"}}, http.Header{}, nil, Verdict{false, ReasonCredentialed, SideResponse}},
+		{"set-cookie", http.Header{}, http.Header{"Cache-Control": {"max-age=60"}, "Etag": {`"v1"`}, "Set-Cookie": {"s=1"}}, nil, Verdict{false, ReasonSetCookie, SideResponse}},
+		{"vary star", http.Header{}, http.Header{"Cache-Control": {"max-age=60"}, "Etag": {`"v1"`}, "Vary": {"*"}}, nil, Verdict{false, ReasonVaryStar, SideResponse}},
+		{"no-store", http.Header{}, http.Header{"Cache-Control": {"no-store, max-age=60"}, "Etag": {`"v1"`}}, nil, Verdict{false, ReasonNoStore, SideResponse}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req := &http.Request{Method: http.MethodGet, Header: tc.req}
+			meta := ResponseMeta{Status: http.StatusOK, Header: tc.resp, Complete: true, ResponseTime: t0}
+			o := Options{Statuses: []int{http.StatusOK}, MaxTTL: 24 * time.Hour, TagHeader: "Surrogate-Key", Credential: tc.cred}
+			if got := Check(req, meta, o); got != tc.want {
+				t.Fatalf("Check = %+v, want %+v", got, tc.want)
+			}
+			ok, reason := Storable(req, meta, o)
+			if ok != tc.want.Storable || reason != tc.want.Reason {
+				t.Fatalf("Storable = (%v, %q), want (%v, %q)", ok, reason, tc.want.Storable, tc.want.Reason)
+			}
+		})
+	}
+}
+
 func varyList(n int) string {
 	names := make([]string, 0, n)
 	for i := range n {
