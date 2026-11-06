@@ -8,23 +8,25 @@ REDIS_ENV := GOWORK=$(CURDIR)/go.work
 GO_CORE := $(CORE_ENV) go
 GO_REDIS := $(REDIS_ENV) go
 CLI := github.com/ok0/go-microgateway/internal/cli
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# VERSION is a release version vX.Y.Z. Builds without it report dev; the release targets require it.
+VERSION ?=
+BUILD_VERSION = $(or $(VERSION),dev)
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE ?= $(shell TZ=UTC git log -1 --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)
-LDFLAGS := -s -w -X $(CLI).version=$(VERSION) -X $(CLI).commit=$(COMMIT) -X $(CLI).date=$(DATE)
+LDFLAGS := -s -w -X $(CLI).version=$(BUILD_VERSION) -X $(CLI).commit=$(COMMIT) -X $(CLI).date=$(DATE)
 CORE := github.com/ok0/go-microgateway
 COVER_ALGO := $(CORE)/internal/lb $(CORE)/internal/health $(CORE)/internal/breaker $(CORE)/internal/retry $(CORE)/internal/auth $(CORE)/internal/authkey $(CORE)/internal/ratelimit $(CORE)/internal/router $(CORE)/store $(CORE)/internal/memstore $(CORE)/internal/storeguard $(CORE)/internal/cache $(CORE)/internal/httpcache $(CORE)/internal/coalesce $(CORE)/redis
 COVER_EXCLUDE := $(CORE)/internal/teststore $(CORE)/internal/testcert $(CORE)/internal/leakcheck
 REDIS_COVERFLAGS ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help build test race vet cover cover-ci cover-times lint tidy-check realnet bench require-heavy require-redis fuzz soak perf integration docker hygiene check
+.PHONY: help build test race vet cover cover-ci cover-times lint tidy-check realnet bench require-heavy require-redis fuzz soak perf integration docker hygiene check release-prepare release-check release-verify
 
 help: ## list the targets
-	@grep -E '^[A-Za-z0-9_.-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "%-12s %s\n", $$1, $$2}'
+	@grep -E '^[A-Za-z0-9_.-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "%-16s %s\n", $$1, $$2}'
 
 build: ## build bin/microgateway
-	cd redis && CGO_ENABLED=0 $(GO_REDIS) build -trimpath -ldflags "$(LDFLAGS)" -o ../bin/microgateway ./cmd/microgateway
+	cd redis && CGO_ENABLED=0 $(GO_REDIS) build -trimpath -buildvcs=false -ldflags "$(LDFLAGS)" -o ../bin/microgateway ./cmd/microgateway
 
 test: ## unit tests of both modules
 	$(GO_CORE) test ./...
@@ -88,9 +90,19 @@ integration: require-heavy require-redis ## Redis integration tests
 	cd redis && MICROGATEWAY_REDIS_ADDR=$(MICROGATEWAY_REDIS_ADDR) $(GO_REDIS) test -race -count=1 -tags integration ./...
 
 docker: ## build the container image
-	docker build --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) -t microgateway:$(VERSION) .
+	docker build --build-arg VERSION=$(BUILD_VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) -t microgateway:$(BUILD_VERSION) .
 
 hygiene: ## repository, commit, remote, dependency and release checks
-	$(GO_CORE) test -count=1 -v -run '^(TestTrackedFileHygiene|TestCommitMessageHygiene|TestRemotes|TestTrackedGoLines|TestModuleDependencies|TestModulesInstallable|TestIgnoreFiles|TestLicense|TestNoCopiedSource|TestCoreHasNoRedisDependency)$$' ./internal/doccheck ./internal/cli
+	$(GO_CORE) test -count=1 -v -run '^(TestTrackedFileHygiene|TestCommitMessageHygiene|TestRemotes|TestTrackedGoLines|TestModuleDependencies|TestModulesInstallable|TestIgnoreFiles|TestLicense|TestNoCopiedSource|TestCoreHasNoRedisDependency|TestReleaseCheck)$$' ./internal/doccheck ./internal/cli
+
+release-prepare: ## set the core version in redis/go.mod and go.work to VERSION=vX.Y.Z, offline
+	sh scripts/release-prepare.sh "$(VERSION)"
+
+release-check: ## read-only, offline release checks for VERSION=vX.Y.Z
+	@test -n "$(VERSION)" || { echo "set VERSION=vX.Y.Z"; exit 1; }
+	MICROGATEWAY_RELEASE_VERSION=$(VERSION) GOPROXY=off $(GO_CORE) test -count=1 -run '^TestReleaseCheck$$' ./internal/doccheck
+
+release-verify: require-heavy ## install VERSION=vX.Y.Z from the module proxy in a clean environment and run it; needs the network
+	MICROGATEWAY_HEAVY=$(MICROGATEWAY_HEAVY) sh scripts/release-verify.sh "$(VERSION)"
 
 check: vet cover lint tidy-check hygiene ## vet, race tests with the coverage gate, lint, tidy-check, hygiene; nothing heavy

@@ -26,9 +26,9 @@ const (
 	distrolessImage = "gcr.io/distroless/static-debian13:nonroot"
 )
 
-var scrubbedEnvNames = []string{"MICROGATEWAY_HEAVY", "MICROGATEWAY_REDIS_ADDR", "MICROGATEWAY_SOAK", "MAKEFLAGS", "MFLAGS", "GOFLAGS"}
+var scrubbedEnvNames = []string{"MICROGATEWAY_HEAVY", "MICROGATEWAY_REDIS_ADDR", "MICROGATEWAY_SOAK", "MAKEFLAGS", "MFLAGS", "GOFLAGS", "VERSION", "MICROGATEWAY_RELEASE_VERSION"}
 
-var requiredMakeTargets = []string{"build", "test", "race", "vet", "cover", "lint", "tidy-check", "realnet", "bench", "fuzz", "soak", "perf", "integration", "docker", "hygiene", "check", "help"}
+var requiredMakeTargets = []string{"build", "test", "race", "vet", "cover", "lint", "tidy-check", "realnet", "bench", "fuzz", "soak", "perf", "integration", "docker", "hygiene", "check", "help", "release-prepare", "release-check", "release-verify"}
 
 var checklistRequired = []string{
 	"make perf", "make soak", "make fuzz", "make integration", "make realnet", "make docker", "make lint",
@@ -503,7 +503,7 @@ func TestMakefileTargets(t *testing.T) {
 func TestMakefileHeavyGates(t *testing.T) {
 	requireMake(t)
 	root := repoRoot(t)
-	for _, target := range []string{"fuzz", "soak", "perf", "integration"} {
+	for _, target := range []string{"fuzz", "soak", "perf", "integration", "release-verify"} {
 		out, err := run(t, root, nil, "make", "-C", root, target)
 		if err == nil {
 			t.Errorf("make %s without MICROGATEWAY_HEAVY succeeded", target)
@@ -567,6 +567,11 @@ func workflowProblems(wf map[string]any, makefile []byte, floor string) []string
 		job := mapOf(jobs[name])
 		for i, raw := range listOf(job["steps"]) {
 			step := mapOf(raw)
+			for _, target := range []string{"release-prepare", "release-verify"} {
+				if stepRun, _ := step["run"].(string); strings.Contains(stepRun, target) {
+					add("job %s step %d runs %s; release steps are run by the repository owner", name, i, target)
+				}
+			}
 			env := stepEnv(wf, job, step)
 			dir := "."
 			if wd, ok := step["working-directory"].(string); ok {
@@ -841,6 +846,10 @@ func TestWorkflowVersionPolicy(t *testing.T) {
 		}, "core command", nil},
 		{"redis-test-off", redisTestOff, "redis command", redisTestFound},
 		{"redis-lint-off", redisLintOff, "redis command", redisLintFound},
+		{"release-verify-step", func(wf map[string]any) {
+			job := jobMap(wf, "tidy")
+			job["steps"] = append(listOf(job["steps"]), map[string]any{"run": "make release-verify VERSION=v0.1.0"})
+		}, "release-verify", nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -989,6 +998,9 @@ func dockerfileProblems(dockerfile, makefile []byte) []string {
 			problems = append(problems, fmt.Sprintf("build stage lacks %q", want))
 		}
 	}
+	if !slices.ContainsFunc(lines[:last], func(line string) bool { return strings.TrimSpace(line) == "ARG VERSION=dev" }) {
+		problems = append(problems, "build stage lacks ARG VERSION=dev")
+	}
 	if !workdirRE.MatchString(build) {
 		problems = append(problems, "build stage does not enter the redis module")
 	}
@@ -1071,6 +1083,7 @@ func TestDockerfileModes(t *testing.T) {
 		{"build without workspace", "GOWORK=/src/go.work go build", "go build", "redis command"},
 		{"download with GOWORK off", "GOWORK=/src/go.work go mod download", "GOWORK=off go mod download", "redis command"},
 		{"final stage as root", "USER nonroot", "USER root", "USER nonroot"},
+		{"version default", "ARG VERSION=dev", "ARG VERSION=1.0", "ARG VERSION=dev"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
