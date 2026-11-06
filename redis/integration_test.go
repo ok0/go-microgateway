@@ -1304,3 +1304,12 @@ func TestIntegrationSuite(t *testing.T) {
 		})
 	})
 }
+
+func realExpiryMs(t *testing.T, c goredis.UniversalClient, key string) int64 {
+	t.Helper()
+	e, pttl, live := expiryMsIfLive(t, c, key)
+	if !live {
+		t.Fatalf("PTTL %q = %s, want a live expiry", key, pttl)
+	}
+	return e
+}

@@ -967,15 +967,6 @@ func expiryMsIfLive(t *testing.T, c goredis.UniversalClient, key string) (int64,
 	return 0, 0, false
 }
 
-func realExpiryMs(t *testing.T, c goredis.UniversalClient, key string) int64 {
-	t.Helper()
-	e, pttl, live := expiryMsIfLive(t, c, key)
-	if !live {
-		t.Fatalf("PTTL %q = %s, want a live expiry", key, pttl)
-	}
-	return e
-}
-
 // serverExpiryMs returns the absolute expiry of key in unix milliseconds on a Redis server, or -1 with no expiry,
 // without PEXPIRETIME: it reads PTTL between two TIME readings in the same millisecond, which is exact on Redis 6.2
 // and later. It fails the test when key does not exist.

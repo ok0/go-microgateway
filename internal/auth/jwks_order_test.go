@@ -90,7 +90,7 @@ func TestJWKSCloseClassifiedInEitherOrder(t *testing.T) {
 				errc <- err
 			}()
 			waitWaiters(t, j, 1)
-			j.Close()
+			_ = j.Close()
 
 			if err, _ := testwait.Recv(t, "Lookup to return", errc, nil); !errors.Is(err, ErrKeysUnavailable) {
 				t.Errorf("Lookup error = %v, want ErrKeysUnavailable", err)
