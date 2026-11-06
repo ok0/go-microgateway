@@ -11,11 +11,12 @@ import (
 	"github.com/ok0/go-microgateway/store"
 )
 
-var spyOps = []string{"take", "get", "put", "purge", "close"}
+var spyOps = []string{"take", "get", "put", "purge", "delete", "close"}
 
-// SpyCall records one call made through a SpyHandle. Op is take, get, put, purge
-// or close. Key is the rate-limit key of a take, the primary key of a get or put,
-// and empty otherwise. Handle is the ID of the handle that received the call.
+// SpyCall records one call made through a SpyHandle. Op is take, get, put, purge,
+// delete or close. Key is the rate-limit key of a take, the primary key of a get,
+// put or delete, and empty otherwise. Handle is the ID of the handle that received
+// the call.
 type SpyCall struct {
 	Handle int
 	Op     string
@@ -266,6 +267,17 @@ func (h *SpyHandle) Purge(ctx context.Context, p store.Purge) (store.PurgeResult
 			return store.PurgeResult{}, spyMissing("cache")
 		}
 		return h.c.Purge(ctx, p)
+	})
+}
+
+// Delete records the call and applies the delete mode of the Spy, then delegates to
+// the wrapped cache.
+func (h *SpyHandle) Delete(ctx context.Context, primary, secondary string) (bool, error) {
+	return spyInvoke(ctx, h, "delete", primary, func() (bool, error) {
+		if h.c == nil {
+			return false, spyMissing("cache")
+		}
+		return h.c.Delete(ctx, primary, secondary)
 	})
 }
 

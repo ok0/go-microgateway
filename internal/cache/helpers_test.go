@@ -165,6 +165,14 @@ func (s *spy) Purge(ctx context.Context, p store.Purge) (store.PurgeResult, erro
 	return s.inner.Purge(ctx, p)
 }
 
+func (s *spy) Delete(ctx context.Context, primary, secondary string) (bool, error) {
+	s.record(spyCall{Op: "delete", Primary: primary, Secondary: secondary})
+	if err := s.gate(ctx, "delete"); err != nil {
+		return false, err
+	}
+	return s.inner.Delete(ctx, primary, secondary)
+}
+
 // calls returns a copy of the recorded calls of op, in call order. An empty op selects every call.
 func (s *spy) callsOf(op string) []spyCall {
 	s.mu.Lock()

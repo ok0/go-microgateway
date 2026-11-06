@@ -435,7 +435,7 @@ func (s *Snapshot) Activate() {
 			s.series.StoreErrors.With(b.name, "take")
 		}
 		if b.cache {
-			for _, op := range []string{"get", "put", "purge"} {
+			for _, op := range []string{"get", "put", "purge", "delete"} {
 				s.series.StoreErrors.With(b.name, op)
 			}
 		}

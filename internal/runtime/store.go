@@ -184,6 +184,20 @@ func (s *storeBackend) Purge(ctx context.Context, p store.Purge) (res store.Purg
 	return res, nil
 }
 
+func (s *storeBackend) Delete(ctx context.Context, primary, secondary string) (deleted bool, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			deleted = false
+			err = s.panicError("delete", p)
+		}
+	}()
+	deleted, err = s.c.Delete(ctx, primary, secondary)
+	if err != nil {
+		return false, s.wrap("delete", err)
+	}
+	return deleted, nil
+}
+
 func (s *storeBackend) panicError(op string, p any) error {
 	return &storeError{msg: fmt.Sprintf("store %q: %s panicked: %s", s.name, op, s.sc.text(fmt.Sprint(p))), kind: store.ErrUnavailable}
 }

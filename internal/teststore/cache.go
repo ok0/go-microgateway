@@ -13,10 +13,11 @@ import (
 	"github.com/ok0/go-microgateway/store"
 )
 
-// CacheCall records one invocation of a CacheHandle method. Op is get, put or
-// purge. A get records the Vary names and secondary key reported to its
-// selector, a put records its Vary names, Tags, TTL and whether the entry was
-// stored, and a purge records the purge.
+// CacheCall records one invocation of a CacheHandle method. Op is get, put,
+// purge or delete. A get records the Vary names and secondary key reported to
+// its selector, a put records its Vary names, Tags, TTL and whether the entry
+// was stored, a purge records the purge, and a delete records its primary and
+// secondary keys.
 type CacheCall struct {
 	Handle             int
 	Op                 string
@@ -98,7 +99,7 @@ func (s *SharedCache) SetMode(m Mode, err error) {
 	s.err = err
 }
 
-// SetOpMode sets the mode and error for one operation (get, put or purge) of
+// SetOpMode sets the mode and error for one operation (get, put, purge or delete) of
 // every handle whose mode is Inherit. Inherit falls back to the shared mode.
 func (s *SharedCache) SetOpMode(op string, m Mode, err error) {
 	s.mu.Lock()
@@ -228,7 +229,7 @@ func (h *CacheHandle) Close() error {
 
 // Get looks up the variant of primary selected by sel through this handle.
 func (h *CacheHandle) Get(ctx context.Context, primary string, sel func(varyNames []string) (string, bool)) (store.Lookup, error) {
-	return invoke(ctx, h, CacheCall{Op: "get", Primary: primary}, func(idx int) (store.Lookup, error) {
+	return invoke(ctx, h, CacheCall{Op: "get", Primary: primary}, nil, func(idx int) (store.Lookup, error) {
 		next := sel
 		if sel != nil {
 			next = func(names []string) (string, bool) {
@@ -248,7 +249,7 @@ func (h *CacheHandle) Put(ctx context.Context, tok store.FillToken, primary, sec
 	if e != nil {
 		c.Tags = slices.Clone(e.Tags)
 	}
-	return invoke(ctx, h, c, func(idx int) (bool, error) {
+	return invoke(ctx, h, c, nil, func(idx int) (bool, error) {
 		stored, err := h.s.mem.Put(ctx, tok, primary, secondary, varyNames, e, ttl)
 		h.s.noteStored(idx, stored)
 		return stored, err
@@ -257,7 +258,7 @@ func (h *CacheHandle) Put(ctx context.Context, tok store.FillToken, primary, sec
 
 // Purge applies p through this handle.
 func (h *CacheHandle) Purge(ctx context.Context, p store.Purge) (store.PurgeResult, error) {
-	return invoke(ctx, h, CacheCall{Op: "purge", Purge: p}, func(int) (store.PurgeResult, error) {
+	return invoke(ctx, h, CacheCall{Op: "purge", Purge: p}, nil, func(int) (store.PurgeResult, error) {
 		s := h.s
 		s.mu.Lock()
 		if s.purgeFailAfter >= 0 && s.purgeSeen >= s.purgeFailAfter {
@@ -273,6 +274,19 @@ func (h *CacheHandle) Purge(ctx context.Context, p store.Purge) (store.PurgeResu
 			return r, err
 		}
 		return store.PurgeResult{Accepted: r.Accepted}, nil
+	})
+}
+
+// Delete removes the variant secondary of primary through this handle. It checks the context and its arguments
+// before the closed state, in the order of store.Cache.
+func (h *CacheHandle) Delete(ctx context.Context, primary, secondary string) (bool, error) {
+	return invoke(ctx, h, CacheCall{Op: "delete", Primary: primary, Secondary: secondary}, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return store.ValidateDelete(primary, secondary)
+	}, func(int) (bool, error) {
+		return h.s.mem.Delete(ctx, primary, secondary)
 	})
 }
 
@@ -303,9 +317,16 @@ func (h *CacheHandle) begin(c CacheCall) plan {
 
 // invoke applies the mode of the operation described by c and, when the call
 // is not failed or panicked, runs healthy with the index of the recorded call.
-func invoke[T any](ctx context.Context, h *CacheHandle, c CacheCall, healthy func(idx int) (T, error)) (T, error) {
+// check, when set, runs after the call is recorded and before the closed and
+// mode checks.
+func invoke[T any](ctx context.Context, h *CacheHandle, c CacheCall, check func() error, healthy func(idx int) (T, error)) (T, error) {
 	var zero T
 	p := h.begin(c)
+	if check != nil {
+		if err := check(); err != nil {
+			return zero, err
+		}
+	}
 	if p.closed {
 		return zero, fmt.Errorf("teststore cache handle closed: %w", store.ErrUnavailable)
 	}

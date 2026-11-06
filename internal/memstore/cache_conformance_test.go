@@ -62,6 +62,19 @@ func (v *cacheView) Purge(ctx context.Context, p store.Purge) (store.PurgeResult
 	return v.c.Purge(ctx, p)
 }
 
+func (v *cacheView) Delete(ctx context.Context, primary, secondary string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := store.ValidateDelete(primary, secondary); err != nil {
+		return false, err
+	}
+	if v.closed.Load() {
+		return false, fmt.Errorf("memstore cache view closed: %w", store.ErrUnavailable)
+	}
+	return v.c.Delete(ctx, primary, secondary)
+}
+
 func (v *cacheView) Close() error {
 	v.closed.Store(true)
 	return nil
@@ -290,6 +303,32 @@ func (w markerDroppedEarly) Purge(ctx context.Context, p store.Purge) (store.Pur
 	return w.Cache.Purge(ctx, p)
 }
 
+type deleteIgnored struct{ store.Cache }
+
+func (w deleteIgnored) Delete(ctx context.Context, primary, secondary string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := store.ValidateDelete(primary, secondary); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+type deleteAsKeyPurge struct{ store.Cache }
+
+func (w deleteAsKeyPurge) Delete(ctx context.Context, primary, secondary string) (bool, error) {
+	r, err := w.Purge(ctx, store.Purge{Kind: store.PurgeKeys, Keys: []string{primary}, Retain: store.MaxTTL})
+	return r.Affected > 0, err
+}
+
+type deleteAbsentTrue struct{ store.Cache }
+
+func (w deleteAbsentTrue) Delete(ctx context.Context, primary, secondary string) (bool, error) {
+	_, err := w.Cache.Delete(ctx, primary, secondary)
+	return err == nil, err
+}
+
 func brokenCacheBackends() map[string]cachePairBuilder {
 	wrap := func(f func(store.Cache) store.Cache) cachePairBuilder {
 		return func(t *testing.T, clk *clock.Fake) (store.Cache, store.Cache, func()) {
@@ -335,6 +374,15 @@ func brokenCacheBackends() map[string]cachePairBuilder {
 		},
 		"markerDroppedEarly": wrap(func(c store.Cache) store.Cache {
 			return markerDroppedEarly{c}
+		}),
+		"deleteIgnored": wrap(func(c store.Cache) store.Cache {
+			return deleteIgnored{c}
+		}),
+		"deleteAsKeyPurge": wrap(func(c store.Cache) store.Cache {
+			return deleteAsKeyPurge{c}
+		}),
+		"deleteAbsentTrue": wrap(func(c store.Cache) store.Cache {
+			return deleteAbsentTrue{c}
 		}),
 	}
 }
@@ -382,6 +430,9 @@ func TestCacheSuiteRejectsBrokenBackends(t *testing.T) {
 		{"negativeTTLRemoves", "TTLNonPositive"},
 		{"tagPurgeSiblings", "PurgeTagsExactVariants"},
 		{"markerDroppedEarly", "MarkerLifetime/hard"},
+		{"deleteIgnored", "DeleteOneVariant"},
+		{"deleteAsKeyPurge", "DeletePutAgain"},
+		{"deleteAbsentTrue", "DeleteAbsent"},
 	}
 	table := make(map[string]bool, len(cases))
 	for _, tc := range cases {

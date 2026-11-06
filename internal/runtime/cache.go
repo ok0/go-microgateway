@@ -79,6 +79,11 @@ func checkCacheDefaults(c *config.Cache) error {
 	return nil
 }
 
+// storeErrorCounter returns the hook that counts one failed call of op on the store called name.
+func storeErrorCounter(s *Series, name string) func(op string) {
+	return func(op string) { s.StoreErrors.With(name, op).Inc() }
+}
+
 func buildCacheWiring(cfg *config.Config, tx *state.Tx, clk clock.Clock, logger *slog.Logger, cs *CacheSeries, s *Series, built map[string]*builtStore, retention *cache.Retention) (*cacheWiring, error) {
 	if err := checkCacheDefaults(&cfg.Cache); err != nil {
 		return nil, err
@@ -131,7 +136,7 @@ func buildCacheWiring(cfg *config.Config, tx *state.Tx, clk clock.Clock, logger 
 		w.store = b.backend
 		w.guard = b.guard.g
 		w.storeName = name
-		w.onStoreError = func(op string) { s.StoreErrors.With(name, op).Inc() }
+		w.onStoreError = storeErrorCounter(s, name)
 	}
 	p, err := cache.NewPurger(cache.PurgerDeps{Store: w.store, Guard: w.guard, StoreName: w.storeName, Timeout: cfg.Cache.StoreTimeout.Std(),
 		Retain: w.retain, Retention: retention, OnStoreError: w.onStoreError,

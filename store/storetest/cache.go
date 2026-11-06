@@ -757,6 +757,228 @@ func Cache(t *testing.T, h Harness[store.Cache]) {
 		cpurge(t, b, keys("co"))
 	})
 
+	t.Run("DeleteOneVariant", func(t *testing.T) {
+		a, b := h.New(t)
+		names := []string{"x-v"}
+		cstore(t, a, "dv", "s1", names, cent("dv1", "tg"), time.Hour)
+		cstore(t, a, "dv", "s2", names, cent("dv2", "tg"), time.Hour)
+		cstore(t, a, "do", "s1", nil, cent("do"), time.Hour)
+		if !cdel(t, a, "dv", "s1") {
+			t.Fatal("Delete of a stored variant reported false")
+		}
+		sel := &cSelector{sec: "s1", ok: true}
+		l := cgetSel(t, b, "dv", sel.sel)
+		wantMiss(t, "deleted variant", l)
+		if sel.calls != 1 || !slices.Equal(l.VaryNames, names) {
+			t.Errorf("deleted variant: sel calls %d, vary names %q; want 1 call and %q", sel.calls, l.VaryNames, names)
+		}
+		wantHit(t, "other variant of same primary", cget(t, b, "dv", "s2"), "dv2", false)
+		wantHit(t, "variant of other primary", cget(t, b, "do", "s1"), "do", false)
+		wantMiss(t, "deleted variant on a", cget(t, a, "dv", "s1"))
+		if cdel(t, b, "dv", "s1") {
+			t.Error("second Delete of a deleted variant reported true")
+		}
+	})
+
+	t.Run("DeleteAbsent", func(t *testing.T) {
+		a, b := h.New(t)
+		if cdel(t, a, "da", "s") {
+			t.Error("Delete of a never stored variant reported true")
+		}
+		cstore(t, a, "dx", "s1", nil, cent("dx"), time.Hour)
+		if cdel(t, b, "dx", "s2") {
+			t.Error("Delete of an absent secondary of a live primary reported true")
+		}
+		wantHit(t, "sibling after absent delete", cget(t, a, "dx", "s1"), "dx", false)
+		cstore(t, a, "de", "s", nil, cent("de"), time.Second)
+		h.Advance(t, time.Second)
+		if cdel(t, b, "de", "s") {
+			t.Error("Delete of an expired variant reported true")
+		}
+		cstore(t, a, "dp", "s", nil, cent("dp"), time.Hour)
+		cpurge(t, b, keys("dp"))
+		if cdel(t, a, "dp", "s") {
+			t.Error("Delete of a hard purged variant reported true")
+		}
+		cstore(t, a, "dn", "", nil, cent("dn"), time.Hour)
+		if !cdel(t, b, "dn", "") {
+			t.Error("Delete of a stored variant with empty secondary reported false")
+		}
+		wantMiss(t, "empty secondary after delete", cget(t, a, "dn", ""))
+	})
+
+	t.Run("DeleteLastVariant", func(t *testing.T) {
+		a, b := h.New(t)
+		names := []string{"x-v"}
+		cstore(t, a, "dl", "s", names, cent("dl"), time.Hour)
+		if !cdel(t, a, "dl", "s") {
+			t.Fatal("Delete of the last stored variant reported false")
+		}
+		sel := &cSelector{sec: "s", ok: true}
+		l := cgetSel(t, b, "dl", sel.sel)
+		wantMiss(t, "last variant deleted", l)
+		if sel.calls != 0 || len(l.VaryNames) != 0 {
+			t.Errorf("record gone after deleting the last variant: sel calls %d, vary names %q; want 0 calls and none", sel.calls, l.VaryNames)
+		}
+		if !cfill(t, b, "dl", "s2", []string{"x-w"}, cent("dl2"), time.Hour) {
+			t.Fatal("fill after deleting the last variant was not stored")
+		}
+		l = cget(t, a, "dl", "s2")
+		wantHit(t, "fill after deleting the last variant", l, "dl2", false)
+		if !slices.Equal(l.VaryNames, []string{"x-w"}) {
+			t.Errorf("fill after deleting the last variant: vary names %q, want [x-w]", l.VaryNames)
+		}
+	})
+
+	t.Run("DeletePutAgain", func(t *testing.T) {
+		a, b := h.New(t)
+		cstore(t, a, "dr", "s", nil, cent("old"), time.Hour)
+		tok := cget(t, b, "dr", "s").Token
+		if !cdel(t, a, "dr", "s") {
+			t.Fatal("Delete of a stored variant reported false")
+		}
+		if !cput(t, b, tok, "dr", "s", nil, cent("new"), time.Hour) {
+			t.Fatal("Put with a token taken before Delete was refused")
+		}
+		wantHit(t, "put after delete", cget(t, a, "dr", "s"), "new", false)
+		if !cdel(t, b, "dr", "s") {
+			t.Fatal("Delete of the re-stored variant reported false")
+		}
+		if !cfill(t, a, "dr", "s", nil, cent("again"), time.Hour) {
+			t.Fatal("fill after second delete was not stored")
+		}
+		wantHit(t, "fill after second delete", cget(t, b, "dr", "s"), "again", false)
+	})
+
+	t.Run("DeleteLeavesMarkers", func(t *testing.T) {
+		a, b := h.New(t)
+		cstore(t, a, "dm", "s1", nil, cent("dm1"), time.Hour)
+		tok := cget(t, a, "dm", "s1").Token
+		cpurge(t, b, keys("dm"))
+		if cdel(t, a, "dm", "s1") {
+			t.Error("Delete after hard key purge reported true")
+		}
+		if cput(t, a, tok, "dm", "s1", nil, cent("late"), time.Hour) {
+			t.Error("Put with a token taken before a hard key purge was accepted after Delete")
+		}
+		h.Advance(t, store.PurgeTolerance+res)
+		if !cfill(t, a, "dm", "s1", nil, cent("dm-new"), time.Hour) {
+			t.Fatal("fill after hard key purge and Delete was refused")
+		}
+		wantHit(t, "fresh after hard key purge and Delete", cget(t, b, "dm", "s1"), "dm-new", false)
+
+		cstore(t, a, "ds", "s1", nil, cent("ds1"), time.Hour)
+		cstore(t, a, "ds", "s2", nil, cent("ds2"), time.Hour)
+		tok = cget(t, a, "ds", "s1").Token
+		cpurge(t, b, asSoft(keys("ds")))
+		if !cdel(t, a, "ds", "s1") {
+			t.Error("Delete of a variant marked stale by a soft key purge reported false")
+		}
+		wantMiss(t, "deleted stale variant", cget(t, b, "ds", "s1"))
+		wantHit(t, "stale sibling after Delete", cget(t, b, "ds", "s2"), "ds2", true)
+		if cput(t, a, tok, "ds", "s1", nil, cent("late"), time.Hour) {
+			t.Error("Put with a token taken before a soft key purge was accepted after Delete")
+		}
+		h.Advance(t, store.PurgeTolerance+res)
+		if !cfill(t, a, "ds", "s1", nil, cent("ds-new"), time.Hour) {
+			t.Fatal("fill after soft key purge and Delete was refused")
+		}
+		wantHit(t, "fresh after soft key purge and Delete", cget(t, b, "ds", "s1"), "ds-new", false)
+
+		cstore(t, a, "dt", "s", nil, cent("dt", "tm"), time.Hour)
+		tok = cget(t, a, "dt", "s").Token
+		cpurge(t, b, tags("tm"))
+		if cdel(t, a, "dt", "s") {
+			t.Error("Delete after tag purge reported true")
+		}
+		if cput(t, a, tok, "dt", "s", nil, cent("late", "tm"), time.Hour) {
+			t.Error("Put with a token taken before a tag purge was accepted after Delete")
+		}
+		h.Advance(t, store.PurgeTolerance+res)
+		if !cfill(t, a, "dt", "s", nil, cent("dt-new", "tm"), time.Hour) {
+			t.Fatal("fill after tag purge and Delete was refused")
+		}
+
+		cstore(t, a, "dz", "s", nil, cent("dz"), time.Hour)
+		tok = cget(t, a, "dz", "s").Token
+		cpurge(t, b, all())
+		if cdel(t, a, "dz", "s") {
+			t.Error("Delete after purge all reported true")
+		}
+		if cput(t, a, tok, "dz", "s", nil, cent("late"), time.Hour) {
+			t.Error("Put with a token taken before purge all was accepted after Delete")
+		}
+	})
+
+	t.Run("DeleteKeepsOtherTags", func(t *testing.T) {
+		a, b := h.New(t)
+		cstore(t, a, "dg", "s1", nil, cent("dg1", "tg"), time.Hour)
+		cstore(t, a, "dg", "s2", nil, cent("dg2", "tg"), time.Hour)
+		cstore(t, a, "dh", "s1", nil, cent("dh1", "tg"), time.Hour)
+		if !cdel(t, a, "dg", "s1") {
+			t.Fatal("Delete of a stored variant reported false")
+		}
+		wantHit(t, "sibling after Delete", cget(t, b, "dg", "s2"), "dg2", false)
+		wantHit(t, "other primary after Delete", cget(t, b, "dh", "s1"), "dh1", false)
+		r := cpurge(t, b, tags("tg"))
+		if r.AffectedKnown && r.Affected != 2 {
+			t.Errorf("tag purge after Delete: affected %d, want 2", r.Affected)
+		}
+		wantMiss(t, "deleted variant after tag purge", cget(t, b, "dg", "s1"))
+		wantMiss(t, "sibling after tag purge", cget(t, b, "dg", "s2"))
+		wantMiss(t, "other primary after tag purge", cget(t, b, "dh", "s1"))
+	})
+
+	t.Run("DeleteCallOrder", func(t *testing.T) {
+		a, b := h.New(t)
+		cstore(t, a, "dc", "s", nil, cent("dc"), time.Hour)
+		cctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		for _, s := range []store.Cache{a, b} {
+			if deleted, err := s.Delete(cctx, "dc", "s"); deleted || err != context.Canceled {
+				t.Errorf("canceled Delete: deleted %v, error %v; want false and context.Canceled", deleted, err)
+			}
+			if _, err := s.Delete(cctx, "", "s"); err != context.Canceled {
+				t.Errorf("canceled Delete with empty primary: error %v, want context.Canceled", err)
+			}
+		}
+		invalid := []struct {
+			name      string
+			primary   string
+			secondary string
+		}{
+			{name: "empty primary", primary: "", secondary: "s"},
+			{name: "primary too long", primary: strings.Repeat("p", store.MaxKeyBytes+1), secondary: "s"},
+			{name: "secondary too long", primary: "dc", secondary: strings.Repeat("s", store.MaxSecondaryBytes+1)},
+		}
+		for _, r := range invalid {
+			deleted, err := a.Delete(ctx, r.primary, r.secondary)
+			if deleted || !errors.Is(err, store.ErrInvalidEntry) || errors.Is(err, store.ErrUnavailable) {
+				t.Errorf("%s: deleted %v, error %v; want false and ErrInvalidEntry", r.name, deleted, err)
+			}
+		}
+		if deleted, err := a.Delete(ctx, strings.Repeat("p", store.MaxKeyBytes), strings.Repeat("s", store.MaxSecondaryBytes)); deleted || err != nil {
+			t.Errorf("boundary lengths: deleted %v, error %v; want false and nil", deleted, err)
+		}
+		wantHit(t, "stored before invalid deletes", cget(t, b, "dc", "s"), "dc", false)
+		if err := a.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if deleted, err := a.Delete(ctx, "dc", "s"); deleted || !errors.Is(err, store.ErrUnavailable) {
+			t.Errorf("Delete on closed handle: deleted %v, error %v; want false and ErrUnavailable", deleted, err)
+		}
+		if _, err := a.Delete(cctx, "dc", "s"); err != context.Canceled {
+			t.Errorf("canceled Delete on closed handle: error %v, want context.Canceled", err)
+		}
+		if _, err := a.Delete(ctx, "", "s"); !errors.Is(err, store.ErrInvalidEntry) || errors.Is(err, store.ErrUnavailable) {
+			t.Errorf("invalid Delete on closed handle: error %v, want ErrInvalidEntry and not ErrUnavailable", err)
+		}
+		wantHit(t, "stored after close", cget(t, b, "dc", "s"), "dc", false)
+		if !cdel(t, b, "dc", "s") {
+			t.Error("Delete on open handle reported false")
+		}
+	})
+
 	t.Run("Concurrent", func(t *testing.T) {
 		a, b := h.New(t)
 		handles := []store.Cache{a, b}
@@ -924,6 +1146,15 @@ func cpurge(t *testing.T, s store.Cache, p store.Purge) store.PurgeResult {
 		t.Fatalf("Purge: %v", err)
 	}
 	return r
+}
+
+func cdel(t *testing.T, s store.Cache, primary, sec string) bool {
+	t.Helper()
+	deleted, err := s.Delete(context.Background(), primary, sec)
+	if err != nil {
+		t.Fatalf("Delete(%q, %q): %v", primary, sec, err)
+	}
+	return deleted
 }
 
 func wantHit(t *testing.T, step string, l store.Lookup, body string, stale bool) {

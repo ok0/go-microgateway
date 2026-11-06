@@ -275,6 +275,49 @@ func TestValidateFill(t *testing.T) {
 	}
 }
 
+func TestValidateDelete(t *testing.T) {
+	t.Parallel()
+	invalid := ErrInvalidEntry.Error()
+	tests := []struct {
+		name      string
+		primary   string
+		secondary string
+		want      string
+	}{
+		{name: "valid empty secondary", primary: "k", secondary: ""},
+		{name: "valid secondary", primary: "k", secondary: "s"},
+		{name: "valid boundary lengths", primary: strings.Repeat("p", MaxKeyBytes), secondary: strings.Repeat("s", MaxSecondaryBytes)},
+		{name: "invalid empty primary", primary: "", secondary: "s", want: invalid + ": empty primary key"},
+		{name: "invalid primary over MaxKeyBytes", primary: strings.Repeat("p", MaxKeyBytes+1), secondary: "s", want: fmt.Sprintf("%s: primary key longer than %d bytes", invalid, MaxKeyBytes)},
+		{name: "invalid secondary over MaxSecondaryBytes", primary: "k", secondary: strings.Repeat("s", MaxSecondaryBytes+1), want: fmt.Sprintf("%s: secondary key longer than %d bytes", invalid, MaxSecondaryBytes)},
+		{name: "empty primary checked before secondary", primary: "", secondary: strings.Repeat("s", MaxSecondaryBytes+1), want: invalid + ": empty primary key"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateDelete(tt.primary, tt.secondary)
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("ValidateDelete() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("ValidateDelete() = nil error, want error")
+			}
+			if err.Error() != tt.want {
+				t.Errorf("ValidateDelete() error = %q, want %q", err.Error(), tt.want)
+			}
+			if !errors.Is(err, ErrInvalidEntry) {
+				t.Errorf("error %v does not wrap ErrInvalidEntry", err)
+			}
+			if errors.Is(err, ErrUnavailable) {
+				t.Errorf("error %v wraps ErrUnavailable", err)
+			}
+		})
+	}
+}
+
 func TestPurgeValidate(t *testing.T) {
 	t.Parallel()
 	keys1000 := make([]string, 0, MaxPurgeSelectors)

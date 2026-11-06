@@ -395,6 +395,107 @@ func TestCacheTagIndexClean(t *testing.T) {
 	}
 }
 
+func TestCacheDelete(t *testing.T) {
+	t.Parallel()
+	t.Run("sole", func(t *testing.T) {
+		t.Parallel()
+		clk := clock.NewFake(epoch)
+		c := newCache(t, CacheOptions{MaxBytes: 1 << 20, Shards: 1, Clock: quiet(clk)})
+		pre := c.Stats()
+		mfill(t, c, "p", "s", ment("b", "t"), time.Hour)
+		ok, err := c.Delete(bg, "p", "s")
+		if err != nil || !ok {
+			t.Fatalf("Delete = (%v, %v), want (true, nil)", ok, err)
+		}
+		st := c.Stats()
+		if c.Bytes() != pre.Bytes || st.Bytes != pre.Bytes {
+			t.Fatalf("Bytes() %d, Stats.Bytes %d; want %d", c.Bytes(), st.Bytes, pre.Bytes)
+		}
+		if st.Entries != 0 || st.Primaries != 0 || st.Tags != 0 {
+			t.Fatalf("Entries %d, Primaries %d, Tags %d after Delete; want 0, 0, 0", st.Entries, st.Primaries, st.Tags)
+		}
+		if st.Evictions != pre.Evictions || st.EvictedBytes != pre.EvictedBytes || st.Markers != pre.Markers {
+			t.Fatalf("Stats %+v changed from %+v by Delete", st, pre)
+		}
+		if r := mpurge(t, c, ptags(false, "t")); r.Affected != 0 || !r.AffectedKnown {
+			t.Fatalf("tag purge after Delete = %+v, want Affected 0 and AffectedKnown", r)
+		}
+		calls := 0
+		l, err := c.Get(bg, "p", func([]string) (string, bool) { calls++; return "s", true })
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if calls != 0 || l.VaryNames != nil {
+			t.Fatalf("selector calls %d, VaryNames %v after the last variant was deleted; want 0 and nil", calls, l.VaryNames)
+		}
+	})
+	t.Run("sibling", func(t *testing.T) {
+		t.Parallel()
+		clk := clock.NewFake(epoch)
+		c := newCache(t, CacheOptions{MaxBytes: 1 << 20, Shards: 1, Clock: quiet(clk)})
+		names := []string{"x-v"}
+		mfillVary(t, c, "p", "a", names, ment("a"), time.Hour)
+		bytesA := c.Bytes()
+		mfillVary(t, c, "p", "b", names, ment("bb", "t"), 2*time.Hour)
+		ok, err := c.Delete(bg, "p", "b")
+		if err != nil || !ok {
+			t.Fatalf("Delete = (%v, %v), want (true, nil)", ok, err)
+		}
+		if c.Bytes() != bytesA {
+			t.Fatalf("Bytes() = %d after Delete, want %d", c.Bytes(), bytesA)
+		}
+		if st := c.Stats(); st.Entries != 1 || st.Primaries != 1 {
+			t.Fatalf("Entries %d, Primaries %d; want 1 and 1", st.Entries, st.Primaries)
+		}
+		l := mget(t, c, "p", "a")
+		mwantHit(t, "p/a", l, "a")
+		if len(l.VaryNames) != 1 || l.VaryNames[0] != "x-v" {
+			t.Fatalf("VaryNames = %v, want [x-v]", l.VaryNames)
+		}
+		clk.Advance(time.Hour)
+		calls := 0
+		if _, err := c.Get(bg, "p", func([]string) (string, bool) { calls++; return "a", true }); err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if calls != 0 {
+			t.Fatalf("selector called %d times after the remaining variant expired, want 0", calls)
+		}
+	})
+	t.Run("evicted", func(t *testing.T) {
+		t.Parallel()
+		clk := clock.NewFake(epoch)
+		c := newCache(t, CacheOptions{MaxBytes: weight("p1", "s", nil, ment("x")), Shards: 1, Clock: quiet(clk)})
+		mfill(t, c, "p1", "s", ment("x"), time.Hour)
+		mfill(t, c, "p2", "s", ment("x"), time.Hour)
+		ev := c.Stats().Evictions
+		if ev != 1 {
+			t.Fatalf("Evictions = %d, want 1", ev)
+		}
+		ok, err := c.Delete(bg, "p1", "s")
+		if err != nil || ok {
+			t.Fatalf("Delete of evicted variant = (%v, %v), want (false, nil)", ok, err)
+		}
+		if got := c.Stats().Evictions; got != ev {
+			t.Fatalf("Evictions = %d after Delete, want %d", got, ev)
+		}
+	})
+	t.Run("markers", func(t *testing.T) {
+		t.Parallel()
+		clk := clock.NewFake(epoch)
+		c := newCache(t, CacheOptions{MaxBytes: 1 << 20, Shards: 1, Clock: quiet(clk)})
+		mpurge(t, c, pkeys(false, "x"))
+		m := c.Stats().Markers
+		mfill(t, c, "y", "s", ment("y"), time.Hour)
+		ok, err := c.Delete(bg, "y", "s")
+		if err != nil || !ok {
+			t.Fatalf("Delete = (%v, %v), want (true, nil)", ok, err)
+		}
+		if got := c.Stats().Markers; got != m {
+			t.Fatalf("Markers = %d after Delete, want %d", got, m)
+		}
+	})
+}
+
 func TestCacheJanitor(t *testing.T) {
 	t.Parallel()
 	clk := clock.NewFake(epoch)

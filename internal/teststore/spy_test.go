@@ -142,3 +142,56 @@ func TestSpyMissingCapability(t *testing.T) {
 		t.Fatalf("Get error = %v, want store.ErrUnavailable", err)
 	}
 }
+
+func TestSpyRecordsDelete(t *testing.T) {
+	ctx := context.Background()
+	fake := clock.NewFake(time.Unix(1_700_000_000, 0))
+	sc := NewSharedCache(fake, 1<<20)
+	t.Cleanup(func() { _ = sc.Close() })
+
+	spy := NewSpy()
+	h := spy.Wrap(nil, sc.Handle())
+
+	lookup, err := h.Get(ctx, "p", onlySecondary(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Put(ctx, lookup.Token, "p", "", nil, &store.Entry{Status: 200, Body: []byte("x")}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, err := h.Delete(ctx, "p", "")
+	if !ok || err != nil {
+		t.Fatalf("Delete = (%v, %v), want (true, nil)", ok, err)
+	}
+	calls := spy.Calls()
+	if last := calls[len(calls)-1]; last != (SpyCall{Handle: h.ID(), Op: "delete", Key: "p"}) {
+		t.Fatalf("last call = %+v, want delete of p through handle %d", last, h.ID())
+	}
+	if n := spy.Count("delete"); n != 1 {
+		t.Fatalf("Count(delete) = %d, want 1", n)
+	}
+
+	errX := errors.New("delete down")
+	spy.SetMode("", Fail, errX)
+	if _, err := h.Delete(ctx, "p", ""); !errors.Is(err, errX) {
+		t.Fatalf("failed Delete error = %v, want %v", err, errX)
+	}
+	spy.SetMode("", Inherit, nil)
+
+	spy.SetMode("delete", Panic, errX)
+	var got any
+	func() {
+		defer func() { got = recover() }()
+		_, _ = h.Delete(ctx, "p", "")
+	}()
+	if got != errX {
+		t.Fatalf("recovered %v, want %v", got, errX)
+	}
+	spy.SetMode("delete", Inherit, nil)
+
+	ok, err = h.Delete(ctx, "p", "")
+	if ok || err != nil {
+		t.Fatalf("Delete after removal = (%v, %v), want (false, nil)", ok, err)
+	}
+}

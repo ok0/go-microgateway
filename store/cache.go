@@ -127,7 +127,8 @@ type Lookup struct {
 }
 
 // Cache is a backend that stores HTTP responses under a primary key and a
-// secondary key, and that supports purging by key, by tag, or wholesale.
+// secondary key, and that supports purging by key, by tag, or wholesale, and
+// removing one variant.
 //
 // Every method runs in this order:
 //
@@ -191,6 +192,20 @@ type Cache interface {
 	// P+Retain. Callers must pass a Retain no smaller than their largest storage
 	// TTL.
 	Purge(ctx context.Context, p Purge) (PurgeResult, error)
+	// Delete removes the variant secondary of primary and reports whether a
+	// stored variant was removed. It validates its arguments with ValidateDelete.
+	// A variant that is absent, expired, evicted or removed by a hard purge
+	// reports false with a nil error. A variant marked stale by a soft purge is
+	// stored and is removed.
+	//
+	// Delete removes only that variant. Other variants of primary, the Vary names
+	// of primary while it keeps a variant, their tags and every other primary are
+	// unchanged. When the removed variant was the last one, primary has no
+	// record, as after its last variant expires.
+	//
+	// Delete is not a purge. It records no marker and changes no purge state, so
+	// it refuses no fill token, and a later Put may store the variant again.
+	Delete(ctx context.Context, primary, secondary string) (deleted bool, err error)
 }
 
 // PurgeKind selects which entries a Purge covers.
@@ -362,6 +377,19 @@ func validTag(s string) error {
 	return nil
 }
 
+func validKeys(primary, secondary string) error {
+	if primary == "" {
+		return fmt.Errorf("%w: empty primary key", ErrInvalidEntry)
+	}
+	if len(primary) > MaxKeyBytes {
+		return fmt.Errorf("%w: primary key longer than %d bytes", ErrInvalidEntry, MaxKeyBytes)
+	}
+	if len(secondary) > MaxSecondaryBytes {
+		return fmt.Errorf("%w: secondary key longer than %d bytes", ErrInvalidEntry, MaxSecondaryBytes)
+	}
+	return nil
+}
+
 // ValidateFill checks the arguments of Cache.Put in a fixed order and returns
 // the canonical Vary names. Each failure wraps ErrInvalidEntry.
 //
@@ -375,14 +403,8 @@ func ValidateFill(tok FillToken, primary, secondary string, varyNames []string, 
 	if tok.IsZero() {
 		return nil, fmt.Errorf("%w: zero fill token", ErrInvalidEntry)
 	}
-	if primary == "" {
-		return nil, fmt.Errorf("%w: empty primary key", ErrInvalidEntry)
-	}
-	if len(primary) > MaxKeyBytes {
-		return nil, fmt.Errorf("%w: primary key longer than %d bytes", ErrInvalidEntry, MaxKeyBytes)
-	}
-	if len(secondary) > MaxSecondaryBytes {
-		return nil, fmt.Errorf("%w: secondary key longer than %d bytes", ErrInvalidEntry, MaxSecondaryBytes)
+	if err := validKeys(primary, secondary); err != nil {
+		return nil, err
 	}
 	if e == nil {
 		return nil, fmt.Errorf("%w: nil entry", ErrInvalidEntry)
@@ -413,3 +435,8 @@ func ValidateFill(tok FillToken, primary, secondary string, varyNames []string, 
 	}
 	return canonical, nil
 }
+
+// ValidateDelete checks the arguments of Cache.Delete. Each failure wraps
+// ErrInvalidEntry. The checks run in this order: empty primary; primary longer
+// than MaxKeyBytes; secondary longer than MaxSecondaryBytes.
+func ValidateDelete(primary, secondary string) error { return validKeys(primary, secondary) }

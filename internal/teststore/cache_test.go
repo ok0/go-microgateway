@@ -308,3 +308,53 @@ func TestSharedCacheAffectedUnknown(t *testing.T) {
 		t.Fatalf("Get(p) after unknown-affected purge = (%+v, %v), want the entry removed", l.Entry, err)
 	}
 }
+
+func TestSharedCacheDelete(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newSharedCache(t)
+	a := s.Handle()
+	b := s.Handle()
+	fillEntry(t, a, "p", "s", "body")
+
+	if ok, err := b.Delete(ctx, "p", "s"); !ok || err != nil {
+		t.Fatalf("b.Delete = (%v, %v), want (true, nil)", ok, err)
+	}
+	calls := s.Calls()
+	if last := calls[len(calls)-1]; last.Op != "delete" || last.Handle != 1 || last.Primary != "p" || last.Secondary != "s" {
+		t.Fatalf("last call = %+v, want delete by handle 1 of p/s", last)
+	}
+	if l, err := a.Get(ctx, "p", onlySecondary("s")); err != nil || l.Entry != nil {
+		t.Fatalf("a.Get after Delete = (%+v, %v), want miss with nil error", l.Entry, err)
+	}
+
+	errX := errors.New("delete down")
+	s.SetOpMode("delete", Fail, errX)
+	if _, err := b.Delete(ctx, "p", "s"); !errors.Is(err, errX) {
+		t.Fatalf("failed b.Delete error = %v, want %v", err, errX)
+	}
+	if _, err := a.Get(ctx, "p", onlySecondary("s")); err != nil {
+		t.Fatalf("a.Get after failed Delete: %v", err)
+	}
+	s.SetOpMode("delete", Inherit, nil)
+
+	if err := b.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	cancelCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := b.Delete(cancelCtx, "p", "s"); err != context.Canceled {
+		t.Fatalf("canceled Delete error = %v, want context.Canceled", err)
+	}
+	if _, err := b.Delete(ctx, "", "s"); !errors.Is(err, store.ErrInvalidEntry) || errors.Is(err, store.ErrUnavailable) {
+		t.Fatalf("invalid Delete error = %v, want ErrInvalidEntry and not ErrUnavailable", err)
+	}
+	if _, err := b.Delete(ctx, "p", "s"); !errors.Is(err, store.ErrUnavailable) {
+		t.Fatalf("closed Delete error = %v, want wrapping store.ErrUnavailable", err)
+	}
+	calls = s.Calls()
+	for _, c := range calls[len(calls)-3:] {
+		if c.Op != "delete" || c.Handle != 1 {
+			t.Fatalf("call %+v, want a delete by handle 1", c)
+		}
+	}
+}

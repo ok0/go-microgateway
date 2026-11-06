@@ -281,6 +281,25 @@ func (c *Cache) Purge(ctx context.Context, p store.Purge) (store.PurgeResult, er
 	return store.PurgeResult{Accepted: accepted, Affected: affected, AffectedKnown: true}, nil
 }
 
+// Delete removes the variant secondary of primary. It follows the call order described in the store package and
+// touches no purge marker.
+func (c *Cache) Delete(ctx context.Context, primary, secondary string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := store.ValidateDelete(primary, secondary); err != nil {
+		return false, err
+	}
+	if c.closed.Load() {
+		return false, fmt.Errorf("memstore: cache closed: %w", store.ErrUnavailable)
+	}
+	s := &c.shards[c.shardIndex(primary)]
+	s.mu.Lock()
+	ok := s.del(primary, secondary, s.tick(c.clk.Now()))
+	s.mu.Unlock()
+	return ok, nil
+}
+
 func distinct(in []string) []string {
 	out := slices.Clone(in)
 	slices.Sort(out)

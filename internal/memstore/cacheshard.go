@@ -191,6 +191,27 @@ func (s *cshard) removeAll(rec *primaryRec, why reason) {
 	}
 }
 
+// del removes the variant sec of primary and reports whether it was stored. An expired variant is removed as
+// expired and reported absent.
+func (s *cshard) del(primary, sec string, now time.Time) bool {
+	rec := s.recs[primary]
+	if rec == nil {
+		return false
+	}
+	v := rec.vars[sec]
+	if v == nil {
+		return false
+	}
+	if !now.Before(v.deadline) {
+		s.remove(v, reasonExpired)
+		s.pub.Store(s.bytes)
+		return false
+	}
+	s.remove(v, reasonDropped)
+	s.pub.Store(s.bytes)
+	return true
+}
+
 func (s *cshard) get(primary string, sel func([]string) (string, bool), now time.Time) (*store.Entry, []string) {
 	rec := s.recs[primary]
 	if rec == nil {

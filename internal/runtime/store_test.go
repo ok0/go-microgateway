@@ -15,7 +15,9 @@ import (
 	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/metrics"
+	"github.com/ok0/go-microgateway/internal/storeguard"
 	"github.com/ok0/go-microgateway/internal/teststore"
+	"github.com/ok0/go-microgateway/internal/testwait"
 	"github.com/ok0/go-microgateway/store"
 )
 
@@ -405,6 +407,7 @@ type stCache struct {
 	get   func(ctx context.Context, primary string, sel func([]string) (string, bool)) (store.Lookup, error)
 	put   func(ctx context.Context, tok store.FillToken, primary, secondary string, varyNames []string, e *store.Entry, ttl time.Duration) (bool, error)
 	purge func(ctx context.Context, p store.Purge) (store.PurgeResult, error)
+	del   func(ctx context.Context, primary, secondary string) (bool, error)
 }
 
 func (c *stCache) Get(ctx context.Context, primary string, sel func([]string) (string, bool)) (store.Lookup, error) {
@@ -417,6 +420,10 @@ func (c *stCache) Put(ctx context.Context, tok store.FillToken, primary, seconda
 
 func (c *stCache) Purge(ctx context.Context, p store.Purge) (store.PurgeResult, error) {
 	return c.purge(ctx, p)
+}
+
+func (c *stCache) Delete(ctx context.Context, primary, secondary string) (bool, error) {
+	return c.del(ctx, primary, secondary)
 }
 
 func (c *stCache) Close() error { return nil }
@@ -435,6 +442,12 @@ func TestStoreBackendCacheScrubsAndClassifies(t *testing.T) {
 	}
 	errPut := func(context.Context, store.FillToken, string, string, []string, *store.Entry, time.Duration) (bool, error) {
 		return false, fmt.Errorf("write %s: %w", secret, store.ErrInvalidEntry)
+	}
+	panicDelete := func(context.Context, string, string) (bool, error) {
+		panic("delete " + secret)
+	}
+	errDelete := func(context.Context, string, string) (bool, error) {
+		return false, fmt.Errorf("delete %s: %w", secret, store.ErrUnavailable)
 	}
 	panicPurge := func(context.Context, store.Purge) (store.PurgeResult, error) {
 		panic("purge " + secret)
@@ -473,6 +486,14 @@ func TestStoreBackendCacheScrubsAndClassifies(t *testing.T) {
 			_, err := sb.Purge(context.Background(), store.Purge{})
 			return err
 		}, kind: store.ErrInvalidPurge},
+		{name: "delete panic", c: &stCache{del: panicDelete}, call: func(sb *storeBackend) error {
+			_, err := sb.Delete(context.Background(), "k", "s")
+			return err
+		}, kind: store.ErrUnavailable, exact: `store "c": delete panicked: delete REDACTED`},
+		{name: "delete error", c: &stCache{del: errDelete}, call: func(sb *storeBackend) error {
+			_, err := sb.Delete(context.Background(), "k", "s")
+			return err
+		}, kind: store.ErrUnavailable},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -525,4 +546,117 @@ func TestBuildCacheStoreNeedsCacheBackend(t *testing.T) {
 	if n := closes.Load(); n != 1 {
 		t.Errorf("backend closed %d times, want 1", n)
 	}
+}
+
+// stDeleteSetup builds a cache store whose Delete is del, with a store_timeout of 250ms. It returns the snapshot,
+// its clock and metrics, and a call that runs one Delete through the guard the cache stage uses.
+func stDeleteSetup(t *testing.T, secret string, del func(context.Context, string, string) (bool, error)) (*Snapshot, *clock.Fake, *metrics.Registry, func() error) {
+	t.Helper()
+	fake := clock.NewFake(stStart)
+	reg := metrics.NewRegistry()
+	c := &stCache{del: del}
+	set := NewStoreSet(map[string]StoreType{
+		stTypeName: {Caps: store.CapCache, Build: func(*config.Store, *slog.Logger) (store.Backend, error) {
+			return c, nil
+		}},
+	})
+	params := ""
+	if secret != "" {
+		params = "      token: " + secret + "\n"
+	}
+	doc := stHead + "stores:\n" + stStore("c", stTypeName, params) + "cache:\n  store: c\n  store_timeout: 250ms\nroutes:\n  - name: api\n    match:\n      path: /api\n    upstream: users\n    cache:\n      enabled: true\n"
+	snap, _, err := build(t, mustParse(t, doc), Deps{Stores: set, Clock: fake, Metrics: reg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stExposition(t, reg), `microgateway_store_errors_total{store="c",op="delete"} 0`) {
+		t.Fatalf("store_errors_total{op=\"delete\"} is not pre-created at 0:\n%s", stExposition(t, reg))
+	}
+	var b *builtStore
+	for _, x := range snap.built {
+		if x.name == "c" {
+			b = x
+		}
+	}
+	if b == nil {
+		t.Fatal("cache store \"c\" is not built")
+	}
+	hook := storeErrorCounter(snap.series, "c")
+	ctx := context.Background()
+	call := func() error {
+		err := b.guard.g.Do(ctx, snap.Config.Cache.StoreTimeout.Std(), func(cc context.Context) error {
+			_, err := b.backend.Delete(cc, "k", "s")
+			return err
+		})
+		if err != nil && !storeguard.ShortCircuit(err) {
+			hook("delete")
+		}
+		return err
+	}
+	return snap, fake, reg, call
+}
+
+func TestCacheStoreDeleteFailures(t *testing.T) {
+	const secret = "delete-SECRET-3"
+	t.Run("error", func(t *testing.T) {
+		del := func(context.Context, string, string) (bool, error) {
+			return false, fmt.Errorf("dial %s: %w", secret, store.ErrUnavailable)
+		}
+		snap, _, _, call := stDeleteSetup(t, secret, del)
+		err := call()
+		if err == nil {
+			t.Fatal("error = nil")
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("error leaks the secret: %q", err.Error())
+		}
+		if !errors.Is(err, store.ErrUnavailable) {
+			t.Errorf("errors.Is(ErrUnavailable) = false for %q", err.Error())
+		}
+		if v := snap.series.StoreErrors.With("c", "delete").Value(); v != 1 {
+			t.Errorf("store_errors_total{op=\"delete\"} = %v, want 1", v)
+		}
+	})
+	t.Run("panic", func(t *testing.T) {
+		del := func(context.Context, string, string) (bool, error) {
+			panic("delete " + secret)
+		}
+		snap, _, _, call := stDeleteSetup(t, secret, del)
+		err := call()
+		if err == nil {
+			t.Fatal("error = nil")
+		}
+		if want := `store "c": delete panicked: delete REDACTED`; err.Error() != want {
+			t.Errorf("error = %q, want %q", err.Error(), want)
+		}
+		if v := snap.series.StoreErrors.With("c", "delete").Value(); v != 1 {
+			t.Errorf("store_errors_total{op=\"delete\"} = %v, want 1", v)
+		}
+	})
+	t.Run("hang", func(t *testing.T) {
+		del := func(ctx context.Context, _, _ string) (bool, error) {
+			<-ctx.Done()
+			return false, ctx.Err()
+		}
+		snap, fake, _, call := stDeleteSetup(t, secret, del)
+		w0 := fake.Waiters()
+		done := make(chan error, 1)
+		go func() { done <- call() }()
+		testwait.Until(t, "guard timer armed", func() bool { return fake.Waiters() > w0 }, nil)
+		fake.Advance(250*time.Millisecond - time.Nanosecond)
+		select {
+		case err := <-done:
+			t.Fatalf("call returned %v before store_timeout", err)
+		default:
+		}
+		fake.Advance(time.Nanosecond)
+		err, _ := testwait.Recv(t, "delete call returns", done, nil)
+		var ge *storeguard.Error
+		if !errors.As(err, &ge) || ge.Reason != storeguard.ReasonTimeout {
+			t.Fatalf("error = %v, want ReasonTimeout", err)
+		}
+		if v := snap.series.StoreErrors.With("c", "delete").Value(); v != 1 {
+			t.Errorf("store_errors_total{op=\"delete\"} = %v, want 1", v)
+		}
+	})
 }

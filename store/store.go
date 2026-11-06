@@ -133,6 +133,11 @@
 // Stale set. A later hard purge wins over a soft one. PurgeTags matches exact
 // tags per variant. Keys and tags purges report exact affected counts.
 //
+// Delete removes one variant, selected by its primary and secondary keys, on
+// every handle of the store. It reports false without error when the variant
+// is not stored. It is not a purge: it records no marker, refuses no fill
+// token, and a later Put may store the variant again.
+//
 // A fill token is issued by Get. A Put is refused, with stored=false and no
 // error, when a covering purge began after its token was issued. A backend may
 // also refuse a fill whose token was issued within PurgeTolerance after a
