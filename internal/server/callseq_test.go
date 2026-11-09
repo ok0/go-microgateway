@@ -629,15 +629,18 @@ func gatewayEntryView(want []string, kind string) []string {
 		}
 		out = append(out, tok)
 	}
-	out = seqMerge(out)
-	if kind == "tls" {
-		// Stock tls.Conn.Close omits close_notify when a Write is in flight (crypto/tls conn.go Close, x != 0), so the
-		// stock server's trace is scheduler-dependent. The gateway's connection-level wrapper always forwards the bracket.
-		if n := len(out); n > 0 && out[n-1] == "close" && (n < 3 || out[n-3] != "wr+5s" || out[n-2] != "wr=") {
-			out = append(out[:n-1:n-1], "wr+5s", "wr=", "close")
-		}
+	return seqMerge(out)
+}
+
+// seqNormalizeTLSTail ensures a trace ending in close carries the close_notify bracket before it. Both stock and gateway
+// run the stock tls.Conn.Close, which omits close_notify when a Write is in flight (crypto/tls conn.go Close, x != 0), so
+// the tail is scheduler-dependent on either side. The gateway forwarding of the bracket is asserted by the deterministic
+// keepalive and hijack tests.
+func seqNormalizeTLSTail(tr []string) []string {
+	if n := len(tr); n > 0 && tr[n-1] == "close" && (n < 3 || tr[n-3] != "wr+5s" || tr[n-2] != "wr=") {
+		return append(tr[:n-1:n-1], "wr+5s", "wr=", "close")
 	}
-	return out
+	return tr
 }
 
 // seqOffsets returns the rendered limit offsets of lim that a gateway trace must not show: every enabled limit and the
@@ -695,9 +698,14 @@ func TestLimitConnForwardsAfterHTTP2Entry(t *testing.T) {
 					stock := seqRecord(t, kind, "entry", lim, false)
 					gw := seqRecord(t, kind, "entry", lim, true)
 					want := gatewayEntryView(stock, kind)
+					gwN := gw
+					if kind == "tls" {
+						want = seqNormalizeTLSTail(want)
+						gwN = seqNormalizeTLSTail(gw)
+					}
 					t.Logf("stock: %q", stock)
 					t.Logf("gateway: %q", gw)
-					if !slices.Equal(gw, want) {
+					if !slices.Equal(gwN, want) {
 						t.Errorf("gateway trace mismatch\nwant %q\ngot  %q", want, gw)
 					}
 				})
