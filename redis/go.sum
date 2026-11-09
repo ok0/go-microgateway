@@ -12,8 +12,8 @@ github.com/golang-jwt/jwt/v5 v5.3.1 h1:kYf81DTWFe7t+1VvL7eS+jKFVWaUnK9cB1qbwn63Y
 github.com/golang-jwt/jwt/v5 v5.3.1/go.mod h1:fxCRLWMO43lRc8nhHWY6LGqRcf+1gQWArsqaEUEa5bE=
 github.com/klauspost/cpuid/v2 v2.4.0 h1:S6Hrbc7+ywsr0r+RLapfGBHfyefhCTwEh3A0tV913Dw=
 github.com/klauspost/cpuid/v2 v2.4.0/go.mod h1:19jmZ9mjzoF//ddRSUsv0zfBTJWh3QJh9FNxZTMrGxU=
-github.com/ok0/go-microgateway v0.1.0 h1:GHOc8vskK/UFF/prlNw4V/DO1yw8RcLIwQhhzxiWxDc=
-github.com/ok0/go-microgateway v0.1.0/go.mod h1:MHyY0VS2/S2FN3qGi/db6esv8rvwn1iaLKVPzJTvZhM=
+github.com/ok0/go-microgateway v0.1.1 h1:Kmf1+cbz/ZObEFHi0dP4/KjpYnykGRCiVPiBd3HEmZw=
+github.com/ok0/go-microgateway v0.1.1/go.mod h1:MHyY0VS2/S2FN3qGi/db6esv8rvwn1iaLKVPzJTvZhM=
 github.com/redis/go-redis/v9 v9.23.0 h1:/TTVdJa8BRNsybwwGGnmiYktHNlUXtbOQxlWpHBPL3s=
 github.com/redis/go-redis/v9 v9.23.0/go.mod h1:EWP2UUk+XDaI1s5nQB5mablZN6vccXlmBQTyfnF87D0=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
