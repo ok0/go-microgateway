@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [v0.1.1] - 2026-11-09
+
 ### Fixed
 
 - The release checks read the version from `redis/go.mod` and the release tags, so `make check` and `make release-check` pass for every later release, and each release keeps its own section in this file.

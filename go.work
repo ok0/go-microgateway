@@ -9,4 +9,4 @@ use (
 	./redis
 )
 
-replace github.com/ok0/go-microgateway v0.1.0 => ./
+replace github.com/ok0/go-microgateway v0.1.1 => ./
