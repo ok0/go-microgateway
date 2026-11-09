@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Fixed
+
+- The release checks read the version from `redis/go.mod` and the release tags, so `make check` and `make release-check` pass for every later release, and each release keeps its own section in this file.
+
+## [v0.1.0] - 2026-11-06
+
 ### Added
 
 - Routing by host, path, method and header, with per-route path rewriting and header rules.

@@ -37,7 +37,7 @@ var checklistRequired = []string{
 	"TestCoalesceScale", "TestCacheMixedLoad", "TestPurgeLoad", "TestPurgeMarkerCapDefault",
 	"TestInstancesMixedLoad", "TestHostGaugesChurnLoad", "TestMixedMultiInstanceLoad",
 	"TestIntegrationSuite", "TestIntegrationTwoInstances", "TestConnectTimeoutRealClockTCP",
-	"TestCloseStopsIdleTimers", "-count=20", "Mermaid", "VPN", "v0.1.0", "Go 1.27",
+	"TestCloseStopsIdleTimers", "-count=20", "Mermaid", "VPN", "vX.Y.Z", "Go 1.27",
 }
 
 var (
@@ -447,12 +447,10 @@ func TestModulesInstallable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	findings := slices.Concat(ModuleFindings(core, redis), WorkFindings(readAt(t, root, "go.work"), core, redis))
-	for _, f := range findings {
+	r := redis.Requires[corePath]
+	t.Logf("redis/go.mod requires %s %s", corePath, r)
+	for _, f := range ReleaseFindings(r, readAt(t, root, "go.work"), core, redis) {
 		t.Errorf("%s:%d: %s (%s)", f.Path, f.Line, f.Text, f.Pattern)
-	}
-	if got := redis.Requires["github.com/ok0/go-microgateway"]; got != "v0.1.0" {
-		t.Errorf("redis/go.mod requires github.com/ok0/go-microgateway %s, want v0.1.0", got)
 	}
 }
 

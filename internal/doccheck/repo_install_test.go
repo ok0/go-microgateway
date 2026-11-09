@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/token"
 	"maps"
+	"math"
 	"os"
 	"os/exec"
 	"path"
@@ -156,20 +157,30 @@ func TestReleaseCheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	version := os.Getenv("MICROGATEWAY_RELEASE_VERSION")
+	envVersion := os.Getenv("MICROGATEWAY_RELEASE_VERSION")
+	version := envVersion
 	if version == "" {
 		version = redis.Requires[corePath]
 	}
+	requirePending := envVersion != ""
 	tags := gitTags(t, root)
 	t.Logf("%d tags read: %s", len(tags), strings.Join(tags, " "))
 	mainDirs, err := cliMainDirs(root, repoFiles(t))
 	if err != nil {
 		t.Fatal(err)
 	}
+	changelog, err := Load(filepath.Join(root, "CHANGELOG.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	releases, changelogFindings := ChangelogFindings(changelog)
 	findings := slices.Concat(
 		ReleaseFindings(version, readAt(t, root, "go.work"), core, redis),
 		TagFindings(tags, redisRequireReader(root)),
 		InstallFindings(readAt(t, root, "README.md"), mainDirs),
+		RequireTagFindings(redis.Requires[corePath], tags),
+		changelogFindings,
+		ChangelogTagFindings(releases, tags, version, requirePending),
 	)
 	for _, f := range findings {
 		t.Errorf("%s:%d: %s (%s)", f.Path, f.Line, f.Text, f.Pattern)
@@ -311,31 +322,34 @@ func TestContributingReleasing(t *testing.T) {
 	if strings.Contains(row, "local tags") {
 		t.Errorf("row 12 of Release verification contains %q: %q", "local tags", row)
 	}
+	for _, want := range []string{"`vX.Y.Z`", "`redis/vX.Y.Z`"} {
+		if !strings.Contains(row, want) {
+			t.Errorf("row 12 of Release verification lacks %s: %q", want, row)
+		}
+	}
 }
 
-func TestChangelogUnreleased(t *testing.T) {
+func TestChangelog(t *testing.T) {
 	root := repoRoot(t)
 	doc, err := Load(filepath.Join(root, "CHANGELOG.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	heading := ""
-	for _, h := range doc.Headings {
-		if strings.Contains(h.Text, "Unreleased") {
-			heading = h.Text
-			break
-		}
+	releases, findings := ChangelogFindings(doc)
+	for _, f := range findings {
+		t.Errorf("%s:%d: %s (%s)", f.Path, f.Line, f.Text, f.Pattern)
 	}
-	if heading == "" {
-		t.Fatal("CHANGELOG.md has no Unreleased heading")
+	if len(releases) == 0 {
+		t.Fatal("CHANGELOG.md has no released section")
 	}
-	body, _, _, ok := section(doc, heading)
+	const history = "[v0.1.0] - 2026-11-06"
+	body, _, _, ok := section(doc, history)
 	if !ok {
-		t.Fatalf("CHANGELOG.md has no section %q", heading)
+		t.Fatalf("CHANGELOG.md has no section %q", history)
 	}
 	var subs []string
 	for i, h := range doc.Headings {
-		if h.Text != heading {
+		if h.Text != history {
 			continue
 		}
 		for _, next := range doc.Headings[i+1:] {
@@ -349,21 +363,11 @@ func TestChangelogUnreleased(t *testing.T) {
 		break
 	}
 	if want := []string{"Added", "Changed", "Security"}; !slices.Equal(subs, want) {
-		t.Errorf("Unreleased subheadings = %q, want %q", subs, want)
-	}
-	seen := map[string]bool{}
-	for _, line := range strings.Split(body, "\n") {
-		if !strings.HasPrefix(line, "- ") {
-			continue
-		}
-		if seen[line] {
-			t.Errorf("entry repeated: %q", line)
-		}
-		seen[line] = true
+		t.Errorf("%s subheadings = %q, want %q", history, subs, want)
 	}
 	for _, want := range []string{"`Delete`", "store_errors", "304", "stored=false", "coalesced", "JWKS", "`kid`", "go.work", "replace", "redis/vX.Y.Z", "microgateway version", "release-prepare", "release-check", "release-verify", "Request paths are canonicalized"} {
 		if !strings.Contains(body, want) {
-			t.Errorf("Unreleased section lacks %q", want)
+			t.Errorf("section %s lacks %q", history, want)
 		}
 	}
 	src := readAt(t, root, "CHANGELOG.md")
@@ -538,6 +542,35 @@ func TestReleaseVerifyScript(t *testing.T) {
 	}
 }
 
+// nextPatch returns the release after v: the patch number plus one, without any prerelease (vX.Y.Z[-p] gives vX.Y.(Z+1)).
+func nextPatch(t *testing.T, v string) string {
+	t.Helper()
+	numbers, _, _ := strings.Cut(strings.TrimPrefix(v, "v"), "-")
+	parts := strings.Split(numbers, ".")
+	if len(parts) != 3 {
+		t.Fatalf("nextPatch(%q): want three numbers", v)
+	}
+	z, err := strconv.ParseUint(parts[2], 10, 64)
+	if err != nil || z == math.MaxUint64 {
+		t.Fatalf("nextPatch(%q): patch number is not a number below the maximum", v)
+	}
+	return "v" + parts[0] + "." + parts[1] + "." + strconv.FormatUint(z+1, 10)
+}
+
+func TestNextPatch(t *testing.T) {
+	cases := []struct{ v, want string }{
+		{"v0.1.0", "v0.1.1"},
+		{"v0.1.9", "v0.1.10"},
+		{"v1.2.3-rc.1", "v1.2.4"},
+		{"v0.0.0", "v0.0.1"},
+	}
+	for _, c := range cases {
+		if got := nextPatch(t, c.v); got != c.want {
+			t.Errorf("nextPatch(%q) = %q, want %q", c.v, got, c.want)
+		}
+	}
+}
+
 func TestReleasePrepare(t *testing.T) {
 	requireMake(t)
 	requireTool(t, "go")
@@ -556,11 +589,24 @@ func TestReleasePrepare(t *testing.T) {
 	for _, name := range copied {
 		orig[name] = string(readAt(t, root, name))
 	}
+	realRedis, err := ParseGoMod([]byte(orig["redis/go.mod"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := realRedis.Requires[corePath]
+	if !releaseVersion(r) {
+		t.Fatalf("redis/go.mod requires %s %q, not a release version", corePath, r)
+	}
+	n := nextPatch(t, r)
+	if compareRelease(n, r) <= 0 {
+		t.Fatalf("next version %s is not above %s", n, r)
+	}
+	t.Logf("preparing %s from %s", n, r)
 	dir := t.TempDir()
 	writeTree(t, dir, orig)
 
-	wantRedis := replaceOnce(t, orig["redis/go.mod"], "github.com/ok0/go-microgateway v0.1.0", "github.com/ok0/go-microgateway v0.2.0")
-	wantWork := replaceOnce(t, orig["go.work"], "microgateway v0.1.0 => ./", "microgateway v0.2.0 => ./")
+	wantRedis := replaceOnce(t, orig["redis/go.mod"], corePath+" "+r, corePath+" "+n)
+	wantWork := replaceOnce(t, orig["go.work"], corePath+" "+r+" => ./", corePath+" "+n+" => ./")
 	expected := maps.Clone(orig)
 	expected["redis/go.mod"] = wantRedis
 	expected["go.work"] = wantWork
@@ -574,9 +620,9 @@ func TestReleasePrepare(t *testing.T) {
 		}
 	}
 
-	out, err := run(t, dir, nil, "make", "-C", dir, "release-prepare", "VERSION=v0.2.0")
+	out, err := run(t, dir, nil, "make", "-C", dir, "release-prepare", "VERSION="+n)
 	if err != nil {
-		t.Fatalf("make release-prepare VERSION=v0.2.0: %v\n%s", err, out)
+		t.Fatalf("make release-prepare VERSION=%s: %v\n%s", n, err, out)
 	}
 	checkFiles(t, expected)
 	core, err := ParseGoMod(readAt(t, dir, "go.mod"))
@@ -587,13 +633,22 @@ func TestReleasePrepare(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if found := ReleaseFindings("v0.2.0", readAt(t, dir, "go.work"), core, redis); len(found) != 0 {
+	if found := ReleaseFindings(n, readAt(t, dir, "go.work"), core, redis); len(found) != 0 {
 		t.Errorf("ReleaseFindings after release-prepare: %+v", found)
 	}
+	if found := RequireTagFindings(n, []string{r, "redis/" + r}); len(found) != 0 {
+		t.Errorf("RequireTagFindings(%s) after release-prepare: %+v", n, found)
+	}
+	stale := findingPatterns(ReleaseFindings(r, readAt(t, dir, "go.work"), core, redis))
+	for _, p := range []string{"release-require", "release-replace"} {
+		if !slices.Contains(stale, p) {
+			t.Errorf("ReleaseFindings(%s) after release-prepare lacks %s: %q", r, p, stale)
+		}
+	}
 
-	out, err = run(t, dir, nil, "make", "-C", dir, "release-prepare", "VERSION=v0.2.0")
+	out, err = run(t, dir, nil, "make", "-C", dir, "release-prepare", "VERSION="+n)
 	if err != nil {
-		t.Fatalf("second make release-prepare VERSION=v0.2.0: %v\n%s", err, out)
+		t.Fatalf("second make release-prepare VERSION=%s: %v\n%s", n, err, out)
 	}
 	checkFiles(t, expected)
 
