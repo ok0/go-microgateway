@@ -386,6 +386,53 @@ func TestTagFindings(t *testing.T) {
 	}
 }
 
+func TestRequireTagFindings(t *testing.T) {
+	cases := []struct {
+		name         string
+		require      string
+		tags         []string
+		wantPatterns []string
+		wantText     []string
+	}{
+		{name: "no tags", require: "v0.1.0"},
+		{name: "only non-release tags", require: "v0.1.0", tags: []string{"redis/v0.2.0", "v1", "release-2"}},
+		{name: "equal to highest", require: "v0.1.0", tags: []string{"v0.1.0", "redis/v0.1.0"}},
+		{name: "above highest", require: "v0.1.1", tags: []string{"v0.1.0", "redis/v0.1.0"}},
+		{name: "above highest with prerelease tag", require: "v0.2.0", tags: []string{"v0.1.0", "v0.3.0-rc.1"}},
+		{name: "only a prerelease tag", require: "v0.1.0", tags: []string{"v0.2.0-rc.1"}},
+		{name: "next release tagging in progress", require: "v0.1.1", tags: []string{"v0.1.0", "redis/v0.1.0", "v0.1.1"}},
+		{name: "numeric order", require: "v0.10.0", tags: []string{"v0.9.0"}},
+		{name: "behind", require: "v0.1.0", tags: []string{"v0.1.0", "redis/v0.1.0", "v0.2.0"},
+			wantPatterns: []string{"require-behind"}, wantText: []string{"v0.1.0", "v0.2.0"}},
+		{name: "prerelease below its release", require: "v0.1.0-rc.1", tags: []string{"v0.1.0"},
+			wantPatterns: []string{"require-behind"}, wantText: []string{"v0.1.0-rc.1", "v0.1.0"}},
+		{name: "numeric order behind", require: "v0.9.0", tags: []string{"v0.10.0"},
+			wantPatterns: []string{"require-behind"}},
+		{name: "pseudo-version", require: "v0.0.0-20260101000000-abcdefabcdef", tags: []string{"v0.1.0"},
+			wantPatterns: []string{"require-behind"}},
+		{name: "empty require", require: "", tags: []string{"v0.1.0"},
+			wantPatterns: []string{"require-behind"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			found := RequireTagFindings(c.require, c.tags)
+			if got := findingPatterns(found); !slices.Equal(got, c.wantPatterns) {
+				t.Errorf("patterns = %q, want %q (findings %+v)", got, c.wantPatterns, found)
+			}
+			for _, f := range found {
+				if f.Path != "redis/go.mod" {
+					t.Errorf("finding %+v has path %q, want redis/go.mod", f, f.Path)
+				}
+			}
+			for _, w := range c.wantText {
+				if len(found) == 0 || !strings.Contains(found[0].Text, w) {
+					t.Errorf("no finding text mentions %q: %+v", w, found)
+				}
+			}
+		})
+	}
+}
+
 func TestInstallFindings(t *testing.T) {
 	const want = "github.com/ok0/go-microgateway/redis/cmd/microgateway"
 	mainDirs := []string{"redis/cmd/microgateway"}

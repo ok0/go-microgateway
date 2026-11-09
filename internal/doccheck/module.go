@@ -340,6 +340,26 @@ func TagFindings(tags []string, redisRequireAt func(tag string) (string, error))
 	return out
 }
 
+// RequireTagFindings returns the problem of the core version that redis/go.mod requires when it is behind the release tags. The highest core release tag is the highest tag vX.Y.Z without prerelease; prerelease tags, Redis tags and other tags are ignored. With no such tag there is no finding. A require at or above the highest tag gives no finding: equal means released or tagging in progress, above means the next release is prepared. A require below it, or one that is not a release version, gives one finding with Path "redis/go.mod" and Pattern "require-behind".
+func RequireTagFindings(require string, tags []string) []Finding {
+	highest := ""
+	for _, t := range tags {
+		if releaseVersion(t) && !strings.Contains(t, "-") && (highest == "" || compareRelease(t, highest) > 0) {
+			highest = t
+		}
+	}
+	if highest == "" {
+		return nil
+	}
+	if !releaseVersion(require) {
+		return []Finding{{Path: "redis/go.mod", Text: fmt.Sprintf("requires %s %q, not a release version comparable with the highest core tag %s", corePath, require, highest), Pattern: "require-behind"}}
+	}
+	if compareRelease(require, highest) < 0 {
+		return []Finding{{Path: "redis/go.mod", Text: "requires " + corePath + " " + require + ", below the highest core tag " + highest, Pattern: "require-behind"}}
+	}
+	return nil
+}
+
 // InstallFindings returns the problems of the install command in the README. mainDirs must hold exactly one directory of a main package that calls the CLI entry; the README must have one go install line for that package at a release version or at latest, and no other go install line. Every finding has Path "README.md".
 func InstallFindings(readme []byte, mainDirs []string) []Finding {
 	if len(mainDirs) != 1 {
