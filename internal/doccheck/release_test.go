@@ -433,3 +433,108 @@ func TestChecklistProblems(t *testing.T) {
 		})
 	}
 }
+
+const changelogFixture = "# Changelog\n\nIntro.\n\n## [Unreleased]\n\n### Fixed\n\n- Pending fix.\n\n## [v0.2.0] - 2026-11-08\n\n### Added\n\n- Feature two.\n\n### Security\n\n- Hardened.\n\n## [v0.1.0] - 2026-11-06\n\n### Added\n\n- Feature one.\n"
+
+func TestChangelogFindings(t *testing.T) {
+	releases, found := ChangelogFindings(Parse("CHANGELOG.md", []byte(changelogFixture)))
+	wantReleases := []ChangelogRelease{{"v0.2.0", "2026-11-08", 11}, {"v0.1.0", "2026-11-06", 21}}
+	if !slices.Equal(releases, wantReleases) {
+		t.Fatalf("fixture releases = %+v, want %+v", releases, wantReleases)
+	}
+	if len(found) != 0 {
+		t.Fatalf("fixture findings = %+v, want none", found)
+	}
+	fixture := func(old, with string) string {
+		return replaceOnce(t, changelogFixture, old, with)
+	}
+	cases := []struct {
+		name string
+		src  string
+		want []string
+	}{
+		{"empty unreleased", fixture("### Fixed\n\n- Pending fix.\n\n", ""), nil},
+		{"only unreleased", "# Changelog\n\n## [Unreleased]\n", nil},
+		{"equal dates", fixture("2026-11-06", "2026-11-08"), nil},
+		{"same entry in two sections", fixture("- Feature one.", "- Feature two."), nil},
+		{"no level-2 heading", "# Changelog\n", []string{"changelog-unreleased"}},
+		{"missing unreleased", fixture("## [Unreleased]\n\n### Fixed\n\n- Pending fix.\n\n", ""), []string{"changelog-unreleased"}},
+		{"second unreleased", fixture("## [v0.1.0]", "## [Unreleased]\n\n## [v0.1.0]"), []string{"changelog-unreleased"}},
+		{"heading without brackets", fixture("[v0.1.0] - 2026-11-06", "v0.1.0 - 2026-11-06"), []string{"changelog-heading"}},
+		{"version without v", fixture("[v0.1.0]", "[0.1.0]"), []string{"changelog-heading"}},
+		{"prerelease heading", fixture("[v0.1.0]", "[v0.1.0-rc.1]"), []string{"changelog-heading"}},
+		{"missing dash", fixture("[v0.1.0] - 2026", "[v0.1.0] 2026"), []string{"changelog-heading"}},
+		{"invalid date", fixture("2026-11-06", "2026-02-30"), []string{"changelog-heading"}},
+		{"invalid month", fixture("2026-11-06", "2026-13-01"), []string{"changelog-heading"}},
+		{"ascending versions", fixture("[v0.1.0]", "[v0.3.0]"), []string{"changelog-order"}},
+		{"equal versions", fixture("[v0.1.0]", "[v0.2.0]"), []string{"changelog-order"}},
+		{"increasing dates", fixture("2026-11-06", "2026-11-09"), []string{"changelog-order"}},
+		{"unknown subheading", fixture("### Security", "### Notes"), []string{"changelog-subheading"}},
+		{"misordered subheadings", fixture("### Added\n\n- Feature two.\n\n### Security", "### Security\n\n- Feature two.\n\n### Added"), []string{"changelog-subheading"}},
+		{"repeated subheading", fixture("### Security", "### Added"), []string{"changelog-subheading"}},
+		{"empty released section", fixture("\n### Added\n\n- Feature one.\n", ""), []string{"changelog-empty"}},
+		{"released section with only a subheading", fixture("- Feature one.\n", ""), []string{"changelog-empty"}},
+		{"repeated entry", fixture("- Hardened.", "- Feature two."), []string{"changelog-repeat"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, found := ChangelogFindings(Parse("CHANGELOG.md", []byte(c.src)))
+			if !slices.Equal(findingPatterns(found), c.want) {
+				t.Fatalf("patterns = %v, want %v (findings %+v)", findingPatterns(found), c.want, found)
+			}
+			for _, f := range found {
+				if f.Path != "CHANGELOG.md" {
+					t.Errorf("finding %+v has Path %q, want CHANGELOG.md", f, f.Path)
+				}
+				if f.Line <= 0 && (f.Pattern != "changelog-unreleased" || !strings.Contains(f.Text, "none")) {
+					t.Errorf("finding %+v has no line", f)
+				}
+			}
+		})
+	}
+}
+
+func TestChangelogTagFindings(t *testing.T) {
+	releases := []ChangelogRelease{{"v0.2.0", "2026-11-08", 11}, {"v0.1.0", "2026-11-06", 21}}
+	cases := []struct {
+		name           string
+		tags           []string
+		pending        string
+		requirePending bool
+		want           []string
+		wantPath       string
+		wantLine       int
+	}{
+		{"all tagged", []string{"v0.1.0", "redis/v0.1.0", "v0.2.0", "redis/v0.2.0"}, "v0.2.0", false, nil, "", 0},
+		{"all tagged with pending required", []string{"v0.1.0", "redis/v0.1.0", "v0.2.0", "redis/v0.2.0"}, "v0.2.0", true, nil, "", 0},
+		{"untagged pending section", []string{"v0.1.0", "redis/v0.1.0"}, "v0.2.0", true, nil, "", 0},
+		{"untagged pending section not required", []string{"v0.1.0", "redis/v0.1.0"}, "v0.2.0", false, nil, "", 0},
+		{"prerelease and other tags ignored", []string{"v0.1.0", "v0.2.0", "redis/v0.1.0", "v0.3.0-rc.1", "nightly"}, "v0.2.0", true, nil, "", 0},
+		{"pending not required", []string{"v0.1.0", "v0.2.0"}, "v0.3.0", false, nil, "", 0},
+		{"tag without section", []string{"v0.1.0", "v0.2.0", "v0.3.0"}, "v0.2.0", false, []string{"changelog-missing"}, "v0.3.0", 0},
+		{"untagged section", []string{"v0.1.0"}, "v0.1.0", false, []string{"changelog-untagged"}, "CHANGELOG.md", 11},
+		{"missing pending section", []string{"v0.1.0", "v0.2.0"}, "v0.3.0", true, []string{"changelog-missing"}, "CHANGELOG.md", 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			found := ChangelogTagFindings(releases, c.tags, c.pending, c.requirePending)
+			if !slices.Equal(findingPatterns(found), c.want) {
+				t.Fatalf("patterns = %v, want %v (findings %+v)", findingPatterns(found), c.want, found)
+			}
+			for _, f := range found {
+				if f.Path != c.wantPath {
+					t.Errorf("finding %+v has Path %q, want %q", f, f.Path, c.wantPath)
+				}
+				if c.wantLine != 0 && f.Line != c.wantLine {
+					t.Errorf("finding %+v has Line %d, want %d", f, f.Line, c.wantLine)
+				}
+			}
+		})
+	}
+	if found := ChangelogTagFindings(nil, nil, "v0.1.0", false); len(found) != 0 {
+		t.Errorf("ChangelogTagFindings(nil, nil, v0.1.0, false) = %+v, want none", found)
+	}
+	if got := findingPatterns(ChangelogTagFindings(nil, nil, "v0.1.0", true)); !slices.Equal(got, []string{"changelog-missing"}) {
+		t.Errorf("ChangelogTagFindings(nil, nil, v0.1.0, true) patterns = %v, want [changelog-missing]", got)
+	}
+}

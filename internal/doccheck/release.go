@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 )
 
 const minTrackedGoLines = 10000
@@ -544,4 +545,148 @@ func uniqueGroup(re *regexp.Regexp, s string, group int) []string {
 	}
 	slices.Sort(out)
 	return slices.Compact(out)
+}
+
+// ChangelogRelease is a released section of a changelog: its version, its date and the 1-based line of its heading.
+type ChangelogRelease struct {
+	Version string
+	Date    string
+	Line    int
+}
+
+// changelogSubheadings are the level-3 headings a changelog section may have, in their required order.
+var changelogSubheadings = []string{"Added", "Changed", "Deprecated", "Removed", "Fixed", "Security"}
+
+// changelogHeadingRE matches a released section heading [vX.Y.Z] - YYYY-MM-DD.
+var changelogHeadingRE = regexp.MustCompile(`^\[(v[^\]]+)\] - ([0-9]{4}-[0-9]{2}-[0-9]{2})$`)
+
+// ChangelogFindings returns the released sections of a Keep a Changelog document and its structure problems. The first level-2 heading must be [Unreleased] and no other level-2 heading may be [Unreleased]. Every other level-2 heading must be [vX.Y.Z] - YYYY-MM-DD with a release version without prerelease and a valid calendar date; an invalid heading is a finding and is not returned as a release. A section runs from its heading to the line before the next heading of level 2 or less. Its level-3 headings must be known subheadings in the order of changelogSubheadings, each at most once; deeper headings are not checked. A released section must have at least one entry line starting with "- ". No section may repeat an entry line. Consecutive releases in document order must have a lower version and a date that is not after the date of the previous release.
+func ChangelogFindings(doc *Doc) ([]ChangelogRelease, []Finding) {
+	var h2 []Heading
+	for _, h := range doc.Headings {
+		if h.Level == 2 {
+			h2 = append(h2, h)
+		}
+	}
+	var findings []Finding
+	add := func(line int, text, pattern string) {
+		findings = append(findings, Finding{Path: doc.Path, Line: line, Text: text, Pattern: pattern})
+	}
+	if len(h2) == 0 || h2[0].Text != "[Unreleased]" {
+		line, text := 0, "none"
+		if len(h2) > 0 {
+			line, text = h2[0].Line, h2[0].Text
+		}
+		add(line, "first level-2 heading is "+text+", want [Unreleased]", "changelog-unreleased")
+	}
+	for i, h := range h2 {
+		if i > 0 && h.Text == "[Unreleased]" {
+			add(h.Line, "second [Unreleased] heading", "changelog-unreleased")
+		}
+	}
+	var releases []ChangelogRelease
+	for _, h := range h2 {
+		end := len(doc.Lines) + 1
+		for _, n := range doc.Headings {
+			if n.Level <= 2 && n.Line > h.Line {
+				end = n.Line
+				break
+			}
+		}
+		last := -1
+		for _, n := range doc.Headings {
+			if n.Level != 3 || n.Line <= h.Line || n.Line >= end {
+				continue
+			}
+			i := slices.Index(changelogSubheadings, n.Text)
+			switch {
+			case i < 0:
+				add(n.Line, "unknown subheading "+n.Text, "changelog-subheading")
+			case i <= last:
+				add(n.Line, "subheading "+n.Text+" repeated or out of order", "changelog-subheading")
+			default:
+				last = i
+			}
+		}
+		version := ""
+		if h.Text != "[Unreleased]" {
+			m := changelogHeadingRE.FindStringSubmatch(h.Text)
+			valid := m != nil && releaseVersion(m[1]) && !strings.Contains(m[1], "-")
+			if valid {
+				_, err := time.Parse("2006-01-02", m[2])
+				valid = err == nil
+			}
+			if valid {
+				version = m[1]
+				releases = append(releases, ChangelogRelease{Version: m[1], Date: m[2], Line: h.Line})
+			} else {
+				add(h.Line, "heading "+h.Text+", want [vX.Y.Z] - YYYY-MM-DD with a release version and a calendar date", "changelog-heading")
+			}
+		}
+		entries := map[string]bool{}
+		count := 0
+		for n := h.Line + 1; n < end; n++ {
+			line := doc.Lines[n-1]
+			if !strings.HasPrefix(line, "- ") {
+				continue
+			}
+			count++
+			if entries[line] {
+				add(n, "entry repeated: "+line, "changelog-repeat")
+			}
+			entries[line] = true
+		}
+		if version != "" && count == 0 {
+			add(h.Line, version+" has no entry", "changelog-empty")
+		}
+	}
+	for i := 1; i < len(releases); i++ {
+		prev, cur := releases[i-1], releases[i]
+		if compareRelease(cur.Version, prev.Version) >= 0 {
+			add(cur.Line, cur.Version+" is not below "+prev.Version, "changelog-order")
+		}
+		if cur.Date > prev.Date {
+			add(cur.Line, "date "+cur.Date+" of "+cur.Version+" is after "+prev.Date+" of "+prev.Version, "changelog-order")
+		}
+	}
+	return releases, findings
+}
+
+// ChangelogTagFindings returns the problems of the pairing of changelog sections with the core release tags. Core tags are the tags vX.Y.Z without prerelease; other tags are ignored. Every core tag needs a section with the same version (changelog-missing, Path is the tag). Every section needs a core tag or be the pending release (changelog-untagged, Path CHANGELOG.md). When requirePending is set, the pending release needs a section (changelog-missing).
+func ChangelogTagFindings(releases []ChangelogRelease, tags []string, pending string, requirePending bool) []Finding {
+	tagged := map[string]bool{}
+	for _, t := range tags {
+		if releaseVersion(t) && !strings.Contains(t, "-") {
+			tagged[t] = true
+		}
+	}
+	have := map[string]bool{}
+	for _, r := range releases {
+		have[r.Version] = true
+	}
+	var findings []Finding
+	var versions []string
+	for v := range tagged {
+		versions = append(versions, v)
+	}
+	slices.SortFunc(versions, compareRelease)
+	for _, v := range versions {
+		if !have[v] {
+			findings = append(findings, Finding{Path: v, Text: "core tag " + v + " has no CHANGELOG section", Pattern: "changelog-missing"})
+		}
+	}
+	for _, r := range releases {
+		if tagged[r.Version] || r.Version == pending {
+			continue
+		}
+		text := "section " + r.Version + " has no core tag and is not the pending release " + pending
+		if pending == "" {
+			text = "section " + r.Version + " has no core tag and no release is pending"
+		}
+		findings = append(findings, Finding{Path: "CHANGELOG.md", Line: r.Line, Text: text, Pattern: "changelog-untagged"})
+	}
+	if requirePending && !have[pending] {
+		findings = append(findings, Finding{Path: "CHANGELOG.md", Text: "no section ## [" + pending + "] - YYYY-MM-DD for the release being checked", Pattern: "changelog-missing"})
+	}
+	return findings
 }
