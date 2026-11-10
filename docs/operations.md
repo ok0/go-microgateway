@@ -112,7 +112,7 @@ sequenceDiagram
 
 ## Admin listener
 
-The admin endpoint is a separate listener. Its address is `admin.address` (default `127.0.0.1:9901`). Set `admin.enabled: false` to run without it. The data listeners never serve admin paths. Put the admin listener on a private interface.
+The admin endpoint is a separate listener. Its address is `admin.address` (default `127.0.0.1:9901`). Set `admin.enabled: false` to run without it. The data listeners never serve admin paths. A non-loopback `admin.address` needs at least one `admin.auth.keys` entry, and `/config`, `/upstreams` and `/metrics` on it then need a bearer token; see `admin.auth.management` in the [configuration reference](configuration.md#admin).
 
 The admin listener serves HTTP/1.1 only, with a header read timeout of `10s` and an idle timeout of `120s`. Every admin response carries `Cache-Control: no-store`.
 

@@ -57,11 +57,12 @@ func TestReloadFileMatchesValidate(t *testing.T) {
 		return func(h http.Handler) http.Handler { return h }, nil
 	}
 	cases := []struct {
-		name   string
-		doc    string
-		opts   []microgateway.Option
-		count  int
-		absent []string
+		name    string
+		doc     string
+		opts    []microgateway.Option
+		count   int
+		absent  []string
+		present []string
 	}{
 		{
 			name: "four problems",
@@ -160,6 +161,26 @@ routes:
 			absent: []string{`"custom"`, `"tagger"`},
 		},
 		{
+			name: "admin exposure",
+			doc: `version: 1
+global:
+  drain_timeout: soon
+listeners:
+  - name: public
+    address: "127.0.0.1:0"
+upstreams:
+  - name: up
+    hosts:
+      - url: "http://127.0.0.1:9001"
+admin:
+  address: "0.0.0.0:9901"
+  probes:
+    address: "nowhere"
+`,
+			count:   3,
+			present: []string{"admin.auth.keys", "admin.probes.address"},
+		},
+		{
 			name:  "seeded stores",
 			count: 61,
 		},
@@ -187,6 +208,11 @@ routes:
 					if strings.Contains(line, a) {
 						t.Errorf("line %q mentions %s, want it absent", line, a)
 					}
+				}
+			}
+			for _, p := range tc.present {
+				if !slices.ContainsFunc(reload, func(line string) bool { return strings.Contains(line, p) }) {
+					t.Errorf("no line mentions %s", p)
 				}
 			}
 		})

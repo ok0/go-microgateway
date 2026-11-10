@@ -31,24 +31,26 @@ var ErrClosed = errors.New("microgateway: gateway closed")
 
 // Gateway is an http.Handler built from a validated configuration. It is safe for concurrent use.
 type Gateway struct {
-	cur      atomic.Pointer[generation]
-	mu       sync.Mutex // serializes reloads and Close
-	closed   bool       // guarded by mu
-	isClosed atomic.Bool
-	closeErr error
-	state    *state.Registry
-	deps     runtime.Deps
-	parts    []hooks.Participant
-	lookup   func(string) (string, bool)
-	logger   *slog.Logger
-	clk      clock.Clock
-	metrics  *metrics.Registry
-	reloads  *reloadSeries
-	ready    atomic.Bool
-	admin    http.Handler
-	live     atomic.Int64 // generations whose resources are not yet released; observed by tests
-	seriesMu sync.Mutex
-	liveGens map[*generation]struct{}
+	cur       atomic.Pointer[generation]
+	mu        sync.Mutex // serializes reloads and Close
+	closed    bool       // guarded by mu
+	isClosed  atomic.Bool
+	closeErr  error
+	state     *state.Registry
+	deps      runtime.Deps
+	parts     []hooks.Participant
+	lookup    func(string) (string, bool)
+	logger    *slog.Logger
+	clk       clock.Clock
+	metrics   *metrics.Registry
+	reloads   *reloadSeries
+	ready     atomic.Bool
+	admin     http.Handler
+	probe     http.Handler
+	adminAddr string       // admin.address of the configuration New validated; management gating uses it because a reload does not rebind the admin listener
+	live      atomic.Int64 // generations whose resources are not yet released; observed by tests
+	seriesMu  sync.Mutex
+	liveGens  map[*generation]struct{}
 }
 
 // Option configures a Gateway built by New or NewFromYAML.
@@ -209,15 +211,16 @@ func New(cfg *config.Config, opts ...Option) (*Gateway, error) {
 		fetcher = auth.NewHTTPFetcher(o.httpClient)
 	}
 	g := &Gateway{
-		state:    state.NewRegistry(o.logger),
-		deps:     runtime.Deps{Logger: o.logger, Clock: o.clk, Rand: rnd, Metrics: mreg, Middlewares: reg, Dial: o.dial, Resolver: o.resolver, KeySetFetcher: fetcher, Stores: set, Retention: new(cache.Retention)},
-		parts:    o.participants,
-		lookup:   o.lookup,
-		logger:   o.logger,
-		clk:      o.clk,
-		metrics:  mreg,
-		reloads:  rs,
-		liveGens: make(map[*generation]struct{}),
+		state:     state.NewRegistry(o.logger),
+		deps:      runtime.Deps{Logger: o.logger, Clock: o.clk, Rand: rnd, Metrics: mreg, Middlewares: reg, Dial: o.dial, Resolver: o.resolver, KeySetFetcher: fetcher, Stores: set, Retention: new(cache.Retention)},
+		parts:     o.participants,
+		lookup:    o.lookup,
+		logger:    o.logger,
+		clk:       o.clk,
+		metrics:   mreg,
+		reloads:   rs,
+		liveGens:  make(map[*generation]struct{}),
+		adminAddr: cfg.Admin.Address,
 	}
 	digest, applies, err := g.prepare(cfg)
 	if err != nil {
@@ -231,6 +234,8 @@ func New(cfg *config.Config, opts ...Option) (*Gateway, error) {
 	rs.lastSuccess.Set(float64(g.clk.Now().Unix()))
 	g.ready.Store(true)
 	g.admin = admin.Handler(adminSource{g}, o.logger)
+	g.probe = admin.ProbeHandler(adminSource{g})
+	g.warnOpenManagement(cfg)
 	return g, nil
 }
 
@@ -284,9 +289,15 @@ func (g *Gateway) Ready() bool {
 	return g.ready.Load()
 }
 
-// AdminHandler returns the administrative handler. Serve it on a separate listener only; the data handler never serves admin paths.
+// AdminHandler returns the management handler. Serve it on a separate listener only; the data handler never serves admin paths. /config, /upstreams and /metrics need a bearer token from admin.auth.keys when admin.auth.management is required, or auto with a non-loopback admin.address (the address the gateway was built with).
 func (g *Gateway) AdminHandler() http.Handler {
 	return g.admin
+}
+
+// ProbeHandler returns the probe handler: GET and HEAD /livez and /readyz, and /metrics while admin.probes.metrics is true, all without a credential.
+// It never serves configuration, upstream state or cache purge. Like AdminHandler it reads the active configuration on every request.
+func (g *Gateway) ProbeHandler() http.Handler {
+	return g.probe
 }
 
 // Close stops reloads, cancels background cache refreshes and releases the gateway's resources once requests in flight and those refreshes finish. Requests that arrive after Close receive 503. Close is idempotent.

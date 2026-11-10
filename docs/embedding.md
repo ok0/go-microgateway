@@ -42,6 +42,8 @@ func newApp(cfg []byte, lookup func(string) (string, bool), now func() time.Time
 
 `Gateway.AdminHandler` returns the admin handler as a separate `http.Handler`. Serve it on its own listener, and never on the listener that carries public traffic. The admin handler accepts a cache purge only with a key from `admin.auth.keys` in the configuration.
 
+`Gateway.ProbeHandler` returns the probe handler as a second `http.Handler`. It serves `GET` and `HEAD` on `/livez` and `/readyz` without a credential, and `/metrics` while `admin.probes.metrics` is true. It never serves configuration, upstream state or cache purge, so it can sit on a listener that a load balancer or orchestrator probes, while `AdminHandler` stays on a restricted one. Like `AdminHandler`, it reads the active configuration on every request, so a reload takes effect without rebuilding it. When `admin.auth.management` is `required`, or `auto` with a non-loopback `admin.address`, `AdminHandler` demands a bearer token from `admin.auth.keys` for `/config`, `/upstreams` and `/metrics`; see the [configuration reference](configuration.md) for the `admin` block.
+
 ```go
 	appServer := &http.Server{Addr: listen, Handler: a.handler}
 	adminServer := &http.Server{Addr: adminAddr, Handler: a.gateway.AdminHandler()}

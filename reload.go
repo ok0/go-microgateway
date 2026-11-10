@@ -110,6 +110,7 @@ func (g *Gateway) reload(source string, load func() (*config.Config, error)) err
 	if fp == old.fingerprint {
 		g.reloads.unchanged.Inc()
 		g.logger.Debug("configuration unchanged", "source", source, "fingerprint", short(fp))
+		g.warnOpenManagement(cfg)
 		return nil
 	}
 	gen, err := g.build(cfg, fp)
@@ -136,6 +137,7 @@ func (g *Gateway) reload(source string, load func() (*config.Config, error)) err
 		"upstreams_changed", ud.changed,
 		"duration_ms", g.clk.Since(start).Milliseconds(),
 	)
+	g.warnOpenManagement(cfg)
 	return nil
 }
 

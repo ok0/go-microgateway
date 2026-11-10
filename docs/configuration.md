@@ -73,12 +73,16 @@ Each entry is one address the gateway accepts connections on. The `tls` block is
 
 ## admin
 
-The administrative endpoint is configured here. Its mutating endpoints, such as cache purge, are present only when `admin.auth.keys` lists at least one key.
+The administrative endpoint is configured here. Its mutating endpoints, such as cache purge, are present only when `admin.auth.keys` lists at least one key. The management endpoints `/config`, `/upstreams` and `/metrics` need an `Authorization: Bearer` token that matches one of `admin.auth.keys` when `admin.auth.management` is `required`, or when it is `auto` and `admin.address` is not a loopback address. Loopback means `localhost` or an address in `127.0.0.0/8` or `::1`. An empty host such as `:9901`, `0.0.0.0` and `::` are not loopback. A missing token returns `401` and a wrong one `403`. `/livez` and `/readyz` never need a token. The probe endpoint configured under `admin.probes` serves only `/livez` and `/readyz`, and `/metrics` when `admin.probes.metrics` is `true`, without a token.
 
 | Key | Type | Default | Constraints | Meaning |
 |---|---|---|---|---|
 | `admin.enabled` | boolean | `true` | `true` or `false`; applied when the key is absent | Turns the administrative endpoint on. |
 | `admin.address` | string | `127.0.0.1:9901` | a valid `host:port` address when `enabled` is `true` | Address the administrative endpoint binds to. |
+| `admin.probes.enabled` | boolean | `true` | `true` or `false`; applied when the key is absent | Turns the probe endpoint on. |
+| `admin.probes.address` | string | `":9902"` | a valid `host:port` address when `admin.probes.enabled` is `true` | Address the probe endpoint binds to. An empty host means all interfaces. |
+| `admin.probes.metrics` | boolean | `false` | `true` or `false` | Serves `/metrics` on the probe endpoint without a token. |
+| `admin.auth.management` | string | `auto` | one of `auto`, `required`, `none`; when `admin.enabled` is `true`, `required`, or `auto` with a non-loopback `admin.address`, needs at least one `admin.auth.keys` entry | When the management endpoints need a token: `auto` on a non-loopback `admin.address`, `required` always, `none` never. `none` with a non-loopback address logs a warning on every load and reload. |
 
 ### admin.auth.keys[]
 

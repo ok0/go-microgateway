@@ -29,11 +29,12 @@ type fakeSource struct {
 	reg      *metrics.Registry
 }
 
-func (f *fakeSource) Ready() bool                    { return f.ready }
-func (f *fakeSource) RedactedConfig() *config.Config { return f.cfg.Redacted() }
-func (f *fakeSource) Upstreams() []upstream.Status   { return f.statuses }
-func (f *fakeSource) Metrics() *metrics.Registry     { return f.reg }
-func (f *fakeSource) PurgeAccess() admin.PurgeAccess { return admin.PurgeAccess{} }
+func (f *fakeSource) Ready() bool                                  { return f.ready }
+func (f *fakeSource) RedactedConfig() *config.Config               { return f.cfg.Redacted() }
+func (f *fakeSource) Upstreams() []upstream.Status                 { return f.statuses }
+func (f *fakeSource) Metrics() *metrics.Registry                   { return f.reg }
+func (f *fakeSource) PurgeAccess() admin.PurgeAccess               { return admin.PurgeAccess{} }
+func (f *fakeSource) ManagementAuth() (bool, []string, [][32]byte) { return false, nil, nil }
 func (f *fakeSource) Purge(ctx context.Context, req cache.PurgeRequest, keyID string) (cache.PurgeResult, error) {
 	return cache.PurgeResult{}, nil
 }

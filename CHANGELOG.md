@@ -12,10 +12,12 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - `global.shutdown_delay` now defaults to `5s` (was `0s`). On `SIGTERM` or `SIGINT` each instance reports not ready on `/readyz` and keeps serving for 5 s before its listeners stop, so a load balancer can remove it first. Restore the previous behavior with `global.shutdown_delay: 0s`.
 - `global.drain_timeout` now defaults to `20s` (was `30s`), so `shutdown_delay + drain_timeout + 5s` fits the default Kubernetes termination grace period of 30 s. Restore the previous value with `global.drain_timeout: 30s`.
 - In the Go API, `config.Global.ShutdownDelay` is now a `*config.Duration` (was `config.Duration`): nil takes the default and an explicit zero is kept. Code that sets it assigns a pointer, for example `d := config.Duration(0); cfg.Global.ShutdownDelay = &d`.
+- A non-loopback `admin.address`, such as `0.0.0.0:9901` or `:9901`, now needs at least one `admin.auth.keys` entry, or the configuration is rejected at `admin.auth.keys`. On such an address `/config`, `/upstreams` and `/metrics` answer only a request whose `Authorization: Bearer` token matches a key (`401` without a token, `403` for a wrong one). `/livez`, `/readyz` and cache purge are unchanged. Restore the previous behavior with `admin.auth.management: none`, which logs a warning on every load and reload.
 
 ### Added
 
 - `make reload-load` (opt-in with `MICROGATEWAY_HEAVY=1`) runs gateways from `bin/microgateway` and in-process gateways under a paced loopback load. It reloads them through the file watcher, SIGHUP and the Go API, and checks graceful shutdown under load. It prints `PASS` only with zero failed requests, every reload effective within 2 s, exact reload counters and the same outcome on every path.
+- `admin.probes.enabled` (default `true`), `admin.probes.address` (default `:9902`) and `admin.probes.metrics` (default `false`) configure the probe endpoint, and `admin.auth.management` (`auto`, `required` or `none`, default `auto`) selects when the management endpoints need a token. `Gateway.ProbeHandler` serves `/livez` and `/readyz`, and `/metrics` when `admin.probes.metrics` is `true`, without a token. The Go API adds `config.AdminProbes`, `config.Admin.Probes`, `config.AdminAuth.Management`, `config.IsLoopbackAddress` and `(*config.Admin).ManagementAuthRequired`.
 
 ## [v0.1.1] - 2026-11-09
 

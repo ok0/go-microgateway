@@ -43,6 +43,35 @@ func (s adminSource) Metrics() *metrics.Registry {
 	return s.g.metrics
 }
 
+func (s adminSource) ManagementAuth() (bool, []string, [][32]byte) {
+	snap := s.g.cur.Load().snap
+	a := snap.Config.Admin
+	a.Address = s.g.adminAddr
+	ids, hashes := snap.AdminKeys()
+	return a.ManagementAuthRequired(), ids, hashes
+}
+
+func (s adminSource) ProbeMetrics() bool {
+	m := s.g.cur.Load().snap.Config.Admin.Probes.Metrics
+	return m != nil && *m
+}
+
+// warnOpenManagement logs a warning when cfg leaves the management endpoints unauthenticated on a non-loopback address.
+func (g *Gateway) warnOpenManagement(cfg *config.Config) {
+	a := cfg.Admin
+	if a.Enabled == nil || !*a.Enabled || a.Auth.Management != "none" {
+		return
+	}
+	addr := g.adminAddr
+	if config.IsLoopbackAddress(addr) {
+		addr = a.Address
+	}
+	if config.IsLoopbackAddress(addr) {
+		return
+	}
+	g.logger.Warn("admin management endpoints are unauthenticated on a non-loopback address", "field", "admin.auth.management", "address", addr)
+}
+
 func (s adminSource) PurgeAccess() admin.PurgeAccess {
 	snap := s.g.cur.Load().snap
 	ids, hashes := snap.AdminKeys()
