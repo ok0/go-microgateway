@@ -23,7 +23,9 @@ func WithTimeout(parent context.Context, c Clock, d time.Duration) (context.Cont
 // WithTimeoutCause returns a context that ends d after the current time of c, with cause as its cause
 // (nil: context.DeadlineExceeded). The real clock uses context.WithTimeoutCause. With a non-real clock the
 // context ends when d of c's time has passed; the deadline it reports is in c's time; expiry happens inside
-// Advance, so the context is done when Advance returns.
+// Advance, so the context is done when Advance returns. A parent already done at construction yields a context
+// that is done on return, with the parent's error and cause and no timer. Done and Err follow the parent's
+// cancellation synchronously; ending by the parent releases the timer.
 func WithTimeoutCause(parent context.Context, c Clock, d time.Duration, cause error) (context.Context, context.CancelFunc) {
 	if IsReal(c) {
 		return context.WithTimeoutCause(parent, d, cause)
@@ -37,7 +39,12 @@ func WithTimeoutCause(parent context.Context, c Clock, d time.Duration, cause er
 	}
 	inner, cancel := context.WithCancelCause(parent)
 	tc := &timeoutCtx{Context: inner, deadline: deadline, done: make(chan struct{})}
-	context.AfterFunc(inner, tc.closeDone)
+	if inner.Err() != nil {
+		// The parent was already done, so WithCancelCause canceled inner synchronously: the context is done on return
+		// and no timer is armed.
+		tc.closeDone()
+		return tc, func() { cancel(nil) }
+	}
 	expire := func() {
 		tc.mu.Lock()
 		if inner.Err() == nil {
@@ -47,16 +54,21 @@ func WithTimeoutCause(parent context.Context, c Clock, d time.Duration, cause er
 		tc.mu.Unlock()
 		tc.closeDone()
 	}
-	var t Timer
 	if d <= 0 {
 		expire()
-	} else {
-		t = c.AfterFunc(d, expire)
-	}
-	return tc, func() {
-		if t != nil {
-			t.Stop()
+		return tc, func() {
+			cancel(nil)
+			tc.closeDone()
 		}
+	}
+	t := c.AfterFunc(d, expire)
+	// When inner ends by its parent or by cancel, close done and release the timer, as context.WithTimeout does.
+	context.AfterFunc(inner, func() {
+		t.Stop()
+		tc.closeDone()
+	})
+	return tc, func() {
+		t.Stop()
 		cancel(nil)
 		tc.closeDone()
 	}
@@ -75,16 +87,20 @@ func (tc *timeoutCtx) Deadline() (time.Time, bool) {
 	return tc.deadline, true
 }
 
+// Done closes as soon as inner is seen canceled, so Done, Err and context.Cause agree without waiting
+// for the AfterFunc goroutine.
 func (tc *timeoutCtx) Done() <-chan struct{} {
+	if tc.Context.Err() != nil {
+		tc.closeDone()
+	}
 	return tc.done
 }
 
 func (tc *timeoutCtx) Err() error {
-	select {
-	case <-tc.done:
-	default:
+	if tc.Context.Err() == nil {
 		return nil
 	}
+	tc.closeDone()
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	if tc.expired {

@@ -3,6 +3,7 @@ package clock
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -213,4 +214,133 @@ func TestWaitDue(t *testing.T) {
 			t.Errorf("WaitDue = %v, want context.Canceled", err)
 		}
 	})
+}
+
+func TestWithTimeoutFakeParentAlreadyDone(t *testing.T) {
+	errP := errors.New("p")
+	cases := []struct {
+		name string
+		d    time.Duration
+	}{
+		{"canceled-parent", time.Minute},
+		{"canceled-parent-zero", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fk := NewFake(testStart)
+			parent, pc := context.WithCancelCause(context.Background())
+			pc(errP)
+			ctx, cancel := WithTimeoutCause(parent, fk, tc.d, errors.New("x"))
+			defer cancel()
+			if !isClosed(ctx.Done()) {
+				t.Fatalf("%s: Done not closed on return", tc.name)
+			}
+			if err := ctx.Err(); err != context.Canceled {
+				t.Errorf("%s: Err = %v, want Canceled", tc.name, err)
+			}
+			if cause := context.Cause(ctx); cause != errP {
+				t.Errorf("%s: Cause = %v, want %v", tc.name, cause, errP)
+			}
+			if n := fk.Waiters(); n != 0 {
+				t.Errorf("%s: Waiters = %d, want 0", tc.name, n)
+			}
+			child, cc := context.WithCancel(ctx)
+			defer cc()
+			if !isClosed(child.Done()) {
+				t.Errorf("%s: child Done not closed", tc.name)
+			}
+			if err := child.Err(); err != context.Canceled {
+				t.Errorf("%s: child Err = %v, want Canceled", tc.name, err)
+			}
+			cancel()
+			fk.Advance(time.Minute)
+			if err := ctx.Err(); err != context.Canceled {
+				t.Errorf("%s: Err after cancel and Advance = %v, want Canceled", tc.name, err)
+			}
+		})
+	}
+
+	errX := errors.New("x")
+	errY := errors.New("y")
+
+	t.Run("expired-fake-parent", func(t *testing.T) {
+		fk := NewFake(testStart)
+		outer, oc := WithTimeoutCause(context.Background(), fk, 0, errX)
+		defer oc()
+		nested, nc := WithTimeoutCause(outer, fk, time.Hour, errY)
+		defer nc()
+		if !isClosed(nested.Done()) {
+			t.Fatal("expired-fake-parent: Done not closed on return")
+		}
+		if err := nested.Err(); err != context.DeadlineExceeded {
+			t.Errorf("expired-fake-parent: Err = %v, want DeadlineExceeded", err)
+		}
+		if cause := context.Cause(nested); cause != errX {
+			t.Errorf("expired-fake-parent: Cause = %v, want %v", cause, errX)
+		}
+		if n := fk.Waiters(); n != 0 {
+			t.Errorf("expired-fake-parent: Waiters = %d, want 0", n)
+		}
+	})
+
+	t.Run("expired-fake-parent-by-advance", func(t *testing.T) {
+		fk := NewFake(testStart)
+		outer, oc := WithTimeoutCause(context.Background(), fk, time.Minute, errX)
+		defer oc()
+		fk.Advance(time.Minute)
+		nested, nc := WithTimeoutCause(outer, fk, time.Hour, errY)
+		defer nc()
+		if !isClosed(nested.Done()) {
+			t.Fatal("expired-fake-parent-by-advance: Done not closed on return")
+		}
+		if err := nested.Err(); err != context.DeadlineExceeded {
+			t.Errorf("expired-fake-parent-by-advance: Err = %v, want DeadlineExceeded", err)
+		}
+		if cause := context.Cause(nested); cause != errX {
+			t.Errorf("expired-fake-parent-by-advance: Cause = %v, want %v", cause, errX)
+		}
+		if n := fk.Waiters(); n != 0 {
+			t.Errorf("expired-fake-parent-by-advance: Waiters = %d, want 0", n)
+		}
+	})
+}
+
+func TestWithTimeoutFakeCanceledLater(t *testing.T) {
+	for _, order := range []string{"err-first", "done-first"} {
+		t.Run(order, func(t *testing.T) {
+			fk := NewFake(testStart)
+			parent, pc := context.WithCancel(context.Background())
+			ctx, cancel := WithTimeout(parent, fk, time.Hour)
+			defer cancel()
+			if err := ctx.Err(); err != nil {
+				t.Fatalf("%s: Err before cancel = %v, want nil", order, err)
+			}
+			if isClosed(ctx.Done()) {
+				t.Fatalf("%s: Done closed before cancel", order)
+			}
+			if cause := context.Cause(ctx); cause != nil {
+				t.Fatalf("%s: Cause before cancel = %v, want nil", order, cause)
+			}
+			if n := fk.Waiters(); n != 1 {
+				t.Fatalf("%s: Waiters before cancel = %d, want 1", order, n)
+			}
+			pc()
+			if order == "err-first" {
+				if err := ctx.Err(); err != context.Canceled {
+					t.Errorf("%s: Err = %v, want Canceled", order, err)
+				}
+				if !isClosed(ctx.Done()) {
+					t.Errorf("%s: Done not closed after Err", order)
+				}
+			} else {
+				if !isClosed(ctx.Done()) {
+					t.Errorf("%s: Done not closed after parent cancel", order)
+				}
+				if err := ctx.Err(); err != context.Canceled {
+					t.Errorf("%s: Err = %v, want Canceled", order, err)
+				}
+			}
+			testwait.Until(t, "timer released after parent cancel", func() bool { return fk.Waiters() == 0 }, func() string { return fmt.Sprintf("waiters=%d", fk.Waiters()) })
+		})
+	}
 }
