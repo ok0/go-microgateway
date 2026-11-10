@@ -7,19 +7,41 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-11-11
+
+This release is the core module `v0.2.0` and the Redis module `redis/v0.2.0`. The binary is built from the Redis module and carries every change below.
+
 ### Breaking
+
+Each entry names the setting that restores the earlier behavior. A configuration that already sets a key keeps its value and is not affected by that entry.
 
 - `global.shutdown_delay` now defaults to `5s` (was `0s`). On `SIGTERM` or `SIGINT` each instance reports not ready on `/readyz` and keeps serving for 5 s before its listeners stop, so a load balancer can remove it first. Restore the previous behavior with `global.shutdown_delay: 0s`.
 - `global.drain_timeout` now defaults to `20s` (was `30s`), so `shutdown_delay + drain_timeout + 5s` fits the default Kubernetes termination grace period of 30 s. Restore the previous value with `global.drain_timeout: 30s`.
-- In the Go API, `config.Global.ShutdownDelay` is now a `*config.Duration` (was `config.Duration`): nil takes the default and an explicit zero is kept. Code that sets it assigns a pointer, for example `d := config.Duration(0); cfg.Global.ShutdownDelay = &d`.
-- A non-loopback `admin.address`, such as `0.0.0.0:9901` or `:9901`, now needs at least one `admin.auth.keys` entry, or the configuration is rejected at `admin.auth.keys`. On such an address `/config`, `/upstreams` and `/metrics` answer only a request whose `Authorization: Bearer` token matches a key (`401` without a token, `403` for a wrong one). `/livez`, `/readyz` and cache purge are unchanged. Restore the previous behavior with `admin.auth.management: none`, which logs a warning on every load and reload.
 - The binary now binds a probe listener by default on `:9902` on all interfaces. It serves only `/livez` and `/readyz` without a token (and `/metrics` when `admin.probes.metrics` is `true`), and `/readyz` returns `503` through `global.shutdown_delay` and the drain. The management endpoints stay on `admin.address` (default `127.0.0.1:9901`). Each instance binds its own probe listener. Where port 9902 conflicts or is unwanted, restore the previous behavior with `admin.probes.enabled: false`, or move it with `admin.probes.address`.
+- A non-loopback `admin.address`, such as `0.0.0.0:9901` or `:9901`, now needs at least one `admin.auth.keys` entry, or the configuration is rejected at `admin.auth.keys`. On such an address `/config`, `/upstreams` and `/metrics` answer only a request whose `Authorization: Bearer` token matches a key (`401` without a token, `403` for a wrong one). `/livez`, `/readyz` and cache purge are unchanged. Restore the previous behavior with `admin.auth.management: none`, which logs a warning on every load and reload.
+- In the Go API, `config.Global.ShutdownDelay` is now a `*config.Duration` (was `config.Duration`): nil takes the default and an explicit zero is kept. Code that sets it assigns a pointer, for example `d := config.Duration(0); cfg.Global.ShutdownDelay = &d`. This changes Go source only: it has no YAML setting to restore, and YAML configurations are not affected by the type change.
+
+To restore the earlier defaults (no shutdown delay, a 30 s drain, no probe listener, and management endpoints without a token on any `admin.address`), merge this block into the configuration:
+
+```yaml
+global:
+  shutdown_delay: 0s
+  drain_timeout: 30s
+admin:
+  probes:
+    enabled: false
+  auth:
+    management: none
+```
 
 ### Added
 
 - `make reload-load` (opt-in with `MICROGATEWAY_HEAVY=1`) runs gateways from `bin/microgateway` and in-process gateways under a paced loopback load. It reloads them through the file watcher, SIGHUP and the Go API, and checks graceful shutdown under load. It prints `PASS` only with zero failed requests, every reload effective within 2 s, exact reload counters and the same outcome on every path.
 - `admin.probes.enabled` (default `true`), `admin.probes.address` (default `:9902`) and `admin.probes.metrics` (default `false`) configure the probe endpoint, and `admin.auth.management` (`auto`, `required` or `none`, default `auto`) selects when the management endpoints need a token. `Gateway.ProbeHandler` serves `/livez` and `/readyz`, and `/metrics` when `admin.probes.metrics` is `true`, without a token. The Go API adds `config.AdminProbes`, `config.Admin.Probes`, `config.AdminAuth.Management`, `config.IsLoopbackAddress` and `(*config.Admin).ManagementAuthRequired`.
 - Pushing a core tag `vX.Y.Z` publishes the container image `ghcr.io/ok0/go-microgateway` for `linux/amd64` and `linux/arm64` in one manifest, tagged `X.Y.Z`, `X.Y` and `latest` (a prerelease gets only its full version). After the push, the release workflow checks both platforms, the version and the non-root user. `make workflow-lint` runs actionlint over the workflows.
+- A Helm chart in `deploy/helm/microgateway` runs the gateway as two or more stateless replicas with a Deployment, a Service, a ConfigMap that holds the gateway configuration, a PodDisruptionBudget and a HorizontalPodAutoscaler. The chart version and `appVersion` are the release version without the `v`, and its default image is `ghcr.io/ok0/go-microgateway:<appVersion>`. The Kubernetes guide `docs/kubernetes.md` covers its values, Redis wiring, probes, shutdown timing and configuration updates.
+- `make k8s-check` lints and renders the chart with its default values and with `deploy/helm/microgateway/ci/redis-values.yaml`, validates both renders against the Kubernetes 1.35.0 schemas with kubeconform, and checks them with `internal/k8scheck`, which also runs `bin/microgateway validate` on each rendered configuration. With `HELM3` set it also checks that Helm 3 renders the same bytes as Helm 4. It needs the network and is not part of `make check`.
+- CI adds the `k8s` job, which runs `make k8s-check` with Helm 3 and Helm 4, and the `actionlint` job, which runs `make workflow-lint`. The `docker` job also checks that the image user `65532:65532` is `nonroot`.
 
 ### Changed
 

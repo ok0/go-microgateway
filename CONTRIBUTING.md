@@ -134,3 +134,12 @@ Steps 3 to 8 are user steps for the repository owner. Automated agents never tag
 8. User step: check the published image (check 16 of [Release verification](#release-verification)). `docker buildx imagetools inspect ghcr.io/ok0/go-microgateway:X.Y.Z` lists `linux/amd64` and `linux/arm64`. `docker run --rm ghcr.io/ok0/go-microgateway:X.Y.Z version` prints `vX.Y.Z`. `docker image inspect --format '{{.Config.User}}' ghcr.io/ok0/go-microgateway:X.Y.Z` prints `65532:65532`, so the image runs as non-root.
 
 The core is tagged first because `redis/go.sum` must record the hash of the published core, which exists only once the core tag is pushed. Between steps 1 and 4, `redis/go.sum` lacks the core's lines; workspace builds do not need them. `make release-check` is read-only and offline: it checks the versions in `redis/go.mod` and `go.work`, the module layout, the pairing of the core and Redis tags, the README install command, and the CHANGELOG: its section order and format, a section for every core tag, and a section for `vX.Y.Z`. `make check` does not need the new section, so it also passes right after step 1.
+
+Release `v0.2.0` changes defaults; its migration guide is the `Breaking` subsection of the `[v0.2.0]` section of [CHANGELOG.md](CHANGELOG.md), which lists each changed default with the setting that restores it. Its steps, in order:
+
+- Steps 1 and 2 are done and committed: `make release-prepare VERSION=v0.2.0`, the `[v0.2.0]` section dated with the commit date, `make check` and `make release-check VERSION=v0.2.0`. If you tag on a later day, change the date of the `[v0.2.0]` heading to the tag date, run `make release-check VERSION=v0.2.0` again and commit before tagging.
+- User step: `git tag v0.2.0` and `git push origin v0.2.0`. This push triggers the first publication of `ghcr.io/ok0/go-microgateway`, tagged `0.2.0`, `0.2` and `latest`.
+- User step: in `redis/`, run `GOWORK=off go mod tidy` and commit the core's `v0.2.0` lines in `redis/go.sum`.
+- User step: `git tag redis/v0.2.0` and `git push origin main redis/v0.2.0`.
+- User step: `MICROGATEWAY_HEAVY=1 make release-verify VERSION=v0.2.0`.
+- User step, once, because `v0.2.0` publishes the first image: make the package public (step 7), then check the image `0.2.0` (step 8).
