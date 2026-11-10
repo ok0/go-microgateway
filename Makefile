@@ -1,6 +1,13 @@
 GOLANGCI_LINT_VERSION := v2.14.0
 ACTIONLINT_VERSION := v1.7.12
+HELM_VERSION := v4.3.1
+HELM3_VERSION := v3.22.1
+KUBECONFORM_VERSION := v0.8.0
+K8S_SCHEMA_VERSION := 1.35.0
 GOLANGCI_LINT ?= golangci-lint
+HELM ?= helm
+HELM3 ?=
+KUBECONFORM ?= kubeconform
 FUZZTIME ?= 30s
 MICROGATEWAY_SOAK ?= 60s
 RELOAD_LOAD_DURATION ?= 60s
@@ -25,7 +32,7 @@ COVER_EXCLUDE := $(CORE)/internal/teststore $(CORE)/internal/testcert $(CORE)/in
 REDIS_COVERFLAGS ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help build test race vet cover cover-ci cover-times lint tidy-check realnet bench require-heavy require-redis fuzz soak perf integration docker workflow-lint hygiene check release-prepare release-check release-verify reload-load
+.PHONY: help build test race vet cover cover-ci cover-times lint tidy-check realnet bench require-heavy require-redis fuzz soak perf integration docker workflow-lint require-k8s-tools k8s-check hygiene check release-prepare release-check release-verify reload-load
 
 help: ## list the targets
 	@grep -E '^[A-Za-z0-9_.-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "%-16s %s\n", $$1, $$2}'
@@ -102,6 +109,15 @@ docker: ## build the container image
 
 workflow-lint: ## actionlint ACTIONLINT_VERSION over every workflow in .github/workflows; fetches the tool, needs the network
 	$(GO_CORE) run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
+
+require-k8s-tools:
+	@command -v $(firstword $(HELM)) >/dev/null 2>&1 || { echo "helm $(HELM_VERSION) is required: put it on PATH or set HELM to its command"; exit 1; }
+	@command -v $(firstword $(KUBECONFORM)) >/dev/null 2>&1 || { echo "kubeconform $(KUBECONFORM_VERSION) is required: put it on PATH or set KUBECONFORM to its command"; exit 1; }
+
+k8s-check: require-k8s-tools build ## lint, render and check the Helm chart (default and Redis values) with helm, kubeconform and the manifest checker; needs the network
+	HELM='$(HELM)' HELM_VERSION=$(HELM_VERSION) KUBECONFORM='$(KUBECONFORM)' K8S_SCHEMA_VERSION=$(K8S_SCHEMA_VERSION) sh scripts/k8s-check.sh render bin/k8s
+	$(GO_CORE) run ./internal/k8scheck -binary bin/microgateway bin/k8s/default.yaml bin/k8s/redis.yaml
+	HELM='$(HELM)' HELM_VERSION=$(HELM_VERSION) HELM3='$(HELM3)' HELM3_VERSION=$(HELM3_VERSION) sh scripts/k8s-check.sh behavior bin/k8s
 
 hygiene: ## repository, commit, remote, dependency and release checks
 	$(GO_CORE) test -count=1 -v -run '^(TestTrackedFileHygiene|TestCommitMessageHygiene|TestRemotes|TestTrackedGoLines|TestModuleDependencies|TestModulesInstallable|TestIgnoreFiles|TestLicense|TestNoCopiedSource|TestCoreHasNoRedisDependency|TestReleaseCheck)$$' ./internal/doccheck ./internal/cli

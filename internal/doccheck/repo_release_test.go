@@ -28,10 +28,10 @@ const (
 
 var scrubbedEnvNames = []string{"MICROGATEWAY_HEAVY", "MICROGATEWAY_REDIS_ADDR", "MICROGATEWAY_SOAK", "MAKEFLAGS", "MFLAGS", "GOFLAGS", "VERSION", "MICROGATEWAY_RELEASE_VERSION"}
 
-var requiredMakeTargets = []string{"build", "test", "race", "vet", "cover", "lint", "tidy-check", "realnet", "bench", "fuzz", "soak", "perf", "integration", "docker", "hygiene", "check", "help", "release-prepare", "release-check", "release-verify", "reload-load", "workflow-lint"}
+var requiredMakeTargets = []string{"build", "test", "race", "vet", "cover", "lint", "tidy-check", "realnet", "bench", "fuzz", "soak", "perf", "integration", "docker", "hygiene", "check", "help", "release-prepare", "release-check", "release-verify", "reload-load", "workflow-lint", "k8s-check"}
 
 var checklistRequired = []string{
-	"make perf", "make soak", "make fuzz", "make integration", "make realnet", "make docker", "make lint", "make reload-load",
+	"make perf", "make soak", "make fuzz", "make integration", "make realnet", "make docker", "make lint", "make reload-load", "make k8s-check",
 	"MICROGATEWAY_HEAVY", "MICROGATEWAY_SOAK", "MICROGATEWAY_LOAD", "MICROGATEWAY_REDIS_ADDR",
 	"MICROGATEWAY_REDIS_CLUSTER", "MICROGATEWAY_REDIS_SENTINEL", "MICROGATEWAY_CACHE_FULL",
 	"TestCoalesceScale", "TestCacheMixedLoad", "TestPurgeLoad", "TestPurgeMarkerCapDefault",
@@ -546,6 +546,27 @@ func TestMakefileHeavyGates(t *testing.T) {
 	if !bytes.Contains(out, []byte("MICROGATEWAY_REDIS_ADDR")) {
 		t.Errorf("make integration output does not name MICROGATEWAY_REDIS_ADDR:\n%s", out)
 	}
+	mf := readAt(t, root, "Makefile")
+	out, err = run(t, root, nil, "make", "-C", root, "k8s-check", "HELM=k8s-check-missing-helm")
+	if err == nil {
+		t.Error("make k8s-check with a missing helm succeeded")
+	}
+	if !bytes.Contains(out, []byte("helm "+makeVariable(mf, "HELM_VERSION")+" is required")) {
+		t.Errorf("make k8s-check output does not name the missing helm:\n%s", out)
+	}
+	if bytes.Contains(out, []byte("go build")) {
+		t.Errorf("make k8s-check built before it checked the tools:\n%s", out)
+	}
+	out, err = run(t, root, nil, "make", "-C", root, "k8s-check", "HELM=sh", "KUBECONFORM=k8s-check-missing-kubeconform")
+	if err == nil {
+		t.Error("make k8s-check with a missing kubeconform succeeded")
+	}
+	if !bytes.Contains(out, []byte("kubeconform "+makeVariable(mf, "KUBECONFORM_VERSION")+" is required")) {
+		t.Errorf("make k8s-check output does not name the missing kubeconform:\n%s", out)
+	}
+	if bytes.Contains(out, []byte("go build")) {
+		t.Errorf("make k8s-check built before it checked the tools:\n%s", out)
+	}
 }
 
 // workflowFiles returns the sorted workflow files of the repository, relative to root. It fails the test unless ci.yml and release.yml are among them.
@@ -741,7 +762,7 @@ func workflowProblems(wf map[string]any, makefile []byte, floor string) []string
 		add("top-level env sets GOWORK; set the command mode per job")
 	}
 	jobs := mapOf(wf["jobs"])
-	for _, name := range []string{"lint", "test", "coverage", "tidy", "integration", "realnet", "docker", "actionlint"} {
+	for _, name := range []string{"lint", "test", "coverage", "tidy", "integration", "realnet", "docker", "actionlint", "k8s"} {
 		if _, ok := jobs[name]; !ok {
 			add("workflow has no %s job", name)
 		}
@@ -807,7 +828,7 @@ func workflowProblems(wf map[string]any, makefile []byte, floor string) []string
 	if !exactPatch.MatchString(pinText) || version.Compare("go"+pinText, "go"+floor) < 0 {
 		add("workflow env GO_VERSION = %v, want an exact patch release not older than the go.mod floor %s", pin, floor)
 	}
-	for _, name := range []string{"lint", "coverage", "tidy", "integration", "realnet", "actionlint"} {
+	for _, name := range []string{"lint", "coverage", "tidy", "integration", "realnet", "actionlint", "k8s"} {
 		found, pinned := false, true
 		for _, raw := range listOf(mapOf(jobs[name])["steps"]) {
 			step := mapOf(raw)
@@ -921,7 +942,7 @@ func workflowProblems(wf map[string]any, makefile []byte, floor string) []string
 		}
 	}
 
-	allowed := []string{"actions/checkout@v7", "actions/setup-go@v7", "golangci/golangci-lint-action@v9"}
+	allowed := []string{"actions/checkout@v7", "actions/setup-go@v7", "golangci/golangci-lint-action@v9", "azure/setup-helm@v5"}
 	seen := map[string]bool{}
 	for _, u := range uses {
 		if !slices.Contains(allowed, u) {
@@ -987,6 +1008,54 @@ func workflowProblems(wf map[string]any, makefile []byte, floor string) []string
 	}
 	if !passwdChecked {
 		add("docker job does not check /etc/passwd of the built image for nonroot:x:65532:65532:")
+	}
+
+	k8sMakeVar := func(name, pattern string) {
+		value := makeVariable(makefile, name)
+		if !regexp.MustCompile(pattern).MatchString(value) {
+			add("Makefile %s = %q, want an exact release matching %s", name, value, pattern)
+		}
+	}
+	k8sMakeVar("HELM_VERSION", `^v4\.[0-9]+\.[0-9]+$`)
+	k8sMakeVar("HELM3_VERSION", `^v3\.[0-9]+\.[0-9]+$`)
+	k8sMakeVar("KUBECONFORM_VERSION", `^v[0-9]+\.[0-9]+\.[0-9]+$`)
+	k8sMakeVar("K8S_SCHEMA_VERSION", `^1\.[0-9]+\.[0-9]+$`)
+	helm4, helm3 := makeVariable(makefile, "HELM_VERSION"), makeVariable(makefile, "HELM3_VERSION")
+	kubeconform := makeVariable(makefile, "KUBECONFORM_VERSION")
+	k8sSteps := listOf(mapOf(jobs["k8s"])["steps"])
+	setupHelm, i3, i4, kept, checked := 0, -1, -1, -1, -1
+	for i, raw := range k8sSteps {
+		step := mapOf(raw)
+		if step["uses"] == any("azure/setup-helm@v5") {
+			setupHelm++
+			version := mapOf(step["with"])["version"]
+			if version == any(helm3) && i3 < 0 {
+				i3 = i
+			}
+			if version == any(helm4) && i4 < 0 {
+				i4 = i
+			}
+		}
+	}
+	for i, raw := range k8sSteps {
+		run, _ := mapOf(raw)["run"].(string)
+		if i3 >= 0 && i > i3 && kept < 0 && strings.Contains(run, "$RUNNER_TEMP/helm3") {
+			kept = i
+		}
+		if checked < 0 && strings.TrimSpace(run) == "make k8s-check" {
+			checked = i
+		}
+	}
+	if checked < 0 {
+		add("k8s job does not run make k8s-check")
+	} else {
+		env := stepEnv(nil, nil, mapOf(k8sSteps[checked]))
+		if env["HELM3"] != "${{ runner.temp }}/helm3" || env["KUBECONFORM"] != "go run github.com/yannh/kubeconform/cmd/kubeconform@"+kubeconform {
+			add("k8s job make k8s-check step does not set HELM3 to ${{ runner.temp }}/helm3 and KUBECONFORM to go run github.com/yannh/kubeconform/cmd/kubeconform@%s", kubeconform)
+		}
+	}
+	if setupHelm != 2 || i3 < 0 || kept < 0 || i4 < kept || (checked >= 0 && checked < i4) {
+		add("k8s job does not set up Helm %s, keep it at $RUNNER_TEMP/helm3, then set up Helm %s with azure/setup-helm@v5 before make k8s-check", helm3, helm4)
 	}
 	return problems
 }
@@ -1077,6 +1146,21 @@ func TestWorkflowVersionPolicy(t *testing.T) {
 	}
 	redisTestOff, redisTestFound := setStepEnv("test", named("test redis module"), map[string]any{"GOWORK": "off"})
 	redisLintOff, redisLintFound := setStepEnv("lint", redisDir, map[string]any{"GOWORK": "off"})
+	stepWhere := func(wf map[string]any, job string, match func(step map[string]any) bool) map[string]any {
+		for _, raw := range listOf(jobMap(wf, job)["steps"]) {
+			if match(mapOf(raw)) {
+				return mapOf(raw)
+			}
+		}
+		return nil
+	}
+	setupHelm := func(version string) func(step map[string]any) bool {
+		return func(step map[string]any) bool {
+			return step["uses"] == any("azure/setup-helm@v5") && mapOf(step["with"])["version"] == any(version)
+		}
+	}
+	makeK8s := func(step map[string]any) bool { return step["run"] == any("make k8s-check") }
+	keepHelm := func(step map[string]any) bool { return step["name"] == any("keep Helm 3") }
 	cases := []struct {
 		name   string
 		mutate func(wf map[string]any)
@@ -1144,6 +1228,32 @@ func TestWorkflowVersionPolicy(t *testing.T) {
 			run, _ := last["run"].(string)
 			last["run"] = strings.ReplaceAll(run, "65532:65532", "0:0")
 		}, "/etc/passwd", nil},
+		{"no-k8s-job", func(wf map[string]any) {
+			delete(mapOf(wf["jobs"]), "k8s")
+		}, "workflow has no k8s job", nil},
+		{"no-k8s-check", func(wf map[string]any) {
+			stepWhere(wf, "k8s", makeK8s)["run"] = "make build"
+		}, "does not run make k8s-check", nil},
+		{"helm4-latest", func(wf map[string]any) {
+			mapOf(stepWhere(wf, "k8s", setupHelm("v4.3.1"))["with"])["version"] = "latest"
+		}, "set up Helm", nil},
+		{"helm-order", func(wf map[string]any) {
+			a := stepWhere(wf, "k8s", setupHelm("v3.22.1"))
+			b := stepWhere(wf, "k8s", setupHelm("v4.3.1"))
+			a["with"], b["with"] = b["with"], a["with"]
+		}, "set up Helm", nil},
+		{"no-helm3-kept", func(wf map[string]any) {
+			stepWhere(wf, "k8s", keepHelm)["run"] = "true"
+		}, "set up Helm", nil},
+		{"kubeconform-latest", func(wf map[string]any) {
+			mapOf(stepWhere(wf, "k8s", makeK8s)["env"])["KUBECONFORM"] = "go run github.com/yannh/kubeconform/cmd/kubeconform@latest"
+		}, "KUBECONFORM", nil},
+		{"no-helm3-env", func(wf map[string]any) {
+			delete(stepWhere(wf, "k8s", makeK8s), "env")
+		}, "HELM3", nil},
+		{"setup-helm-v4", func(wf map[string]any) {
+			stepWhere(wf, "k8s", func(step map[string]any) bool { return step["uses"] == any("azure/setup-helm@v5") })["uses"] = "azure/setup-helm@v4"
+		}, "not an allowed action", nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1171,6 +1281,27 @@ func TestWorkflowVersionPolicy(t *testing.T) {
 	}
 }
 
+func TestWorkflowK8sPins(t *testing.T) {
+	root := repoRoot(t)
+	src := readAt(t, root, ".github/workflows/ci.yml")
+	makefile := string(readAt(t, root, "Makefile"))
+	floor := goFloor(t, root)
+	for _, name := range []string{"HELM_VERSION", "HELM3_VERSION", "KUBECONFORM_VERSION", "K8S_SCHEMA_VERSION"} {
+		t.Run(name, func(t *testing.T) {
+			var wf map[string]any
+			if err := yaml.Unmarshal(src, &wf); err != nil {
+				t.Fatal(err)
+			}
+			value := makeVariable([]byte(makefile), name)
+			mutated := replaceOnce(t, makefile, name+" := "+value, name+" := latest")
+			problems := workflowProblems(wf, []byte(mutated), floor)
+			if !slices.ContainsFunc(problems, func(p string) bool { return strings.Contains(p, "Makefile "+name) }) {
+				t.Errorf("%s = latest: want a problem containing %q, got %q", name, "Makefile "+name, problems)
+			}
+		})
+	}
+}
+
 func TestVersionFacts(t *testing.T) {
 	root := repoRoot(t)
 	var wf map[string]any
@@ -1178,6 +1309,32 @@ func TestVersionFacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	pin := fmt.Sprint(mapOf(wf["env"])["GO_VERSION"])
+	makefile := readAt(t, root, "Makefile")
+	helm4, helm3 := makeVariable(makefile, "HELM_VERSION"), makeVariable(makefile, "HELM3_VERSION")
+	kubeconform, schema := makeVariable(makefile, "KUBECONFORM_VERSION"), makeVariable(makefile, "K8S_SCHEMA_VERSION")
+	for _, want := range []string{"Helm " + helm4, "Helm " + helm3, "kubeconform " + kubeconform, "Kubernetes " + schema} {
+		if !strings.Contains(string(readAt(t, root, "CONTRIBUTING.md")), want) {
+			t.Errorf("CONTRIBUTING.md does not contain %q", want)
+		}
+	}
+	pinPatterns := []struct {
+		re   *regexp.Regexp
+		want []string
+	}{
+		{regexp.MustCompile(`\bHelm (v[0-9]+\.[0-9]+\.[0-9]+)`), []string{helm4, helm3}},
+		{regexp.MustCompile(`\bkubeconform (v[0-9]+\.[0-9]+\.[0-9]+)`), []string{kubeconform}},
+		{regexp.MustCompile(`\bKubernetes ([0-9]+\.[0-9]+\.[0-9]+)`), []string{schema}},
+	}
+	for _, rel := range []string{"README.md", "CONTRIBUTING.md", "docs/kubernetes.md"} {
+		text := string(readAt(t, root, rel))
+		for _, p := range pinPatterns {
+			for _, m := range p.re.FindAllStringSubmatch(text, -1) {
+				if !slices.Contains(p.want, m[1]) {
+					t.Errorf("%s names %s, which is not the Makefile pin", rel, m[0])
+				}
+			}
+		}
+	}
 	for _, rel := range []string{"README.md", "CONTRIBUTING.md", "docs/operations.md"} {
 		text := string(readAt(t, root, rel))
 		for _, want := range []string{"Redis 6.2 or later", "Redis 6.2 and 7.4"} {
@@ -1498,5 +1655,9 @@ func TestReleaseChecklist(t *testing.T) {
 	}
 	for _, problem := range ChecklistProblems(body, files, MakeTargets(readAt(t, root, "Makefile")), checklistRequired) {
 		t.Error(problem)
+	}
+	missing := ChecklistProblems(strings.ReplaceAll(body, "make k8s-check", "make k8s-chek"), files, MakeTargets(readAt(t, root, "Makefile")), checklistRequired)
+	if !slices.ContainsFunc(missing, func(p string) bool { return strings.Contains(p, `section lacks "make k8s-check"`) }) {
+		t.Errorf("a section without make k8s-check reports %q, want a problem containing %q", missing, `section lacks "make k8s-check"`)
 	}
 }
