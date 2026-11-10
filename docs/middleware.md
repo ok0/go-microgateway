@@ -4,7 +4,7 @@ A request passes through three layers before it reaches an upstream:
 
 1. Framework stages that run for every request: request ID, client IP, access log, panic recovery and identity-header stripping.
 2. Built-in and user middleware named by the route in `middlewares`.
-3. The route pipeline, which holds the stages `timeout`, `auth`, `rate_limit`, `cache`, `circuit_breaker` and `retry`.
+3. The route pipeline, which holds the built-in stages in the [default pipeline order](architecture.md#default-pipeline-order).
 
 Each stage is configured on its route. The complete key list is in the configuration reference. The YAML blocks below are fragments that show one feature each; they are not complete configurations unless a block is marked as one.
 
@@ -445,7 +445,7 @@ A middleware written in Go is registered with `WithMiddleware` under a type name
 
 ## Pipeline ordering
 
-The default route pipeline is `timeout`, `auth`, `rate_limit`, `cache`, `circuit_breaker`, `retry`. By default, route middlewares named in `middlewares` run before the pipeline.
+The default route pipeline is listed in [Default pipeline order](architecture.md#default-pipeline-order). By default, route middlewares named in `middlewares` run before the pipeline.
 
 A route can set its own `pipeline`. With an explicit pipeline:
 

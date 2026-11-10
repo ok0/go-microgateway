@@ -14,21 +14,85 @@ The gateway is a set of layers. Each layer depends only on the layers below it.
 - **Stores.** A store holds state that the policy stages need to share: rate-limit counters and cached responses. The memory store is built in and keeps state inside the process. A Redis store is provided by the `redis` module. Custom stores implement the public `store` package contract.
 - **Foundation.** The `config` package holds the schema, strict parsing and validation. The metrics registry produces Prometheus text. The error writer produces the JSON error body. The clock and the random source are injected.
 
+```mermaid
+flowchart TD
+  subgraph Entry
+    LST["Listeners and TLS"]
+    ADM["Admin endpoint"]
+  end
+  subgraph Lifecycle
+    SRV["Server: drain and shutdown"]
+    RLD["Reload: watch, debounce, validate, build, swap"]
+  end
+  subgraph Runtime
+    SNP["Immutable snapshot per configuration"]
+  end
+  subgraph Pipeline
+    ROU["Router"] --> MW["Route middleware"] --> STG["Policy stages, then the proxy"]
+  end
+  subgraph Upstream
+    LB["Load balancer and host health"] --> UP["Upstream hosts"]
+  end
+  subgraph Stores
+    MEM["Memory store"]
+    RED["Redis store, in the redis module"]
+    CST["Custom stores"]
+  end
+  subgraph Foundation
+    CFG["config, metrics, error writer, clock"]
+  end
+  LST --> SNP
+  ADM --> SNP
+  RLD --> SNP
+  SNP --> ROU
+  STG --> LB
+  STG --> MEM
+  STG --> RED
+  STG --> CST
+  SNP --> CFG
+```
+
 Timers in this code use the injected clock. The one exception is the protocol timers that net/http's bundled HTTP/2 server runs itself, such as its ping and connection idle timers, which run on wall time.
 
 ## Request flow
 
-For each request the gateway:
+For each request the gateway runs the steps below in this order. Each step has an id, and the diagram uses the ids as node names. The pipeline stages run only when the route configures them; a stage that is not configured is skipped and the request goes on to the next step.
 
-1. Assigns a request ID from the configured header, or keeps a valid incoming ID, and resolves the client IP from the trusted proxies.
-2. Records the request for the access log and metrics, and recovers from a panic in any later step by answering `500`.
-3. Removes the identity headers listed in `global.strip_identity_headers`, so that a client cannot forge them.
-4. Canonicalizes the request path. A path that breaks the path rules gets `400` with the code `invalid_path` before any route policy runs; every later step, including the forwarded path, uses the canonical path.
-5. Matches the route. When no route matches, the gateway answers `404` with the code `route_not_found`.
-6. Runs the route's middleware, then the pipeline stages in order, and then the proxy.
-7. The proxy selects a host with the upstream's load balancer, forwards the request, and sends the response back. A failed attempt may be retried on another host, subject to the retry stage.
+1. `request_id` assigns a request ID from the configured header, or keeps a valid incoming ID.
+2. `client_ip` resolves the client IP from the trusted proxies.
+3. `observe` records the request for the access log and metrics.
+4. `recover` answers `500` when a later step panics.
+5. `strip_headers` removes the identity headers that a client could forge: the headers listed in `global.strip_identity_headers`, the headers that JWT providers forward claims in, and the consumer and metadata headers of API key providers. The step is skipped when that list is empty.
+6. `canonical_path` canonicalizes the request path. A path that breaks the path rules gets `400` with the code `invalid_path` before any route policy runs; every later step, including the forwarded path, uses the canonical path.
+7. `route_match` matches the route. When no route matches, the gateway answers `404` with the code `route_not_found`.
+8. `route_middleware` stands for the middleware that the route names, in `middlewares` or in an explicit `pipeline`.
+9. The pipeline stages `timeout`, `auth`, `rate_limit`, `cache`, `circuit_breaker` and `retry` run in this order, each only when the route configures it. [Default pipeline order](#default-pipeline-order) gives the conditions and how an explicit `pipeline` changes the order.
+10. `proxy` forwards the request and sends the response back.
+11. `load_balancer` picks a host for the attempt, and `upstream` sends the attempt to that host. When the attempt fails and the route's retry settings allow another attempt, the load balancer picks again. Every pick skips a host whose circuit breaker refuses it. The pick prefers a healthy host, one that is not ejected and passes its health checks, that the request has not tried yet; when there is none, it may pick a healthy host that the request already tried; and when no host is healthy, it falls back to the other hosts, untried ones first (panic mode).
 
-The diagram of this path is in the [README](../README.md#request-flow).
+```mermaid
+flowchart TD
+  client["Client request"] --> request_id["request_id: assign or keep the request ID"]
+  request_id --> client_ip["client_ip: resolve the client IP"]
+  client_ip --> observe["observe: access log and metrics"]
+  observe --> recover["recover: answer 500 after a panic"]
+  recover --> strip_headers["strip_headers: remove identity headers"]
+  strip_headers --> canonical_path{"canonical_path: is the path canonical?"}
+  canonical_path -- "no" --> bad_path["400 invalid_path"]
+  canonical_path --> route_match{"route_match: does a route match?"}
+  route_match -- "no" --> no_route["404 route_not_found"]
+  route_match --> route_middleware["route_middleware: middleware the route names"]
+  route_middleware --> timeout["timeout, if configured"]
+  timeout --> auth["auth, if configured"]
+  auth --> rate_limit["rate_limit, if configured"]
+  rate_limit --> cache["cache, if configured"]
+  cache --> circuit_breaker["circuit_breaker, if configured"]
+  circuit_breaker --> retry["retry, if configured"]
+  retry --> proxy["proxy: forward the request"]
+  proxy --> load_balancer["load_balancer: pick a host"]
+  load_balancer --> upstream["upstream: send the attempt"]
+  upstream -- "retry when the attempt fails and retries remain" --> load_balancer
+```
 
 ## Default pipeline order
 
@@ -40,17 +104,17 @@ Without an explicit `pipeline`, a route runs its own middleware first and then t
 4. `cache`
 5. `circuit_breaker`
 6. `retry`
-7. the proxy
+7. `proxy`
 
-A stage runs only when the route configures it. `timeout` runs when the route sets a timeout. `auth` runs when `auth.mode` is not `none`. `rate_limit` runs when the route sets `rate_limit`. `cache` runs when `cache.enabled` is true. `circuit_breaker` runs when `circuit_breaker.enabled` is true, which is the default. `retry` runs when the route sets `retry`.
+A stage runs only when the route configures it. `timeout` runs when the route sets a timeout above zero. `auth` runs when `auth.mode` is not `none`. `rate_limit` runs when the route sets `rate_limit`. `cache` runs when `cache.enabled` is true. `circuit_breaker` runs when the route's upstream has a `circuit_breaker` block and the route does not set `circuit_breaker.enabled` to false; `enabled` is true by default. `retry` runs when the route sets `retry`.
 
 The order has these consequences:
 
 - `cache` sits after `rate_limit` and before `circuit_breaker`. A cache hit is served only to a request that has already been authenticated and admitted by the rate limit, so a hit is never served to an anonymous client or past a limit. The cache also sees the `503` that an open circuit breaker produces, so `stale-if-error` can serve a stored response in place of that error.
 - `retry` is the innermost stage. Each retry is a new attempt within the same request, and the retry budget limits how many there are.
-- Route middleware runs before the stages. With an explicit `pipeline`, route middleware that the pipeline does not name runs first, and the named stages follow in the order given.
+- Route middleware runs before the stages. With an explicit `pipeline`, route middleware that the pipeline does not name runs first, and the stages and middleware that the pipeline names follow in the order given. A built-in stage that the pipeline does not name does not run on that route, even when the route configures it. Validation therefore requires the pipeline to name `auth` when `auth.mode` is not `none` and `rate_limit` when the route sets `rate_limit`; an unnamed `timeout`, `cache`, `circuit_breaker` or `retry` is dropped without a validation error.
 
-Validation rejects a `pipeline` that places `cache` before `auth`, because cache hits would be served without authentication. It also rejects `cache` before `circuit_breaker` or `retry`, and `retry` in any position but the last. Validation reports the stage and its index, for example `routes[0].pipeline[0] (line N): stage "cache" must come after "auth"`.
+Validation rejects a `pipeline` that places `cache` before `auth`, because cache hits would be served without authentication. It also rejects `circuit_breaker` or `retry` before `cache`, and `retry` in any position but the last. Validation reports the stage and its index, for example `routes[0].pipeline[0] (line N): stage "cache" must come after "auth"`.
 
 ## Reload and request snapshots
 

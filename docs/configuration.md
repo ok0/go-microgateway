@@ -343,7 +343,7 @@ Named middleware instances that routes reference in `middlewares` or `pipeline`.
 
 | Key | Type | Default | Constraints | Meaning |
 |---|---|---|---|---|
-| `middlewares[].name` | string | required | non-empty and unique; not the name of a built-in stage (`timeout`, `auth`, `rate_limit`, `cache`, `circuit_breaker`, `retry`) | Name that routes reference. |
+| `middlewares[].name` | string | required | non-empty and unique; not the name of a built-in stage (`auth`, `cache`, `circuit_breaker`, `rate_limit`, `retry`, `timeout`) | Name that routes reference. |
 | `middlewares[].type` | string | required | `cors`, `headers`, `request_size_limit`, or a type the embedding program registers | Middleware implementation. |
 | `middlewares[].params` | map (secret values) | none | keys must be strings; built-in types are checked against their own parameters | Implementation settings. |
 
@@ -359,7 +359,7 @@ Each route matches requests and forwards them to one upstream. `priority` orders
 | `routes[].preserve_host` | boolean | none | `true` or `false` | Forwards the original `Host` header instead of the upstream host. |
 | `routes[].timeout` | duration | none | must not be negative; `0` means no limit | Bounds the whole exchange with the upstream. |
 | `routes[].middlewares` | list of strings | none | each entry names a defined middleware; no duplicates | Middlewares applied to the route before the pipeline. |
-| `routes[].pipeline` | list of strings | none | each entry is a built-in stage or a middleware name; `auth` comes before `cache`; `cache` comes before `circuit_breaker` and `retry`; `retry` comes last; `auth` is required when `auth.mode` is not `none`; `rate_limit` is required when the route has a `rate_limit` block | Order of the stages and middlewares of the route. When absent, the route runs its middlewares and then `timeout`, `auth`, `rate_limit`, `cache`, `circuit_breaker`, `retry`. |
+| `routes[].pipeline` | list of strings | none | each entry is a built-in stage or a middleware name; `auth` comes before `cache`; `cache` comes before `circuit_breaker` and `retry`; `retry` comes last; `auth` is required when `auth.mode` is not `none`; `rate_limit` is required when the route has a `rate_limit` block | Order of the stages and middlewares of the route. When absent, the route runs its middlewares and then the built-in stages in the [default pipeline order](architecture.md#default-pipeline-order). |
 
 ### routes[].match
 
