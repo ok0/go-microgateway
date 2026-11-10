@@ -67,8 +67,8 @@ tidy-check: ## go mod tidy -diff in the core, offline tidy check of the redis mo
 	$(GO_CORE) mod tidy -diff
 	sh scripts/tidy-redis.sh
 
-realnet: ## tests against real TCP sockets
-	$(GO_CORE) test -race -count=1 -tags realnet ./internal/e2e
+realnet: ## tests against real TCP sockets and the host's interface
+	$(GO_CORE) test -race -count=1 -tags realnet ./internal/e2e ./internal/cli
 
 bench: ## every benchmark once, no thresholds
 	$(GO_CORE) test -run '^$$' -bench . -benchtime=1x ./...
