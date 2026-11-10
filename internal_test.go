@@ -153,6 +153,23 @@ func TestHooksWithResolver(t *testing.T) {
 	}
 }
 
+func TestHooksWithFlowTrace(t *testing.T) {
+	var got []string
+	opt, ok := hooks.WithFlowTrace(func(s string) { got = append(got, s) }).(Option)
+	if !ok {
+		t.Fatal("hooks.WithFlowTrace did not return a microgateway.Option")
+	}
+	var o options
+	opt(&o)
+	if o.flowTrace == nil {
+		t.Fatal("option did not set the flow trace")
+	}
+	o.flowTrace("x")
+	if !slices.Equal(got, []string{"x"}) {
+		t.Fatalf("flow trace recorded %v, want [x]", got)
+	}
+}
+
 func TestHooksInspect(t *testing.T) {
 	t.Run("reports state, generations and reloads", func(t *testing.T) {
 		be := backend(t, "a")

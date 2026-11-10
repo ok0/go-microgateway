@@ -41,6 +41,8 @@ type Deps struct {
 	Stores        *StoreSet    // nil registers no store types
 	// Retention is the purge marker high-water shared by every snapshot of one gateway. Nil gives each snapshot its own.
 	Retention *cache.Retention
+	// FlowTrace, when non-nil, is called with the id of each request-flow step (see Flow) as a request enters it. Nil builds no recording wrapper.
+	FlowTrace func(step string)
 }
 
 // Snapshot is one built configuration generation: the parsed configuration, its router and upstreams, and the handler that serves requests with them.
@@ -52,6 +54,7 @@ type Snapshot struct {
 
 	handler     http.Handler
 	notFound    http.Handler
+	traceLinks  int // recording wrappers built for FlowTrace; zero without it
 	series      *Series
 	retryRoutes []string
 	rateLimits  []rateLimitRoute
@@ -89,6 +92,7 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 	if rnd == nil {
 		rnd = clock.NewRand(1)
 	}
+	tr := &tracer{record: d.FlowTrace}
 
 	mreg := d.Metrics
 	if mreg == nil {
@@ -208,13 +212,14 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 			RequestIDHeader: cfg.Global.RequestIDHeader,
 			Trusted:         trusted,
 		}
-		px := proxy.New(spec, up, proxy.Deps{Logger: logger, Attempts: series.Attempts, Clock: clk, Rand: rnd, HostBreakers: cb})
+		px := proxy.New(spec, up, proxy.Deps{Logger: logger, Attempts: series.Attempts, Clock: clk, Rand: rnd, HostBreakers: cb, FlowTrace: d.FlowTrace})
 		terminal := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			if in := reqctx.InfoFrom(req.Context()); in != nil {
 				in.Upstream = r.Upstream
 			}
 			px.ServeHTTP(w, req)
 		})
+		routeEnd := tr.handler(StepProxy, terminal)
 		stages := maps.Clone(named)
 		if t := middleware.Timeout(r.Timeout.Std(), clk); t != nil {
 			stages[middleware.StageTimeout] = t
@@ -268,8 +273,15 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 			})
 			retryRoutes = append(retryRoutes, name)
 		}
+		if tr.record != nil {
+			for _, name := range order {
+				if mw := stages[name]; mw != nil {
+					stages[name] = tr.wrap(stageID(name), mw)
+				}
+			}
+		}
 		h := middleware.Chain(
-			terminal,
+			routeEnd,
 			middleware.Pipeline(order, stages)...,
 		)
 		entries = append(entries, router.Entry{
@@ -348,16 +360,8 @@ func Build(cfg *config.Config, d Deps, tx *state.Tx) (*Snapshot, error) {
 		adminIDs:    adminIDs,
 		adminHashes: adminHashes,
 	}
-	root := []middleware.Middleware{
-		middleware.RequestID(cfg.Global.RequestIDHeader),
-		middleware.ClientIP(trusted),
-		observe,
-		middleware.Recover(logger),
-	}
-	if len(strip) > 0 {
-		root = append(root, auth.Strip(strip))
-	}
-	s.handler = middleware.Chain(http.HandlerFunc(s.dispatch), root...)
+	s.handler = chainEntry(s.entryTable(cfg.Global.RequestIDHeader, trusted, observe, logger, strip), tr)
+	s.traceLinks = tr.links
 	return s, nil
 }
 
@@ -384,16 +388,24 @@ func revealHeaders(m map[string]config.Secret) map[string]string {
 	return out
 }
 
-func (s *Snapshot) dispatch(w http.ResponseWriter, r *http.Request) {
-	p, err := reqpath.Canonicalize(r.URL)
-	if err != nil {
-		if in := reqctx.InfoFrom(r.Context()); in != nil {
-			in.Error = httperr.CodeInvalidPath
+// canonicalPath answers a request whose path does not canonicalize with 400 invalid_path; otherwise it serves next
+// with a copy of the request carrying the canonical path.
+func canonicalPath(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p, err := reqpath.Canonicalize(r.URL)
+		if err != nil {
+			if in := reqctx.InfoFrom(r.Context()); in != nil {
+				in.Error = httperr.CodeInvalidPath
+			}
+			httperr.Write(w, r, http.StatusBadRequest, httperr.CodeInvalidPath, httperr.Message(httperr.CodeInvalidPath))
+			return
 		}
-		httperr.Write(w, r, http.StatusBadRequest, httperr.CodeInvalidPath, httperr.Message(httperr.CodeInvalidPath))
-		return
-	}
-	r = withPath(r, p)
+		next.ServeHTTP(w, withPath(r, p))
+	})
+}
+
+// dispatch serves r with the handler of the route that matches it, or with the not-found handler. r already carries the canonical path.
+func (s *Snapshot) dispatch(w http.ResponseWriter, r *http.Request) {
 	v, params, ok := s.Router.Lookup(r)
 	if !ok {
 		s.notFound.ServeHTTP(w, r)

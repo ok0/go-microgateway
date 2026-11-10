@@ -21,6 +21,12 @@ import (
 	"github.com/ok0/go-microgateway/internal/upstream"
 )
 
+// Step ids that a proxy built with Deps.FlowTrace records for each upstream attempt.
+const (
+	StepLoadBalancer = "load_balancer" // immediately before each host pick
+	StepUpstream     = "upstream"      // immediately before each upstream round trip
+)
+
 // RouteSpec holds the path rewrite, header, host and forwarding settings applied to each request and response of a route.
 type RouteSpec struct {
 	Name            string
@@ -34,13 +40,14 @@ type RouteSpec struct {
 	Trusted         *reqctx.TrustedProxies
 }
 
-// Deps supplies the collaborators of a proxy handler. A nil Logger discards logs, and HostBreakers enables the per-host circuit breakers.
+// Deps supplies the collaborators of a proxy handler. A nil Logger discards logs, and HostBreakers enables the per-host circuit breakers. A non-nil FlowTrace is passed to the AttemptTransport as its Trace.
 type Deps struct {
 	Logger       *slog.Logger
 	Attempts     *metrics.CounterVec
 	Clock        clock.Clock
 	Rand         clock.Rand
 	HostBreakers bool
+	FlowTrace    func(step string) // nil records nothing; see AttemptTransport.Trace
 }
 
 // New returns the reverse-proxy handler of a route that forwards to up. Each request is rewritten according to spec, each upstream attempt goes through an AttemptTransport, and upstream errors are answered with the gateway error codes.
@@ -57,6 +64,7 @@ func New(spec RouteSpec, up *upstream.Upstream, deps Deps) http.Handler {
 			Clock:        deps.Clock,
 			Rand:         deps.Rand,
 			HostBreakers: deps.HostBreakers,
+			Trace:        deps.FlowTrace,
 		},
 		ModifyResponse: modifyResponse(spec),
 		ErrorHandler:   errorHandler(logger, up.Name),

@@ -797,8 +797,11 @@ func TestDepsFields(t *testing.T) {
 	for i := range typ.NumField() {
 		names = append(names, typ.Field(i).Name)
 	}
-	if want := []string{"Logger", "Attempts", "Clock", "Rand", "HostBreakers"}; !slices.Equal(names, want) {
+	if want := []string{"Logger", "Attempts", "Clock", "Rand", "HostBreakers", "FlowTrace"}; !slices.Equal(names, want) {
 		t.Errorf("Deps fields = %v, want %v", names, want)
+	}
+	if f, ok := typ.FieldByName("FlowTrace"); !ok || f.Type != reflect.TypeOf((func(string))(nil)) {
+		t.Errorf("Deps.FlowTrace type = %v, want func(string)", f.Type)
 	}
 	stage := reflect.TypeOf(BreakerStage)
 	if stage.NumIn() != 1 || stage.In(0) != reflect.TypeOf((*upstream.Upstream)(nil)) {

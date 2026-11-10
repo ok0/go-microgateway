@@ -46,6 +46,11 @@ type Resolver interface {
 // microgateway sets it when it is initialized; it is nil until then.
 var WithResolver func(r Resolver) any
 
+// WithFlowTrace returns a microgateway.Option, typed as any, that makes a gateway call record with the id of each
+// request-flow step as a request enters it, on the request goroutine and in execution order. Package microgateway
+// sets it when it is initialized; it is nil until then. A gateway built without it installs no recording wrapper.
+var WithFlowTrace func(record func(step string)) any
+
 // Stats is a view of a gateway's internal bookkeeping for tests.
 type Stats struct {
 	StateEntries                                  int     // entries in the state registry

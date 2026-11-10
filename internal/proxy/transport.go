@@ -34,13 +34,14 @@ const (
 	headerFired
 )
 
-// AttemptTransport is the http.RoundTripper of a proxied route. It acquires an upstream host for each request, makes the attempts that the route's retry policy allows, and records the outcome of every attempt. A nil Clock selects the real clock, and a nil Rand is replaced by a source with a fixed seed.
+// AttemptTransport is the http.RoundTripper of a proxied route. It acquires an upstream host for each request, makes the attempts that the route's retry policy allows, and records the outcome of every attempt. A nil Clock selects the real clock, and a nil Rand is replaced by a source with a fixed seed. A non-nil Trace is called on the request goroutine with StepLoadBalancer immediately before each host pick and with StepUpstream immediately before each upstream round trip; a nil Trace records nothing.
 type AttemptTransport struct {
 	Upstream     *upstream.Upstream
 	Attempts     *metrics.CounterVec
 	Clock        clock.Clock
 	Rand         clock.Rand
 	HostBreakers bool
+	Trace        func(step string)
 }
 
 // RoundTrip performs the request through the upstream host selected for it and retries as the retry settings in the request context allow. It returns the response or error of the final attempt.
@@ -50,6 +51,9 @@ func (t *AttemptTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		clk = clock.Real()
 	}
 	rr := retry.FromContext(req.Context())
+	if t.Trace != nil {
+		t.Trace(StepLoadBalancer)
+	}
 	h, tok, err := t.Upstream.Acquire(req, nil, t.HostBreakers)
 	if err != nil {
 		return nil, err
@@ -99,6 +103,9 @@ func (t *AttemptTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 			rr.Budget.Refund(slot)
 			discard(res.resp)
 			return nil, err
+		}
+		if t.Trace != nil {
+			t.Trace(StepLoadBalancer)
 		}
 		next, nextTok, err := t.Upstream.Acquire(req, tried, t.HostBreakers)
 		if err != nil {
@@ -194,6 +201,9 @@ func (t *AttemptTransport) attempt(req *http.Request, h *upstream.Host, tok brea
 	}
 
 	h.Begin()
+	if t.Trace != nil {
+		t.Trace(StepUpstream)
+	}
 	resp, err := t.Upstream.Transport.RoundTrip(out.WithContext(ctx))
 
 	mu.Lock()

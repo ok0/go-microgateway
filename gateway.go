@@ -68,6 +68,7 @@ type options struct {
 	fetcher      KeySetFetcher
 	httpClient   *http.Client
 	stores       []storeRegistration
+	flowTrace    func(step string)
 	err          error
 }
 
@@ -88,6 +89,9 @@ func init() {
 	}
 	hooks.WithResolver = func(r hooks.Resolver) any {
 		return withResolver(r)
+	}
+	hooks.WithFlowTrace = func(record func(step string)) any {
+		return Option(func(o *options) { o.flowTrace = record })
 	}
 	hooks.Inspect = func(gw any) hooks.Stats {
 		g := gw.(*Gateway)
@@ -212,7 +216,7 @@ func New(cfg *config.Config, opts ...Option) (*Gateway, error) {
 	}
 	g := &Gateway{
 		state:     state.NewRegistry(o.logger),
-		deps:      runtime.Deps{Logger: o.logger, Clock: o.clk, Rand: rnd, Metrics: mreg, Middlewares: reg, Dial: o.dial, Resolver: o.resolver, KeySetFetcher: fetcher, Stores: set, Retention: new(cache.Retention)},
+		deps:      runtime.Deps{Logger: o.logger, Clock: o.clk, Rand: rnd, Metrics: mreg, Middlewares: reg, Dial: o.dial, Resolver: o.resolver, KeySetFetcher: fetcher, Stores: set, Retention: new(cache.Retention), FlowTrace: o.flowTrace},
 		parts:     o.participants,
 		lookup:    o.lookup,
 		logger:    o.logger,
