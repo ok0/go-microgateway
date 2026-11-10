@@ -475,6 +475,8 @@ func TestChangelogFindings(t *testing.T) {
 		{"empty released section", fixture("\n### Added\n\n- Feature one.\n", ""), []string{"changelog-empty"}},
 		{"released section with only a subheading", fixture("- Feature one.\n", ""), []string{"changelog-empty"}},
 		{"repeated entry", fixture("- Hardened.", "- Feature two."), []string{"changelog-repeat"}},
+		{"breaking first", fixture("### Added\n\n- Feature two.", "### Breaking\n\n- Default changed.\n\n### Added\n\n- Feature two."), nil},
+		{"breaking after added", fixture("### Security\n\n- Hardened.", "### Security\n\n- Hardened.\n\n### Breaking\n\n- Default changed."), []string{"changelog-subheading"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

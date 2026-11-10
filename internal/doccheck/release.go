@@ -554,8 +554,8 @@ type ChangelogRelease struct {
 	Line    int
 }
 
-// changelogSubheadings are the level-3 headings a changelog section may have, in their required order.
-var changelogSubheadings = []string{"Added", "Changed", "Deprecated", "Removed", "Fixed", "Security"}
+// changelogSubheadings are the level-3 headings a changelog section may have, in their required order: Breaking (changes that need user action) first, then the Keep a Changelog types.
+var changelogSubheadings = []string{"Breaking", "Added", "Changed", "Deprecated", "Removed", "Fixed", "Security"}
 
 // changelogHeadingRE matches a released section heading [vX.Y.Z] - YYYY-MM-DD.
 var changelogHeadingRE = regexp.MustCompile(`^\[(v[^\]]+)\] - ([0-9]{4}-[0-9]{2}-[0-9]{2})$`)
