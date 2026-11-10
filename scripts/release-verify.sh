@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installs a published release with the command from README.md in a clean environment: an empty GOPATH, empty module and build caches,
 # GOFLAGS unset, GOWORK=off, outside the checkout. It checks that microgateway version prints the release version and that validate and
-# run accept examples/redis.yaml. It needs the network and is opt-in: set MICROGATEWAY_HEAVY=1. The run needs ports 8080 and 9901 free and
+# run accept examples/redis.yaml. It needs the network and is opt-in: set MICROGATEWAY_HEAVY=1. The run needs ports 8080, 9901 and 9902 free and
 # no Redis server, because connections are dialed on first use.
 set -eu
 

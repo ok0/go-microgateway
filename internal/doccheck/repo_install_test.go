@@ -266,16 +266,18 @@ func TestContributingReleasing(t *testing.T) {
 			items = append(items, line)
 		}
 	}
-	if len(items) != 6 {
-		t.Fatalf("Releasing has %d numbered steps, want 6", len(items))
+	if len(items) != 8 {
+		t.Fatalf("Releasing has %d numbered steps, want 8", len(items))
 	}
 	wants := [][]string{
 		{"make release-prepare VERSION=vX.Y.Z"},
-		{"make check", "make release-check VERSION=vX.Y.Z", "Unreleased", "commit"},
-		{"git tag vX.Y.Z", "git push"},
+		{"make check", "make workflow-lint", "make release-check VERSION=vX.Y.Z", "Unreleased", "commit"},
+		{"git tag vX.Y.Z", "git push", "release.yml", "ghcr.io/ok0/go-microgateway", "scripts/image-tags.sh", "linux/amd64", "linux/arm64"},
 		{"GOWORK=off go mod tidy", "redis/go.sum", "commit"},
 		{"git tag redis/vX.Y.Z", "git push"},
-		{"MICROGATEWAY_HEAVY=1", "make release-verify VERSION=vX.Y.Z"},
+		{"MICROGATEWAY_HEAVY=1", "make release-verify VERSION=vX.Y.Z", "9902"},
+		{"public", "private", "ghcr.io/ok0/go-microgateway"},
+		{"docker buildx imagetools inspect ghcr.io/ok0/go-microgateway:X.Y.Z", "linux/amd64", "linux/arm64", "version", "65532:65532", "non-root"},
 	}
 	for i, item := range items {
 		step := i + 1
@@ -325,6 +327,11 @@ func TestContributingReleasing(t *testing.T) {
 	for _, want := range []string{"`vX.Y.Z`", "`redis/vX.Y.Z`"} {
 		if !strings.Contains(row, want) {
 			t.Errorf("row 12 of Release verification lacks %s: %q", want, row)
+		}
+	}
+	for _, want := range []string{"make workflow-lint", "docker buildx imagetools inspect ghcr.io/ok0/go-microgateway:<version>", "linux/amd64", "linux/arm64", "65532:65532", "public"} {
+		if !strings.Contains(verification, want) {
+			t.Errorf("Release verification lacks %q", want)
 		}
 	}
 }

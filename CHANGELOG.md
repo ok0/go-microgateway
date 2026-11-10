@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 - `make reload-load` (opt-in with `MICROGATEWAY_HEAVY=1`) runs gateways from `bin/microgateway` and in-process gateways under a paced loopback load. It reloads them through the file watcher, SIGHUP and the Go API, and checks graceful shutdown under load. It prints `PASS` only with zero failed requests, every reload effective within 2 s, exact reload counters and the same outcome on every path.
 - `admin.probes.enabled` (default `true`), `admin.probes.address` (default `:9902`) and `admin.probes.metrics` (default `false`) configure the probe endpoint, and `admin.auth.management` (`auto`, `required` or `none`, default `auto`) selects when the management endpoints need a token. `Gateway.ProbeHandler` serves `/livez` and `/readyz`, and `/metrics` when `admin.probes.metrics` is `true`, without a token. The Go API adds `config.AdminProbes`, `config.Admin.Probes`, `config.AdminAuth.Management`, `config.IsLoopbackAddress` and `(*config.Admin).ManagementAuthRequired`.
+- Pushing a core tag `vX.Y.Z` publishes the container image `ghcr.io/ok0/go-microgateway` for `linux/amd64` and `linux/arm64` in one manifest, tagged `X.Y.Z`, `X.Y` and `latest` (a prerelease gets only its full version). After the push, the release workflow checks both platforms, the version and the non-root user. `make workflow-lint` runs actionlint over the workflows.
+
+### Changed
+
+- The container image runs as the numeric user `65532:65532` (was `nonroot`) and exposes `8080` and the probe port `9902` (was `9901`). The management port stays on loopback and is not exposed. The Dockerfile cross-compiles on the build platform.
 
 ## [v0.1.1] - 2026-11-09
 

@@ -8,6 +8,7 @@ This guide describes how to build, test and check changes to go-microgateway, an
 - Docker, optional. It is needed only for `make docker`.
 - Redis 6.2 or later, optional. It is needed only for the Redis integration tests, which CI runs on Redis 6.2 and 7.4.
 - golangci-lint v2.14.0, for `make lint`.
+- The network, for `make workflow-lint`. It runs the pinned actionlint with `go run`, so nothing is added to a `go.mod`.
 
 ## Building and testing
 
@@ -22,6 +23,7 @@ The Makefile wraps the common commands:
 - `make cover` runs the tests with coverage and enforces the coverage gate.
 - `make cover-ci` runs `make cover` with verbose redis tests and keeps the log in `bin/cover/cover.log`; `make cover-times` then lists its slowest tests. CI's coverage job uses them.
 - `make lint` runs golangci-lint v2.14.0 in both modules.
+- `make workflow-lint` runs actionlint over every workflow in `.github/workflows/`. It is not part of `make check`; CI runs it in the `actionlint` job.
 - `make tidy-check` checks that `go mod tidy` changes nothing in either module; see [Command modes](#command-modes) for the Redis module.
 - `make hygiene` runs the repository hygiene checks, which include the copied-source check.
 - `make check` runs `vet`, `cover`, `lint`, `tidy-check` and `hygiene`.
@@ -104,10 +106,12 @@ Run these checks before a release. The heavy checks are not part of `make check`
 | 7. Real Redis | `make integration` with `MICROGATEWAY_HEAVY=1 MICROGATEWAY_REDIS_ADDR=<host:port>`; `go test -race -count=5 -tags integration ./...` in `redis` | Redis 6.2 or later, empty database such as 15 | `TestIntegrationSuite` and `TestIntegrationTwoInstances` pass; cluster and Sentinel runs pass with `MICROGATEWAY_REDIS_CLUSTER` and `MICROGATEWAY_REDIS_SENTINEL` set | Yes |
 | 8. Diagrams | Render the nine Mermaid diagrams in the README and the guides | A GitHub-compatible Mermaid renderer | Every diagram renders without a syntax error | Yes (manual) |
 | 9. Real network | `make realnet`, and `GOWORK=off go test -race -count=5 -tags realnet ./internal/e2e ./internal/cli`, and `-run TestConnectTimeoutRealClockTCP` | Local machine with the VPN off and a non-loopback IPv4 interface address | Every command passes | Yes |
-| 10. Container | `make docker`, then `docker run --rm microgateway:<version> version`, then a run with a mounted configuration | Docker | The version output matches `bin/microgateway version`, and the process runs as a non-root user | Yes |
+| 10. Container | `make docker`, then `docker run --rm microgateway:<version> version`, then a run with a mounted configuration | Docker | The version output matches `bin/microgateway version`, and the process runs as the non-root user `65532:65532` | Yes |
 | 11. Lint and toolchain | `make lint` with golangci-lint v2.14.0 in both modules; build and test with a Go 1.27 toolchain | Go 1.27 toolchain | Every command passes | No |
 | 12. Release | The steps in [Releasing](#releasing), after all checks pass | Repository owner | The core tag `vX.Y.Z`, then a commit with the core's lines in `redis/go.sum`, then the tag `redis/vX.Y.Z`, all pushed | No |
 | 13. Hot reload under load | `make reload-load` with `MICROGATEWAY_HEAVY=1` | Local machine | `PASS` with zero failed requests and every reload latency at most 2 s, for the file watch, SIGHUP and API drivers and the shutdown under load | Yes |
+| 14. Workflow lint | `make workflow-lint` | Go 1.27 and the network | actionlint reports no problem in any workflow | No |
+| 15. Published image | After the core tag is pushed and its release workflow succeeded: `docker buildx imagetools inspect ghcr.io/ok0/go-microgateway:<version>`, `docker run --rm ghcr.io/ok0/go-microgateway:<version> version` and `docker image inspect --format '{{.Config.User}}' ghcr.io/ok0/go-microgateway:<version>`, where `<version>` is `X.Y.Z` without the `v` | Docker; the package is public (see [Releasing](#releasing)) | The manifest lists `linux/amd64` and `linux/arm64`, `version` prints `vX.Y.Z`, and the user is `65532:65532`, so the image runs as non-root | Yes (manual) |
 
 Each check names whether it is heavy. Checks marked heavy need the environment they name and are not run in continuous integration.
 
@@ -115,13 +119,15 @@ Each check names whether it is heavy. Checks marked heavy need the environment t
 
 The core module and the Redis module are released together with one version number. Release `vX.Y.Z` is the tag `vX.Y.Z` for the core module and the tag `redis/vX.Y.Z` for the Redis module, and `redis/go.mod` at `redis/vX.Y.Z` requires the core at `vX.Y.Z`. The first release is `v0.1.0`. No `replace` directive is ever committed.
 
-Steps 3 to 6 are user steps for the repository owner. Automated agents never tag, push or add remotes.
+Steps 3 to 8 are user steps for the repository owner. Automated agents never tag, push or add remotes.
 
 1. Run `make release-prepare VERSION=vX.Y.Z`. It sets the core version that `redis/go.mod` requires and the core version that `go.work` replaces to `vX.Y.Z`, together and offline, and creates no tag.
-2. Move the `Unreleased` entries of `CHANGELOG.md` under a new `## [vX.Y.Z] - YYYY-MM-DD` heading and leave an empty `## [Unreleased]` heading above it. Run `make check` and `make release-check VERSION=vX.Y.Z`, then commit.
-3. User step: tag that commit for the core and push the tag with `git tag vX.Y.Z` and `git push origin vX.Y.Z`.
+2. Move the `Unreleased` entries of `CHANGELOG.md` under a new `## [vX.Y.Z] - YYYY-MM-DD` heading and leave an empty `## [Unreleased]` heading above it. Run `make check`, `make workflow-lint` and `make release-check VERSION=vX.Y.Z`, then commit.
+3. User step: tag that commit for the core and push the tag with `git tag vX.Y.Z` and `git push origin vX.Y.Z`. Pushing the core tag starts the release workflow `.github/workflows/release.yml`. It builds the image for `linux/amd64` and `linux/arm64` and publishes one manifest to `ghcr.io/ok0/go-microgateway`, tagged with the lines that `sh scripts/image-tags.sh vX.Y.Z` prints: `X.Y.Z`, `X.Y` and `latest` (a prerelease gets only its full version). It fails unless the published manifest lists both platforms and each platform's image runs as `65532:65532` and prints `vX.Y.Z`. It uses only the workflow's own token.
 4. User step: in `redis/`, run `GOWORK=off go mod tidy`, which resolves the published core and adds its lines to `redis/go.sum`, and commit.
 5. User step: tag that commit for the Redis module and push it with the branch with `git tag redis/vX.Y.Z` and `git push origin main redis/vX.Y.Z`.
-6. User step: run `MICROGATEWAY_HEAVY=1 make release-verify VERSION=vX.Y.Z`. It needs the network and free ports 8080 and 9901. It installs with the README command from an empty `GOPATH` and module cache outside the checkout, checks that `microgateway version` prints `vX.Y.Z`, and validates and runs `examples/redis.yaml`.
+6. User step: run `MICROGATEWAY_HEAVY=1 make release-verify VERSION=vX.Y.Z`. It needs the network and free ports 8080, 9901 and 9902. It installs with the README command from an empty `GOPATH` and module cache outside the checkout, checks that `microgateway version` prints `vX.Y.Z`, and validates and runs `examples/redis.yaml`.
+7. User step, once, after the first image is published: make the package public. New GitHub packages are private, so anonymous pulls of `ghcr.io/ok0/go-microgateway` fail until then. In the package settings, change the visibility to public; this cannot be undone.
+8. User step: check the published image (check 15 of [Release verification](#release-verification)). `docker buildx imagetools inspect ghcr.io/ok0/go-microgateway:X.Y.Z` lists `linux/amd64` and `linux/arm64`. `docker run --rm ghcr.io/ok0/go-microgateway:X.Y.Z version` prints `vX.Y.Z`. `docker image inspect --format '{{.Config.User}}' ghcr.io/ok0/go-microgateway:X.Y.Z` prints `65532:65532`, so the image runs as non-root.
 
 The core is tagged first because `redis/go.sum` must record the hash of the published core, which exists only once the core tag is pushed. Between steps 1 and 4, `redis/go.sum` lacks the core's lines; workspace builds do not need them. `make release-check` is read-only and offline: it checks the versions in `redis/go.mod` and `go.work`, the module layout, the pairing of the core and Redis tags, the README install command, and the CHANGELOG: its section order and format, a section for every core tag, and a section for `vX.Y.Z`. `make check` does not need the new section, so it also passes right after step 1.
