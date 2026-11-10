@@ -1,0 +1,210 @@
+---
+# Source: microgateway/templates/pdb.yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: gw-microgateway
+  labels:
+    app.kubernetes.io/name: microgateway
+    app.kubernetes.io/instance: gw
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: microgateway-0.2.0
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: microgateway
+      app.kubernetes.io/instance: gw
+---
+# Source: microgateway/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gw-microgateway
+  labels:
+    app.kubernetes.io/name: microgateway
+    app.kubernetes.io/instance: gw
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: microgateway-0.2.0
+data:
+  config.yaml: |
+    admin:
+      address: 127.0.0.1:9901
+      probes:
+        address: :9902
+        enabled: true
+        metrics: false
+    cache:
+      store: shared
+    global:
+      drain_timeout: 20s
+      shutdown_delay: 10s
+    listeners:
+    - address: :8080
+      name: http
+    routes:
+    - match:
+        path: /api/
+      name: api
+      rate_limit:
+        burst: 100
+        on_store_error: local
+        per: 1s
+        rate: 100
+        store: shared
+      upstream: api
+    stores:
+    - name: shared
+      redis:
+        addresses:
+        - redis.data.svc.cluster.local:6379
+        key_prefix: microgateway
+        mode: standalone
+        password: ${REDIS_PASSWORD}
+      type: redis
+    upstreams:
+    - hosts:
+      - url: http://api.default.svc.cluster.local:8080
+      name: api
+    version: 1
+---
+# Source: microgateway/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: gw-microgateway
+  labels:
+    app.kubernetes.io/name: microgateway
+    app.kubernetes.io/instance: gw
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: microgateway-0.2.0
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: microgateway
+    app.kubernetes.io/instance: gw
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+---
+# Source: microgateway/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gw-microgateway
+  labels:
+    app.kubernetes.io/name: microgateway
+    app.kubernetes.io/instance: gw
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: microgateway-0.2.0
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: microgateway
+      app.kubernetes.io/instance: gw
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: microgateway
+        app.kubernetes.io/instance: gw
+        app.kubernetes.io/version: "0.2.0"
+        app.kubernetes.io/managed-by: Helm
+        helm.sh/chart: microgateway-0.2.0
+    spec:
+      terminationGracePeriodSeconds: 40
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: microgateway
+              app.kubernetes.io/instance: gw
+      containers:
+        - name: microgateway
+          image: "ghcr.io/ok0/go-microgateway:0.2.0"
+          imagePullPolicy: IfNotPresent
+          args: ["run", "-config", "/etc/microgateway/config.yaml"]
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: probe
+              containerPort: 9902
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: probe
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probe
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            limits:
+              memory: 256Mi
+            requests:
+              cpu: 100m
+              memory: 64Mi
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: "microgateway-redis"
+                  key: "password"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/microgateway
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: gw-microgateway
+---
+# Source: microgateway/templates/hpa.yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gw-microgateway
+  labels:
+    app.kubernetes.io/name: microgateway
+    app.kubernetes.io/instance: gw
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: microgateway-0.2.0
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: gw-microgateway
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
