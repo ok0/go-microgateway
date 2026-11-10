@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -93,6 +94,7 @@ type rig struct {
 	src       *fakeSource
 	cfg       string
 	poll      time.Duration
+	pollOnly  bool
 	logger    *slog.Logger
 	newEvents func() (eventSource, error)
 	paths     func() []string
@@ -170,6 +172,7 @@ func (r *rig) start() {
 		Logger:       r.logger,
 		Apply:        r.apply,
 		Fatal:        r.fatal,
+		PollOnly:     r.pollOnly,
 		newEvents:    r.newEvents,
 	})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -549,6 +552,84 @@ func TestEventsUnavailable(t *testing.T) {
 		r.expectContent("bb")
 		r.finish()
 	})
+}
+
+func TestPollOnly(t *testing.T) {
+	for _, pollOnly := range []bool{true, false} {
+		t.Run(fmt.Sprintf("poll_only=%v", pollOnly), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				dir := t.TempDir()
+				cfg := filepath.Join(dir, "config.yaml")
+				writeFile(t, cfg, "a")
+				r := newRig(t, cfg)
+				logs := &lockedBuffer{}
+				r.logger = slog.New(slog.NewJSONHandler(logs, nil))
+				var calls atomic.Int32
+				r.newEvents = func() (eventSource, error) {
+					calls.Add(1)
+					return r.src, nil
+				}
+				r.poll = 5 * time.Second
+				r.pollOnly = pollOnly
+				r.start()
+				r.expectAttempts(1)
+
+				if pollOnly {
+					if n := calls.Load(); n != 0 {
+						t.Errorf("newEvents called %d times with PollOnly, want 0", n)
+					}
+					if n := len(r.src.watchedDirs()); n != 0 {
+						t.Errorf("watched dirs = %v with PollOnly, want none", r.src.watchedDirs())
+					}
+					const msg = "file events disabled; polling only"
+					if n := strings.Count(logs.String(), msg); n != 1 {
+						t.Errorf("log lines with %q = %d, want 1", msg, n)
+					}
+					for _, l := range strings.Split(logs.String(), "\n") {
+						if strings.Contains(l, msg) && !strings.Contains(l, `"level":"INFO"`) {
+							t.Errorf("log line %q is not at INFO level", l)
+						}
+					}
+					if strings.Contains(logs.String(), "file events unavailable") {
+						t.Error("log output contains the unavailable warning with PollOnly")
+					}
+					writeFile(t, cfg, "bb")
+					r.event(cfg, fsnotify.Write)
+					r.advance(debounce)
+					r.expectAttempts(1)
+					r.advance(5*time.Second - debounce)
+					r.expectAttempts(1)
+					r.advance(debounce)
+					r.expectAttempts(2)
+					r.expectContent("bb")
+					r.finish()
+					if r.src.isClosed() {
+						t.Error("event source was closed with PollOnly, want it never opened")
+					}
+					return
+				}
+
+				if n := calls.Load(); n != 1 {
+					t.Errorf("newEvents called %d times, want 1", n)
+				}
+				if !slices.Contains(r.src.watchedDirs(), dir) {
+					t.Errorf("watched dirs = %v, want to contain %s", r.src.watchedDirs(), dir)
+				}
+				if strings.Contains(logs.String(), "file events disabled") {
+					t.Error("log output contains the polling-only-by-option message without PollOnly")
+				}
+				writeFile(t, cfg, "bb")
+				r.event(cfg, fsnotify.Write)
+				r.advance(debounce)
+				r.expectAttempts(2)
+				r.expectContent("bb")
+				r.finish()
+				if !r.src.isClosed() {
+					t.Error("event source was not closed")
+				}
+			})
+		})
+	}
 }
 
 func TestCancel(t *testing.T) {

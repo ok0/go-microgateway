@@ -28,6 +28,7 @@ type Options struct {
 	Logger       *slog.Logger                // nil → discard
 	Apply        func() error                // one reload attempt
 	Fatal        func(error) bool            // optional; Run returns an Apply error for which it reports true
+	PollOnly     bool                        // true: no file-event source is opened; changes are detected by polling alone (tests)
 	newEvents    func() (eventSource, error) // test hook; nil → newFSEvents
 }
 
@@ -90,7 +91,9 @@ func (w *Watcher) Run(ctx context.Context) error {
 	}
 
 	var src eventSource
-	if es, err := o.newEvents(); err != nil {
+	if o.PollOnly {
+		o.Logger.Info("file events disabled; polling only", "poll_interval", o.PollInterval)
+	} else if es, err := o.newEvents(); err != nil {
 		o.Logger.Warn("file events unavailable; polling only", "error", err, "poll_interval", o.PollInterval)
 	} else {
 		src = es
