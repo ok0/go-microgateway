@@ -18,7 +18,7 @@ import (
 	"github.com/ok0/go-microgateway/internal/runtime"
 )
 
-var docsFiles = []string{"architecture.md", "configuration.md", "middleware.md", "operations.md", "multi-instance.md", "caching.md", "embedding.md"}
+var docsFiles = []string{"architecture.md", "configuration.md", "middleware.md", "operations.md", "multi-instance.md", "caching.md", "embedding.md", "kubernetes.md"}
 
 var readmeTopics = []string{"api-gateway", "microgateway", "golang", "reverse-proxy", "rate-limiting", "circuit-breaker", "http-cache", "redis", "load-balancer"}
 

@@ -133,6 +133,7 @@ The core has no Redis client. Only the `redis` module imports `github.com/redis/
 - [Multi-instance deployment](docs/multi-instance.md): running several replicas, shared and per-instance state, and Redis operations.
 - [Embedding](docs/embedding.md): using the gateway from Go, mounting it in `net/http`, custom middleware and custom stores.
 - [Operations](docs/operations.md): the binary's commands and signals, the admin endpoint, metrics, logs and errors.
+- [Kubernetes](docs/kubernetes.md): the Helm chart, its values, Redis wiring, probes, shutdown timing and configuration updates.
 - [Examples](examples/): runnable configurations and the embedding program.
 - [Contributing](CONTRIBUTING.md) (including the [release verification checklist](CONTRIBUTING.md#release-verification) and [releasing](CONTRIBUTING.md#releasing)): building, testing and the rules for changes.
 - [Security policy](SECURITY.md): supported versions and how to report a vulnerability.

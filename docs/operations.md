@@ -43,7 +43,7 @@ Exit statuses: `0` on success, `1` when the configuration is invalid, a listener
 
 ### Shutdown timing
 
-- Keep `shutdown_delay + drain_timeout + margin <= terminationGracePeriodSeconds`, with a margin of at least 5 s for closing the gateway and the process exit. The defaults, 5 s + 20 s + 5 s, add up to 30 s, the Kubernetes default. Raise `terminationGracePeriodSeconds` when you raise either value.
+- Keep `shutdown_delay + drain_timeout + margin <= terminationGracePeriodSeconds`, with a margin of at least 5 s for closing the gateway and the process exit. The defaults, 5 s + 20 s + 5 s, add up to 30 s, the Kubernetes default. Raise `terminationGracePeriodSeconds` when you raise either value. The Helm chart sets and checks these values; see the [Kubernetes guide](kubernetes.md#shutdown-timing).
 - During the delay `/readyz` returns `503` and requests are still served.
 - During the shutdown delay and the drain `/readyz` returns `503` on the probe listener, and `/livez` keeps returning `200`.
 - Each instance applies its own delay and drain when it receives the signal. Instances do not coordinate, and no shared store is used.
@@ -120,7 +120,7 @@ The binary binds two listeners besides the data listeners, each per instance: th
 
 The admin endpoint is a separate listener. Its address is `admin.address` (default `127.0.0.1:9901`). Set `admin.enabled: false` to run without it. The data listeners never serve admin paths. A non-loopback `admin.address` needs at least one `admin.auth.keys` entry, and `/config`, `/upstreams` and `/metrics` on it then need a bearer token; see `admin.auth.management` in the [configuration reference](configuration.md#admin). `admin.auth.management` selects one of three modes: `auto` (the default) needs a token only on a non-loopback address, `required` always needs one, and `none` never does and logs a warning on a non-loopback address.
 
-In Kubernetes, reach the loopback management port with `kubectl port-forward pod/<pod> 9901:9901`, then `curl http://127.0.0.1:9901/config`; the port-forward connects to the pod's loopback interface.
+In Kubernetes, reach the loopback management port with `kubectl port-forward pod/<pod> 9901:9901`, then `curl http://127.0.0.1:9901/config`; the port-forward connects to the pod's loopback interface. The [Kubernetes guide](kubernetes.md) covers the chart's probe and management ports.
 
 ```
 kubectl port-forward pod/<pod> 9901:9901
