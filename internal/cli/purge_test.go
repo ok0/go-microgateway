@@ -60,6 +60,8 @@ routes:
       enabled: true
 admin:
   address: "127.0.0.1:0"
+  probes:
+    address: "127.0.0.1:0"
   auth:
     keys:
       - id: cli
@@ -153,6 +155,8 @@ routes:
     upstream: users
 admin:
   address: "127.0.0.1:0"
+  probes:
+    address: "127.0.0.1:0"
   auth:
     keys:
       - id: cli

@@ -1,4 +1,4 @@
-// Package server binds the gateway and admin listeners, terminates TLS, and drains connections on shutdown.
+// Package server binds the gateway, admin and probe listeners, terminates TLS, and drains connections on shutdown.
 package server
 
 import (
@@ -72,13 +72,14 @@ func (f *inflight) wait(ctx context.Context) bool {
 	}
 }
 
-// Server serves a data handler on every configured listener and, when enabled, an admin handler on the admin listener.
+// Server serves a data handler on every configured listener and, when enabled, an admin handler on the admin listener and a probe handler on the probe listener.
 type Server struct {
 	cfg       *config.Config
 	logger    *slog.Logger
 	ready     func(bool)
 	data      []*listener
 	admin     *listener
+	probe     *listener
 	base      context.Context
 	cancel    context.CancelFunc
 	active    inflight
@@ -86,6 +87,7 @@ type Server struct {
 	mu        sync.Mutex
 	addrs     map[string]net.Addr
 	adminAddr net.Addr
+	probeAddr net.Addr
 	clk       clock.Clock
 	hsHook    func(record func())
 	// listen binds a listener; tests replace it to serve on in-memory listeners.
@@ -122,9 +124,11 @@ func withHandshakeHook(h func(record func())) Option {
 }
 
 // New prepares a server for every listener in cfg. The data handler h serves the listeners and the admin handler
-// serves the admin listener when it is enabled in cfg. ready is called with false when shutdown begins. A nil
+// serves the admin listener when it is enabled in cfg. The probe handler serves the probe listener on cfg.Admin.Probes.Address
+// when probes are enabled in cfg, whether or not the admin listener is enabled. It is plain HTTP/1.1 with the admin
+// listener's limits and needs no credential. ready is called with false when shutdown begins. A nil
 // logger discards log output and a nil ready callback does nothing.
-func New(cfg *config.Config, h http.Handler, admin http.Handler, ready func(bool), logger *slog.Logger, opts ...Option) (*Server, error) {
+func New(cfg *config.Config, h http.Handler, admin http.Handler, probe http.Handler, ready func(bool), logger *slog.Logger, opts ...Option) (*Server, error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -230,8 +234,29 @@ func New(cfg *config.Config, h http.Handler, admin http.Handler, ready func(bool
 			lim: connLimits{header: adminHeaderLimit, idle: adminIdleLimit},
 		}
 	}
+	if probe != nil && (cfg.Admin.Probes.Enabled == nil || *cfg.Admin.Probes.Enabled) {
+		p := new(http.Protocols)
+		p.SetHTTP1(true)
+		s.probe = &listener{
+			name:    "probe",
+			address: cfg.Admin.Probes.Address,
+			srv: &http.Server{
+				Handler:           probe,
+				ReadHeaderTimeout: adminHeaderLimit,
+				IdleTimeout:       adminIdleLimit,
+				BaseContext:       func(net.Listener) context.Context { return context.Background() },
+				ConnState:         trackConnState,
+				ErrorLog:          errLog,
+				Protocols:         p,
+			},
+			lim: connLimits{header: adminHeaderLimit, idle: adminIdleLimit},
+		}
+	}
 	n := len(s.data)
 	if s.admin != nil {
+		n++
+	}
+	if s.probe != nil {
 		n++
 	}
 	s.errc = make(chan error, n)
@@ -247,15 +272,18 @@ func (s *Server) track(h http.Handler) http.Handler {
 }
 
 func (s *Server) listeners() []*listener {
-	all := make([]*listener, 0, len(s.data)+1)
+	all := make([]*listener, 0, len(s.data)+2)
 	all = append(all, s.data...)
 	if s.admin != nil {
 		all = append(all, s.admin)
 	}
+	if s.probe != nil {
+		all = append(all, s.probe)
+	}
 	return all
 }
 
-// Start binds every listener and begins serving. If any listener cannot be bound, the ones already
+// Start binds every listener (data, admin, probe) and begins serving. If any listener cannot be bound, the ones already
 // bound are closed and an error is returned.
 func (s *Server) Start() error {
 	all := s.listeners()
@@ -288,6 +316,9 @@ func (s *Server) Start() error {
 	if s.admin != nil {
 		s.adminAddr = s.admin.ln.Addr()
 	}
+	if s.probe != nil {
+		s.probeAddr = s.probe.ln.Addr()
+	}
 	s.mu.Unlock()
 	for _, l := range all {
 		go func(l *listener) {
@@ -318,6 +349,13 @@ func (s *Server) AdminAddr() net.Addr {
 	return s.adminAddr
 }
 
+// ProbeAddr returns the bound address of the probe listener, or nil when there is no probe listener.
+func (s *Server) ProbeAddr() net.Addr {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.probeAddr
+}
+
 // Errors returns a channel that receives an error when a listener stops serving unexpectedly.
 func (s *Server) Errors() <-chan error {
 	return s.errc
@@ -325,7 +363,8 @@ func (s *Server) Errors() <-chan error {
 
 // Shutdown stops accepting new connections, waits for in-flight requests until the drain timeout elapses or ctx is
 // done, and then closes any connections that remain open, including hijacked and upgraded ones. It returns
-// ErrForcedClose when connections had to be closed forcibly.
+// ErrForcedClose when connections had to be closed forcibly. The admin and probe listeners keep serving until the
+// data listeners have drained, then close.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.ready(false)
 	s.mu.Lock()
@@ -360,6 +399,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	if s.admin != nil {
 		_ = s.admin.srv.Close()
+	}
+	// The probe listener closes last, so /readyz answers 503 through the delay and the drain; it is never drained and does not extend the drain.
+	if s.probe != nil {
+		_ = s.probe.srv.Close()
 	}
 	s.cancel()
 	cancel()

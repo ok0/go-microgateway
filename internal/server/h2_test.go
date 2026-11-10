@@ -33,7 +33,7 @@ func pkgOf(w any) string {
 // startServerLogged starts a server on fake whose log output goes to logs.
 func startServerLogged(t *testing.T, cfg *config.Config, logs io.Writer, fake *clock.Fake) *Server {
 	t.Helper()
-	srv, err := New(cfg, okHandler(), okHandler(), nil, slog.New(slog.NewTextHandler(logs, nil)), WithClock(fake))
+	srv, err := New(cfg, okHandler(), okHandler(), nil, nil, slog.New(slog.NewTextHandler(logs, nil)), WithClock(fake))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestHTTP2ServedByNetHTTP(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				m := newMemNet(64 << 10)
 				t.Cleanup(m.close)
-				srv, err := New(w.config(t), okHandler(), nil, nil, nil, WithClock(clock.NewFake(serverStart)))
+				srv, err := New(w.config(t), okHandler(), nil, nil, nil, nil, WithClock(clock.NewFake(serverStart)))
 				if err != nil {
 					t.Fatal(err)
 				}

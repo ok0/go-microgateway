@@ -111,7 +111,7 @@ func fetch(client *http.Client, url string) (*http.Response, string, error) {
 
 func startServer(t *testing.T, cfg *config.Config, h, admin http.Handler, ready func(bool), opts ...Option) *Server {
 	t.Helper()
-	srv, err := New(cfg, h, admin, ready, nil, append([]Option{WithClock(clock.NewFake(serverStart))}, opts...)...)
+	srv, err := New(cfg, h, admin, nil, ready, nil, append([]Option{WithClock(clock.NewFake(serverStart))}, opts...)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestServeAndShutdown(t *testing.T) {
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "ok")
 	})
-	srv, err := New(cfg, h, nil, nil, nil, WithClock(clock.NewFake(serverStart)))
+	srv, err := New(cfg, h, nil, nil, nil, nil, WithClock(clock.NewFake(serverStart)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestListenerSettings(t *testing.T) {
 		l.IdleTimeout = config.Duration(6 * time.Second)
 		l.MaxHeaderBytes = 4096
 	})
-	srv, err := New(cfg, http.NotFoundHandler(), nil, nil, nil, WithClock(clock.NewFake(serverStart)))
+	srv, err := New(cfg, http.NotFoundHandler(), nil, nil, nil, nil, WithClock(clock.NewFake(serverStart)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +321,7 @@ func TestBadCertPath(t *testing.T) {
 			KeyFile:  filepath.Join(t.TempDir(), "missing.key"),
 		}
 	})
-	_, err := New(cfg, http.NotFoundHandler(), nil, nil, nil, WithClock(clock.NewFake(serverStart)))
+	_, err := New(cfg, http.NotFoundHandler(), nil, nil, nil, nil, WithClock(clock.NewFake(serverStart)))
 	if err == nil {
 		t.Fatal("New returned nil error, want certificate load error")
 	}
@@ -343,7 +343,7 @@ func TestStartBindError(t *testing.T) {
 			{Name: "b", Address: taken.Addr().String()},
 		}
 	})
-	srv, err := New(cfg, http.NotFoundHandler(), nil, nil, nil, WithClock(clock.NewFake(serverStart)))
+	srv, err := New(cfg, http.NotFoundHandler(), nil, nil, nil, nil, WithClock(clock.NewFake(serverStart)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -544,7 +544,7 @@ func TestShutdownForced(t *testing.T) {
 func TestNewRequiresShutdownDelay(t *testing.T) {
 	cfg := testConfig(t, nil)
 	cfg.Global.ShutdownDelay = nil
-	_, err := New(cfg, okHandler(), okHandler(), nil, nil)
+	_, err := New(cfg, okHandler(), okHandler(), nil, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "shutdown_delay") {
 		t.Fatalf("New error = %v, want error naming shutdown_delay", err)
 	}
@@ -592,7 +592,7 @@ func TestShutdownForcedClosesBeforeCancel(t *testing.T) {
 		entered <- struct{}{}
 		<-r.Context().Done()
 	})
-	srv, err := New(cfg, h, nil, nil, nil, WithClock(clock.NewFake(serverStart)))
+	srv, err := New(cfg, h, nil, nil, nil, nil, WithClock(clock.NewFake(serverStart)))
 	if err != nil {
 		t.Fatal(err)
 	}

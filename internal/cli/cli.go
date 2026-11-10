@@ -73,6 +73,7 @@ commands:
 type Addrs struct {
 	Listeners map[string]net.Addr
 	Admin     net.Addr
+	Probe     net.Addr // Probe is the bound probe listener address, or nil when admin.probes.enabled is false.
 }
 
 // Env is the process environment of one invocation.
@@ -243,7 +244,7 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, look
 	if cfg.Admin.Enabled == nil || *cfg.Admin.Enabled {
 		admin = g.AdminHandler()
 	}
-	srv, err := server.New(cfg, g, admin, g.SetReady, logger, server.WithCertificates(certs), server.WithClock(clk))
+	srv, err := server.New(cfg, g, admin, g.ProbeHandler(), g.SetReady, logger, server.WithCertificates(certs), server.WithClock(clk))
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "microgateway run: %v\n", err)
 		_ = g.Close()
@@ -271,8 +272,16 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, look
 	if a := srv.AdminAddr(); a != nil {
 		logger.Info("listening", "listener", "admin", "address", a.String())
 	}
+	if p := srv.ProbeAddr(); p != nil {
+		logger.Info("listening", "listener", "probe", "address", p.String())
+		if cfg.Admin.Probes.Metrics != nil && *cfg.Admin.Probes.Metrics {
+			logger.Info("probe listener is unauthenticated and serves /livez, /readyz and /metrics", "address", p.String())
+		} else {
+			logger.Info("probe listener is unauthenticated and serves only /livez and /readyz", "address", p.String())
+		}
+	}
 	if ready != nil {
-		ready(Addrs{Listeners: addrs, Admin: srv.AdminAddr()})
+		ready(Addrs{Listeners: addrs, Admin: srv.AdminAddr(), Probe: srv.ProbeAddr()})
 	}
 
 	w := reload.New(reload.Options{
@@ -434,6 +443,12 @@ func restartRequired(old, cur *config.Config) []string {
 	if old.Admin.Address != cur.Admin.Address {
 		out = append(out, "admin.address")
 	}
+	if probesEnabled(old) != probesEnabled(cur) {
+		out = append(out, "admin.probes.enabled")
+	}
+	if old.Admin.Probes.Address != cur.Admin.Probes.Address {
+		out = append(out, "admin.probes.address")
+	}
 	if old.Global.Log.Level != cur.Global.Log.Level {
 		out = append(out, "global.log.level")
 	}
@@ -467,6 +482,10 @@ func listenerHTTP2(l config.Listener) bool {
 
 func adminEnabled(c *config.Config) bool {
 	return c.Admin.Enabled == nil || *c.Admin.Enabled
+}
+
+func probesEnabled(c *config.Config) bool {
+	return c.Admin.Probes.Enabled == nil || *c.Admin.Probes.Enabled
 }
 
 func newLogger(w io.Writer, l config.Log) *slog.Logger {

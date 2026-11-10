@@ -184,6 +184,8 @@ routes:
     upstream: a
 %sadmin:
   address: "127.0.0.1:0"
+  probes:
+    address: "127.0.0.1:0"
 `, aURL, bURL, extra)
 }
 
@@ -246,6 +248,8 @@ routes:
         X-Env: "${MICROGATEWAY_TEST_ENV}"
 admin:
   address: "127.0.0.1:0"
+  probes:
+    address: "127.0.0.1:0"
 `, backend.URL))
 
 	var errb syncBuffer
@@ -298,6 +302,8 @@ routes:
     upstream: users
 admin:
   address: "127.0.0.1:0"
+  probes:
+    address: "127.0.0.1:0"
 `, backend.URL, route)
 	}
 	path := writeTemp(t, valid("/"))
@@ -328,6 +334,8 @@ routes:
     upstream: missing
 admin:
   address: "127.0.0.1:0"
+  probes:
+    address: "127.0.0.1:0"
 `))
 	eventuallyAdvancing(t, "failed reload logged", h.clk, reloadStep, func() bool { return strings.Contains(errb.String(), "configuration reload failed") }, errb.String)
 	if !strings.Contains(errb.String(), "routes[0].upstream (line ") {
@@ -384,6 +392,8 @@ routes:
     upstream: users
 %sadmin:
   address: %q
+  probes:
+    address: "127.0.0.1:0"
 `, level, listen, backend.URL, extra, admin)
 	}
 	path := writeTemp(t, configOf("127.0.0.1:0", "127.0.0.1:0", "info", false))
@@ -500,6 +510,8 @@ routes:
     upstream: users
 admin:
   address: "127.0.0.1:0"
+  probes:
+    address: "127.0.0.1:0"
 `, inCert, inKey, renC, renK, k8sCert, k8sKey, backend.URL)
 	}
 	path := writeTemp(t, certConfig(renCert, renKey))

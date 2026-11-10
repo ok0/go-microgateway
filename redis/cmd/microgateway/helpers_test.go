@@ -96,7 +96,7 @@ func instanceDoc(o docOpts) string {
 	// Instances stop by SIGTERM without advancing their fake clock, so the fixture keeps the immediate stop explicitly.
 	fmt.Fprintf(&b, "global:\n  shutdown_delay: 0s\n")
 	fmt.Fprintf(&b, "listeners:\n  - name: public\n    address: \"127.0.0.1:0\"\n")
-	fmt.Fprintf(&b, "admin:\n  address: \"127.0.0.1:0\"\n")
+	fmt.Fprintf(&b, "admin:\n  address: \"127.0.0.1:0\"\n  probes:\n    address: \"127.0.0.1:0\"\n")
 	if o.Cache {
 		fmt.Fprintf(&b, "  auth:\n    keys:\n      - id: ops\n        hash: \"%s\"\n", adminKeyHash(o.AdminToken))
 	}

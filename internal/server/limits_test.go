@@ -404,7 +404,7 @@ func TestServersCarryLimitFields(t *testing.T) {
 	for _, c := range clocks {
 		for _, tc := range cases {
 			t.Run(c.name+"/"+tc.name, func(t *testing.T) {
-				srv, err := New(limitCfg(t, tc.muts...), okHandler(), okHandler(), nil, nil, WithClock(c.clk))
+				srv, err := New(limitCfg(t, tc.muts...), okHandler(), okHandler(), nil, nil, nil, WithClock(c.clk))
 				if err != nil {
 					t.Fatal(err)
 				}

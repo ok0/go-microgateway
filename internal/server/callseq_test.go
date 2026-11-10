@@ -531,7 +531,7 @@ func seqGateway(t *testing.T, kind string, lim seqLimits, h http.Handler, fake *
 	case "tls":
 		muts = append(muts, tlsOn(certFile, keyFile, true))
 	}
-	srv, err := New(limitCfg(t, muts...), h, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), WithClock(fake))
+	srv, err := New(limitCfg(t, muts...), h, nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), WithClock(fake))
 	if err != nil {
 		t.Fatal(err)
 	}

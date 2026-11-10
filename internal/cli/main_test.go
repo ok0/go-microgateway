@@ -211,6 +211,8 @@ routes:
     upstream: users
 admin:
   address: "127.0.0.1:0"
+  probes:
+    address: "127.0.0.1:0"
 `
 
 func TestValidateExample(t *testing.T) {
@@ -365,6 +367,7 @@ func TestRunExample(t *testing.T) {
 	cfg = strings.ReplaceAll(cfg, "127.0.0.1:9102", hostPort(orders))
 	cfg = strings.ReplaceAll(cfg, `":8080"`, `"127.0.0.1:0"`)
 	cfg = strings.ReplaceAll(cfg, "127.0.0.1:9901", "127.0.0.1:0")
+	cfg = strings.ReplaceAll(cfg, "\":9902\"", "\"127.0.0.1:0\"")
 	path := writeTemp(t, cfg)
 
 	h := startRun(t, path)

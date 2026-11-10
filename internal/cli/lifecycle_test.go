@@ -250,6 +250,8 @@ func lifecycleConfig(global, backend string) string {
     address: "127.0.0.1:0"
 admin:
   address: "127.0.0.1:0"
+  probes:
+    address: "127.0.0.1:0"
 upstreams:
   - name: backend
     hosts:
@@ -275,6 +277,8 @@ listeners:
     address: "127.0.0.1:0"
 admin:
   address: "127.0.0.1:0"
+  probes:
+    address: "127.0.0.1:0"
 upstreams:
   - name: echo
     hosts:
@@ -546,6 +550,8 @@ listeners:
     address: "127.0.0.1:0"
 admin:
   address: "127.0.0.1:0"
+  probes:
+    address: "127.0.0.1:0"
 upstreams:
   - name: hold
     hosts:

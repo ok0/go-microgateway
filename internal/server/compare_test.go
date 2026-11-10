@@ -251,7 +251,7 @@ func gatewayServer(t *testing.T, sc scenario, h http.Handler, logs *logBuffer, c
 	}
 	logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	// Real clock: compares against net/http's own timeouts, which run only on wall time; every peer here stalls.
-	srv, err := New(limitCfg(t, muts...), h, nil, nil, logger, WithClock(clock.Real()))
+	srv, err := New(limitCfg(t, muts...), h, nil, nil, nil, logger, WithClock(clock.Real()))
 	if err != nil {
 		t.Fatal(err)
 	}

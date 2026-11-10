@@ -23,6 +23,8 @@ listeners:
     idle_timeout: 7s
 admin:
   address: "127.0.0.1:0"
+  probes:
+    address: "127.0.0.1:0"
 upstreams:
   - name: echo
     hosts:

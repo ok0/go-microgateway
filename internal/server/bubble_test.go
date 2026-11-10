@@ -90,7 +90,7 @@ func (w bubbleWire) config(t *testing.T, muts ...func(*config.Listener)) *config
 func startBubbleGateway(t *testing.T, m *memNet, cfg *config.Config, h http.Handler, logs io.Writer, opts ...Option) *Server {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	srv, err := New(cfg, h, nil, nil, logger, opts...)
+	srv, err := New(cfg, h, nil, nil, nil, logger, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}

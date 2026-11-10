@@ -138,6 +138,8 @@ func doc(ups upstreams, opts renderOpts, weightA, weightB int, withNew, broken b
 	b.WriteString("admin:\n")
 	b.WriteString("  enabled: true\n")
 	b.WriteString("  address: \"127.0.0.1:0\"\n")
+	b.WriteString("  probes:\n")
+	b.WriteString("    address: \"127.0.0.1:0\"\n")
 	b.WriteString("upstreams:\n")
 	b.WriteString("  - name: svc\n")
 	b.WriteString("    hosts:\n")
