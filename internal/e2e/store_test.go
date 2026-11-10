@@ -2652,7 +2652,7 @@ func TestInstancesMixedLoad(t *testing.T) {
 		_, _ = fmt.Fprint(w, version.Load())
 	}))
 	top := "stores:\n" + stStore("s", "") + "cache:\n  store: s\n"
-	routes := rlRoute("rl", fmt.Sprintf("    rate_limit:\n      rate: 1\n      per: 1h\n      burst: %d\n      store: s\n", burst)) +
+	routes := rlRoute("rl", fmt.Sprintf("    rate_limit:\n      rate: 1\n      per: 1m\n      burst: %d\n      store: s\n", burst)) +
 		rlRoute("c", "    cache:\n      enabled: true\n")
 	gs, _ := miInstances(t, n, instances, cacheGatewayDoc(be.URL, top, routes), time.Unix(rlStart, 0), time.Hour, opt)
 	base := snapGoroutines()

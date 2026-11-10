@@ -66,7 +66,9 @@ func TestCacheMixedLoad(t *testing.T) {
 	})
 	rg.orig.setHandle(func(w http.ResponseWriter, r *http.Request) {
 		ex := reqctx.ExchangeFrom(r.Context())
-		ex.Begin()
+		if ex != nil {
+			ex.Begin()
+		}
 		w.Header().Set("Cache-Control", "max-age=60")
 		w.Header().Set("Etag", `"l"`)
 		status := http.StatusOK
@@ -75,7 +77,9 @@ func TestCacheMixedLoad(t *testing.T) {
 		}
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte("body"))
-		ex.Finish()
+		if ex != nil {
+			ex.Finish()
+		}
 	})
 	rg.get("/hot", nil)
 	rg.clk.Advance(61 * time.Second)
