@@ -13,6 +13,9 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/ok0/go-microgateway/internal/middleware"
+	"github.com/ok0/go-microgateway/internal/runtime"
 )
 
 var docsFiles = []string{"architecture.md", "configuration.md", "middleware.md", "operations.md", "multi-instance.md", "caching.md", "embedding.md"}
@@ -20,8 +23,8 @@ var docsFiles = []string{"architecture.md", "configuration.md", "middleware.md",
 var readmeTopics = []string{"api-gateway", "microgateway", "golang", "reverse-proxy", "rate-limiting", "circuit-breaker", "http-cache", "redis", "load-balancer"}
 
 var mermaidTopics = []struct{ file, heading string }{
-	{"README.md", "Architecture overview"},
-	{"README.md", "Request flow"},
+	{"docs/architecture.md", "Layers"},
+	{"docs/architecture.md", "Request flow"},
 	{"docs/middleware.md", "Circuit breaker state machine"},
 	{"docs/operations.md", "Hot reload sequence"},
 	{"docs/middleware.md", "Retry and budget flow"},
@@ -419,6 +422,138 @@ func recvBase(e ast.Expr) string {
 			return t.Name
 		default:
 			return ""
+		}
+	}
+}
+
+const readmePointer = "The [architecture guide](docs/architecture.md) describes the layers, the path a request takes and the order of the policy stages."
+
+func TestReadmeArchitecturePointer(t *testing.T) {
+	root := repoRoot(t)
+	readme, err := Load(filepath.Join(root, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range ReadmeArchitectureFindings(readme, "docs/architecture.md") {
+		t.Error(f)
+	}
+	found := false
+	for _, line := range readme.Lines {
+		if line == readmePointer {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("README has no line %q", readmePointer)
+	}
+}
+
+func TestReadmeArchitecturePointerRejects(t *testing.T) {
+	root := repoRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(raw)
+	cases := []struct{ name, old, new string }{
+		{"heading", "## Module layout", "## Request flow\n\nSteps.\n\n## Module layout"},
+		{"sub-heading", "## Module layout", "### Architecture overview\n\nLayers.\n\n## Module layout"},
+		{"mermaid", "## Module layout", "```mermaid\nflowchart TD\n  x --> y\n```\n\n## Module layout"},
+		{"long pointer", readmePointer, "Read this.\nAbout the design.\n" + readmePointer},
+		{"no pointer", readmePointer + "\n", ""},
+		{"second pointer", "## Module layout", "See [layers](docs/architecture.md#layers).\n\n## Module layout"},
+		{"internals first", "## Install", "## Module layout\n\nTwo modules.\n\n## Install"},
+		{"quick start first", "## Requirements", "## Quick start\n\nRun it.\n\n## Requirements"},
+	}
+	for _, c := range cases {
+		if !strings.Contains(src, c.old) {
+			t.Fatalf("%s: README lacks %q", c.name, c.old)
+		}
+		mutated := Parse("README.md", []byte(strings.Replace(src, c.old, c.new, 1)))
+		if len(ReadmeArchitectureFindings(mutated, "docs/architecture.md")) == 0 {
+			t.Errorf("%s: no findings", c.name)
+		}
+	}
+}
+
+func trackedMarkdown(t *testing.T, root string) []*Doc {
+	t.Helper()
+	var docs []*Doc
+	for _, name := range repoFiles(t) {
+		if !strings.HasSuffix(name, ".md") {
+			continue
+		}
+		d, err := Load(filepath.Join(root, filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		docs = append(docs, d)
+	}
+	return docs
+}
+
+func TestSingleFlowCopy(t *testing.T) {
+	root := repoRoot(t)
+	docs := trackedMarkdown(t, root)
+	if len(docs) < 10 {
+		t.Errorf("found %d markdown files, want at least 10", len(docs))
+	}
+	for _, f := range FlowCopyFindings(docs, filepath.Join(root, "docs", "architecture.md"), runtime.Flow(), middleware.DefaultStages) {
+		t.Error(f)
+	}
+}
+
+func TestSingleFlowCopyRejects(t *testing.T) {
+	root := repoRoot(t)
+	base := trackedMarkdown(t, root)
+	arch := filepath.Join(root, "docs", "architecture.md")
+	src, err := os.ReadFile(arch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flow := ""
+	for _, f := range Parse(arch, src).Fences {
+		if f.Lang == "mermaid" && f.Heading == RequestFlowHeading {
+			flow = f.Body
+		}
+	}
+	if flow == "" {
+		t.Fatal("architecture document has no request-flow diagram")
+	}
+	if !strings.Contains(string(src), "## Layers") {
+		t.Fatal("architecture document has no \"## Layers\" heading")
+	}
+	extra := filepath.Join(root, "docs", "extra.md")
+	withExtra := func(s string) []*Doc {
+		return append(append([]*Doc(nil), base...), Parse(extra, []byte(s)))
+	}
+	withArch := func(s string) []*Doc {
+		var docs []*Doc
+		for _, d := range base {
+			if filepath.Clean(d.Path) == arch {
+				d = Parse(arch, []byte(s))
+			}
+			docs = append(docs, d)
+		}
+		return docs
+	}
+	cases := []struct {
+		name string
+		docs []*Doc
+	}{
+		{"copied request flow", withExtra("## Copy\n\n```mermaid\n" + flow + "\n```\n")},
+		{"copied stage order", withExtra("The stages are timeout, auth, rate_limit, cache, circuit_breaker and retry.\n")},
+		{"label-only stage copy", withExtra("## Copy\n\n```mermaid\nflowchart LR\n  a[\"timeout\"] --> b[\"auth\"]\n  b --> c[\"rate_limit\"]\n```\n")},
+		{"node-id stage copy", withExtra("## Copy\n\n```mermaid\nflowchart LR\n  auth --> cache\n  cache --> upstream\n```\n")},
+		{"extra architecture diagram", withArch(string(src) + "\n## Extra\n\n```mermaid\nflowchart TD\n  x --> y\n```\n")},
+		{"renamed layers", withArch(strings.Replace(string(src), "## Layers", "## Building blocks", 1))},
+	}
+	if f := FlowCopyFindings(base, arch, runtime.Flow(), middleware.DefaultStages); len(f) != 0 {
+		t.Errorf("unmodified documents: %v", f)
+	}
+	for _, c := range cases {
+		if f := FlowCopyFindings(c.docs, arch, runtime.Flow(), middleware.DefaultStages); len(f) == 0 {
+			t.Errorf("%s: no findings", c.name)
 		}
 	}
 }
