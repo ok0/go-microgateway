@@ -78,15 +78,16 @@ Commit messages follow Conventional Commits, for example `feat(cache): ...`, `fi
 
 Some checks are opt-in because they are slow, need a real network, or need an external service. They are skipped unless their environment variable is set:
 
-- `MICROGATEWAY_HEAVY=1` enables the long benchmark and fuzz runs, the soak tests, the integration tests and the release install check.
+- `MICROGATEWAY_HEAVY=1` enables the long benchmark and fuzz runs, the soak tests, the integration tests, the release install check and the hot reload load check.
 - `MICROGATEWAY_SOAK` sets the soak duration, for example `60s`.
+- `RELOAD_LOAD_DURATION`, `RELOAD_LOAD_RATE`, `RELOAD_LOAD_CONCURRENCY` and `RELOAD_LOAD_INSTANCES` set the length (default 60s, 30s to 10m), total request rate (default 200 per second, at most 1000), workers (default 8, at most 32) and gateway count (default 2, at most 4) of `make reload-load`.
 - `MICROGATEWAY_LOAD=1` enables the load tests.
 - `MICROGATEWAY_CACHE_FULL=1` enables the full cache test matrix in `redis`.
 - `MICROGATEWAY_REDIS_ADDR` sets the address of a Redis 6.2 or later server for the integration tests.
 - `MICROGATEWAY_REDIS_CLUSTER` and `MICROGATEWAY_REDIS_SENTINEL` select the cluster and Sentinel topologies of the integration tests.
 - The `realnet` build tag enables the tests that use the real network.
 
-`make perf`, `make soak`, `make fuzz`, `make integration`, `make release-verify` and `make realnet` refuse to run without the variables they need and say which one is missing.
+`make perf`, `make soak`, `make fuzz`, `make integration`, `make release-verify`, `make reload-load` and `make realnet` refuse to run without the variables they need and say which one is missing.
 
 ## Release verification
 
@@ -106,6 +107,7 @@ Run these checks before a release. The heavy checks are not part of `make check`
 | 10. Container | `make docker`, then `docker run --rm microgateway:<version> version`, then a run with a mounted configuration | Docker | The version output matches `bin/microgateway version`, and the process runs as a non-root user | Yes |
 | 11. Lint and toolchain | `make lint` with golangci-lint v2.14.0 in both modules; build and test with a Go 1.27 toolchain | Go 1.27 toolchain | Every command passes | No |
 | 12. Release | The steps in [Releasing](#releasing), after all checks pass | Repository owner | The core tag `vX.Y.Z`, then a commit with the core's lines in `redis/go.sum`, then the tag `redis/vX.Y.Z`, all pushed | No |
+| 13. Hot reload under load | `make reload-load` with `MICROGATEWAY_HEAVY=1` | Local machine | `PASS` with zero failed requests and every reload latency at most 2 s, for the file watch, SIGHUP and API drivers and the shutdown under load | Yes |
 
 Each check names whether it is heavy. Checks marked heavy need the environment they name and are not run in continuous integration.
 

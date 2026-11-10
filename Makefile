@@ -2,6 +2,10 @@ GOLANGCI_LINT_VERSION := v2.14.0
 GOLANGCI_LINT ?= golangci-lint
 FUZZTIME ?= 30s
 MICROGATEWAY_SOAK ?= 60s
+RELOAD_LOAD_DURATION ?= 60s
+RELOAD_LOAD_RATE ?= 200
+RELOAD_LOAD_CONCURRENCY ?= 8
+RELOAD_LOAD_INSTANCES ?= 2
 # Core commands run without the workspace. Redis commands run from redis/ with the committed go.work.
 CORE_ENV := GOWORK=off
 REDIS_ENV := GOWORK=$(CURDIR)/go.work
@@ -20,7 +24,7 @@ COVER_EXCLUDE := $(CORE)/internal/teststore $(CORE)/internal/testcert $(CORE)/in
 REDIS_COVERFLAGS ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help build test race vet cover cover-ci cover-times lint tidy-check realnet bench require-heavy require-redis fuzz soak perf integration docker hygiene check release-prepare release-check release-verify
+.PHONY: help build test race vet cover cover-ci cover-times lint tidy-check realnet bench require-heavy require-redis fuzz soak perf integration docker hygiene check release-prepare release-check release-verify reload-load
 
 help: ## list the targets
 	@grep -E '^[A-Za-z0-9_.-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "%-16s %s\n", $$1, $$2}'
@@ -88,6 +92,9 @@ perf: require-heavy ## benchmarks of the gateway and the router
 
 integration: require-heavy require-redis ## Redis integration tests
 	cd redis && MICROGATEWAY_REDIS_ADDR=$(MICROGATEWAY_REDIS_ADDR) $(GO_REDIS) test -race -count=1 -tags integration ./...
+
+reload-load: require-heavy build ## hot reload of bin/microgateway under a paced loopback load, self-judged
+	$(GO_CORE) run ./internal/reloadload -binary bin/microgateway -duration $(RELOAD_LOAD_DURATION) -rate $(RELOAD_LOAD_RATE) -concurrency $(RELOAD_LOAD_CONCURRENCY) -instances $(RELOAD_LOAD_INSTANCES)
 
 docker: ## build the container image
 	docker build --build-arg VERSION=$(BUILD_VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) -t microgateway:$(BUILD_VERSION) .

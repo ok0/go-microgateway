@@ -28,10 +28,10 @@ const (
 
 var scrubbedEnvNames = []string{"MICROGATEWAY_HEAVY", "MICROGATEWAY_REDIS_ADDR", "MICROGATEWAY_SOAK", "MAKEFLAGS", "MFLAGS", "GOFLAGS", "VERSION", "MICROGATEWAY_RELEASE_VERSION"}
 
-var requiredMakeTargets = []string{"build", "test", "race", "vet", "cover", "lint", "tidy-check", "realnet", "bench", "fuzz", "soak", "perf", "integration", "docker", "hygiene", "check", "help", "release-prepare", "release-check", "release-verify"}
+var requiredMakeTargets = []string{"build", "test", "race", "vet", "cover", "lint", "tidy-check", "realnet", "bench", "fuzz", "soak", "perf", "integration", "docker", "hygiene", "check", "help", "release-prepare", "release-check", "release-verify", "reload-load"}
 
 var checklistRequired = []string{
-	"make perf", "make soak", "make fuzz", "make integration", "make realnet", "make docker", "make lint",
+	"make perf", "make soak", "make fuzz", "make integration", "make realnet", "make docker", "make lint", "make reload-load",
 	"MICROGATEWAY_HEAVY", "MICROGATEWAY_SOAK", "MICROGATEWAY_LOAD", "MICROGATEWAY_REDIS_ADDR",
 	"MICROGATEWAY_REDIS_CLUSTER", "MICROGATEWAY_REDIS_SENTINEL", "MICROGATEWAY_CACHE_FULL",
 	"TestCoalesceScale", "TestCacheMixedLoad", "TestPurgeLoad", "TestPurgeMarkerCapDefault",
@@ -530,7 +530,7 @@ func TestMakefileTargets(t *testing.T) {
 func TestMakefileHeavyGates(t *testing.T) {
 	requireMake(t)
 	root := repoRoot(t)
-	for _, target := range []string{"fuzz", "soak", "perf", "integration", "release-verify"} {
+	for _, target := range []string{"fuzz", "soak", "perf", "integration", "release-verify", "reload-load"} {
 		out, err := run(t, root, nil, "make", "-C", root, target)
 		if err == nil {
 			t.Errorf("make %s without MICROGATEWAY_HEAVY succeeded", target)
