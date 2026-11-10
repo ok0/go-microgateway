@@ -1,0 +1,76 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/ok0/go-microgateway
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: image tags
+        id: tags
+        run: |
+          sh scripts/image-tags.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/tags"
+          {
+            echo "list<<EOF"
+            sed "s|^|$IMAGE:|" "$RUNNER_TEMP/tags"
+            echo "EOF"
+            echo "ref=$IMAGE:$(head -n 1 "$RUNNER_TEMP/tags")"
+            echo "commit=$(git rev-parse --short HEAD)"
+            echo "date=$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ steps.tags.outputs.list }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ steps.tags.outputs.commit }}
+            DATE=${{ steps.tags.outputs.date }}
+      - name: manifest platforms
+        env:
+          REF: ${{ steps.tags.outputs.ref }}
+        run: |
+          docker buildx imagetools inspect --raw "$REF" > "$RUNNER_TEMP/manifest.json"
+          for want in linux/amd64 linux/arm64; do
+            PLATFORM=$want jq -e '[.manifests[] | select(.platform.os + "/" + .platform.architecture == env.PLATFORM)] | length == 1' "$RUNNER_TEMP/manifest.json" > /dev/null || { echo "$REF does not list $want exactly once" >&2; exit 1; }
+          done
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+      - name: user and version on each platform
+        run: |
+          for platform in linux/amd64 linux/arm64; do
+            digest=$(PLATFORM=$platform jq -r '.manifests[] | select(.platform.os + "/" + .platform.architecture == env.PLATFORM) | .digest' "$RUNNER_TEMP/manifest.json")
+            test -n "$digest" || { echo "no $platform digest" >&2; exit 1; }
+            docker pull --platform "$platform" "$IMAGE@$digest"
+            user=$(docker image inspect --format '{{.Config.User}}' "$IMAGE@$digest")
+            if [ "$user" != 65532:65532 ]; then echo "$platform image user is \"$user\", want 65532:65532" >&2; exit 1; fi
+            out=$(docker run --rm --platform "$platform" "$IMAGE@$digest" version)
+            echo "$platform: $out"
+            case "$out" in
+              "microgateway $GITHUB_REF_NAME "*) ;;
+              *) echo "$platform image reports \"$out\", want $GITHUB_REF_NAME" >&2; exit 1 ;;
+            esac
+          done

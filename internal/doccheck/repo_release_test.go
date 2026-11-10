@@ -28,7 +28,7 @@ const (
 
 var scrubbedEnvNames = []string{"MICROGATEWAY_HEAVY", "MICROGATEWAY_REDIS_ADDR", "MICROGATEWAY_SOAK", "MAKEFLAGS", "MFLAGS", "GOFLAGS", "VERSION", "MICROGATEWAY_RELEASE_VERSION"}
 
-var requiredMakeTargets = []string{"build", "test", "race", "vet", "cover", "lint", "tidy-check", "realnet", "bench", "fuzz", "soak", "perf", "integration", "docker", "hygiene", "check", "help", "release-prepare", "release-check", "release-verify", "reload-load"}
+var requiredMakeTargets = []string{"build", "test", "race", "vet", "cover", "lint", "tidy-check", "realnet", "bench", "fuzz", "soak", "perf", "integration", "docker", "hygiene", "check", "help", "release-prepare", "release-check", "release-verify", "reload-load", "workflow-lint"}
 
 var checklistRequired = []string{
 	"make perf", "make soak", "make fuzz", "make integration", "make realnet", "make docker", "make lint", "make reload-load",
@@ -548,14 +548,59 @@ func TestMakefileHeavyGates(t *testing.T) {
 	}
 }
 
-func TestWorkflow(t *testing.T) {
-	root := repoRoot(t)
-	var wf map[string]any
-	if err := yaml.Unmarshal(readAt(t, root, ".github/workflows/ci.yml"), &wf); err != nil {
+// workflowFiles returns the sorted workflow files of the repository, relative to root. It fails the test unless ci.yml and release.yml are among them.
+func workflowFiles(t *testing.T, root string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(root, ".github", "workflows"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	for _, problem := range workflowProblems(wf, readAt(t, root, "Makefile"), goFloor(t, root)) {
-		t.Error(problem)
+	var files []string
+	for _, e := range entries {
+		name := e.Name()
+		if !e.Type().IsRegular() || (!strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".yaml")) {
+			continue
+		}
+		files = append(files, ".github/workflows/"+name)
+	}
+	slices.Sort(files)
+	for _, want := range []string{".github/workflows/ci.yml", ".github/workflows/release.yml"} {
+		if !slices.Contains(files, want) {
+			t.Fatalf("%s is not among the workflow files %q", want, files)
+		}
+	}
+	return files
+}
+
+// jobCheckoutFindings returns the checkout findings of every job of wf, in sorted job order, each prefixed with its job name.
+func jobCheckoutFindings(wf map[string]any) []string {
+	jobs := mapOf(wf["jobs"])
+	var findings []string
+	for _, name := range slices.Sorted(maps.Keys(jobs)) {
+		for _, f := range checkoutFindings(listOf(mapOf(jobs[name])["steps"])) {
+			findings = append(findings, "job "+name+": "+f)
+		}
+	}
+	return findings
+}
+
+func TestWorkflow(t *testing.T) {
+	root := repoRoot(t)
+	makefile := readAt(t, root, "Makefile")
+	for _, rel := range workflowFiles(t, root) {
+		var wf map[string]any
+		if err := yaml.Unmarshal(readAt(t, root, rel), &wf); err != nil {
+			t.Fatalf("%s: %v", rel, err)
+		}
+		if rel == ".github/workflows/ci.yml" {
+			for _, problem := range workflowProblems(wf, makefile, goFloor(t, root)) {
+				t.Error(problem)
+			}
+			continue
+		}
+		for _, f := range jobCheckoutFindings(wf) {
+			t.Errorf("%s: %s", rel, f)
+		}
 	}
 }
 
@@ -598,48 +643,54 @@ func TestCheckoutFindings(t *testing.T) {
 
 func TestWorkflowCheckoutDepthRequired(t *testing.T) {
 	root := repoRoot(t)
-	src := string(readAt(t, root, ".github/workflows/ci.yml"))
-	lines := strings.Split(src, "\n")
-	depthLines, checkoutLines := 0, 0
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "fetch-depth: 0" {
-			depthLines++
-		}
-		if strings.Contains(line, "uses: actions/checkout@") {
-			checkoutLines++
-		}
-	}
-	if depthLines == 0 || depthLines != checkoutLines {
-		t.Fatalf("ci.yml has %d fetch-depth: 0 lines and %d actions/checkout lines, want equal and non-zero", depthLines, checkoutLines)
-	}
 	makefile := readAt(t, root, "Makefile")
 	floor := goFloor(t, root)
-	var wf map[string]any
-	if err := yaml.Unmarshal([]byte(src), &wf); err != nil {
-		t.Fatal(err)
-	}
-	for _, p := range workflowProblems(wf, makefile, floor) {
-		if strings.Contains(p, "fetch-depth") {
-			t.Errorf("unmodified workflow reports %q", p)
-		}
-	}
-	for i, line := range lines {
-		if strings.TrimSpace(line) != "fetch-depth: 0" {
-			continue
-		}
-		mutated := strings.Join(slices.Delete(slices.Clone(lines), i, i+1), "\n")
-		var m map[string]any
-		if err := yaml.Unmarshal([]byte(mutated), &m); err != nil {
-			t.Fatal(err)
-		}
-		found := false
-		for _, p := range workflowProblems(m, makefile, floor) {
-			if strings.Contains(p, "fetch-depth: 0") {
-				found = true
+	for _, rel := range workflowFiles(t, root) {
+		src := string(readAt(t, root, rel))
+		lines := strings.Split(src, "\n")
+		depthLines, checkoutLines := 0, 0
+		for _, line := range lines {
+			if strings.TrimSpace(line) == "fetch-depth: 0" {
+				depthLines++
+			}
+			if strings.Contains(line, "uses: actions/checkout@") {
+				checkoutLines++
 			}
 		}
-		if !found {
-			t.Errorf("removing line %d of ci.yml reports no fetch-depth: 0 problem", i+1)
+		if depthLines == 0 || depthLines != checkoutLines {
+			t.Fatalf("%s has %d fetch-depth: 0 lines and %d actions/checkout lines, want equal and non-zero", rel, depthLines, checkoutLines)
+		}
+		var wf map[string]any
+		if err := yaml.Unmarshal([]byte(src), &wf); err != nil {
+			t.Fatalf("%s: %v", rel, err)
+		}
+		problems := jobCheckoutFindings
+		if rel == ".github/workflows/ci.yml" {
+			problems = func(m map[string]any) []string { return workflowProblems(m, makefile, floor) }
+		}
+		for _, p := range problems(wf) {
+			if strings.Contains(p, "fetch-depth") {
+				t.Errorf("unmodified %s reports %q", rel, p)
+			}
+		}
+		for i, line := range lines {
+			if strings.TrimSpace(line) != "fetch-depth: 0" {
+				continue
+			}
+			mutated := strings.Join(slices.Delete(slices.Clone(lines), i, i+1), "\n")
+			var m map[string]any
+			if err := yaml.Unmarshal([]byte(mutated), &m); err != nil {
+				t.Fatalf("%s: %v", rel, err)
+			}
+			found := false
+			for _, p := range problems(m) {
+				if strings.Contains(p, "fetch-depth: 0") {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("removing line %d of %s reports no fetch-depth: 0 problem", i+1, rel)
+			}
 		}
 	}
 }
@@ -690,7 +741,7 @@ func workflowProblems(wf map[string]any, makefile []byte, floor string) []string
 		add("top-level env sets GOWORK; set the command mode per job")
 	}
 	jobs := mapOf(wf["jobs"])
-	for _, name := range []string{"lint", "test", "coverage", "tidy", "integration", "realnet", "docker"} {
+	for _, name := range []string{"lint", "test", "coverage", "tidy", "integration", "realnet", "docker", "actionlint"} {
 		if _, ok := jobs[name]; !ok {
 			add("workflow has no %s job", name)
 		}
@@ -756,7 +807,7 @@ func workflowProblems(wf map[string]any, makefile []byte, floor string) []string
 	if !exactPatch.MatchString(pinText) || version.Compare("go"+pinText, "go"+floor) < 0 {
 		add("workflow env GO_VERSION = %v, want an exact patch release not older than the go.mod floor %s", pin, floor)
 	}
-	for _, name := range []string{"lint", "coverage", "tidy", "integration", "realnet"} {
+	for _, name := range []string{"lint", "coverage", "tidy", "integration", "realnet", "actionlint"} {
 		found, pinned := false, true
 		for _, raw := range listOf(mapOf(jobs[name])["steps"]) {
 			step := mapOf(raw)
@@ -895,6 +946,48 @@ func workflowProblems(wf map[string]any, makefile []byte, floor string) []string
 	if !lintPinned {
 		add("lint job golangci action version is not the Makefile GOLANGCI_LINT_VERSION %q", lintVersion)
 	}
+
+	alVersion := makeVariable(makefile, "ACTIONLINT_VERSION")
+	if !regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`).MatchString(alVersion) {
+		add("Makefile ACTIONLINT_VERSION = %q, want an exact release vX.Y.Z", alVersion)
+	}
+	alJob := mapOf(jobs["actionlint"])
+	alPinned := false
+	for _, raw := range listOf(alJob["steps"]) {
+		step := mapOf(raw)
+		run, _ := step["run"].(string)
+		text, err := ExpandMakeRun(run, makefile, stepEnv(wf, alJob, step))
+		if err == nil && strings.Contains(text, "go run github.com/rhysd/actionlint/cmd/actionlint@"+alVersion) {
+			alPinned = true
+		}
+	}
+	if !alPinned {
+		add("actionlint job does not run actionlint at the Makefile ACTIONLINT_VERSION %q", alVersion)
+	}
+
+	dockerSteps := listOf(mapOf(jobs["docker"])["steps"])
+	built := -1
+	for i, raw := range dockerSteps {
+		if run, _ := mapOf(raw)["run"].(string); strings.TrimSpace(run) == "make docker" {
+			built = i
+			break
+		}
+	}
+	if built < 0 {
+		add("docker job does not run make docker")
+	}
+	passwdChecked := false
+	if built >= 0 {
+		for _, raw := range dockerSteps[built+1:] {
+			run, _ := mapOf(raw)["run"].(string)
+			if strings.Contains(run, "docker create") && strings.Contains(run, "/etc/passwd") && strings.Contains(run, "^nonroot:x:65532:65532:") {
+				passwdChecked = true
+			}
+		}
+	}
+	if !passwdChecked {
+		add("docker job does not check /etc/passwd of the built image for nonroot:x:65532:65532:")
+	}
 	return problems
 }
 
@@ -1027,6 +1120,30 @@ func TestWorkflowVersionPolicy(t *testing.T) {
 			job := jobMap(wf, "tidy")
 			job["steps"] = append(listOf(job["steps"]), map[string]any{"run": "make release-verify VERSION=v0.1.0"})
 		}, "release-verify", nil},
+		{"no-actionlint-job", func(wf map[string]any) {
+			delete(mapOf(wf["jobs"]), "actionlint")
+		}, "no actionlint job", nil},
+		{"actionlint-unpinned", func(wf map[string]any) {
+			for _, raw := range listOf(jobMap(wf, "actionlint")["steps"]) {
+				if mapOf(raw)["run"] == any("make workflow-lint") {
+					mapOf(raw)["run"] = "GOWORK=off go run github.com/rhysd/actionlint/cmd/actionlint@latest"
+				}
+			}
+		}, "ACTIONLINT_VERSION", nil},
+		{"actionlint-go-unpinned", func(wf map[string]any) {
+			setupGoWith(jobMap(wf, "actionlint"))["go-version"] = "1.27.x"
+		}, "job actionlint", nil},
+		{"no-passwd-check", func(wf map[string]any) {
+			job := jobMap(wf, "docker")
+			s := listOf(job["steps"])
+			job["steps"] = s[:len(s)-1]
+		}, "/etc/passwd", nil},
+		{"wrong-uid", func(wf map[string]any) {
+			s := listOf(jobMap(wf, "docker")["steps"])
+			last := mapOf(s[len(s)-1])
+			run, _ := last["run"].(string)
+			last["run"] = strings.ReplaceAll(run, "65532:65532", "0:0")
+		}, "/etc/passwd", nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1123,7 +1240,7 @@ func TestDockerfile(t *testing.T) {
 	}
 }
 
-// dockerfileProblems returns the problems of the Dockerfile: the final distroless stage, the build stage's module copies and go commands in their command modes, and the build of the Redis binary with the Makefile's linker flags.
+// dockerfileProblems returns the problems of the Dockerfile: the final distroless stage with its numeric user and exposed ports, the cross-compiling build stage on the build platform, the build stage's module copies and go commands in their command modes, and the build of the Redis binary with the Makefile's linker flags and the probe port comment.
 func dockerfileProblems(dockerfile, makefile []byte) []string {
 	var problems []string
 	lines := strings.Split(string(dockerfile), "\n")
@@ -1146,8 +1263,8 @@ func dockerfileProblems(dockerfile, makefile []byte) []string {
 	for _, line := range lines[last+1:] {
 		final = append(final, strings.TrimSpace(line))
 	}
-	if !slices.Contains(final, "USER nonroot") {
-		problems = append(problems, "final stage lacks USER nonroot")
+	if !slices.Contains(final, "USER 65532:65532") {
+		problems = append(problems, "final stage lacks USER 65532:65532")
 	}
 	for _, line := range final {
 		if instructionOf(line) == "RUN" {
@@ -1157,8 +1274,18 @@ func dockerfileProblems(dockerfile, makefile []byte) []string {
 	if !slices.Contains(final, `ENTRYPOINT ["/microgateway"]`) {
 		problems = append(problems, `final stage lacks ENTRYPOINT ["/microgateway"]`)
 	}
-	if !slices.Contains(final, "EXPOSE 8080 9901") {
-		problems = append(problems, "final stage lacks EXPOSE 8080 9901")
+	if !slices.Contains(final, "EXPOSE 8080 9902") {
+		problems = append(problems, "final stage lacks EXPOSE 8080 9902")
+	}
+	for _, line := range lines {
+		if instructionOf(line) != "EXPOSE" {
+			continue
+		}
+		for _, field := range strings.Fields(line)[1:] {
+			if strings.HasPrefix(field, "9901") {
+				problems = append(problems, "Dockerfile exposes the management port 9901")
+			}
+		}
 	}
 	cmdOK := false
 	for _, line := range final {
@@ -1170,13 +1297,40 @@ func dockerfileProblems(dockerfile, makefile []byte) []string {
 		problems = append(problems, `final stage CMD lacks "run", "-config", "/etc/microgateway/config.yaml"`)
 	}
 
-	for _, want := range []string{"CGO_ENABLED=0", "-trimpath", "-s -w", "./cmd/microgateway"} {
+	if !strings.Contains(lines[froms[0]], "--platform=$BUILDPLATFORM") {
+		problems = append(problems, "build stage FROM lacks --platform=$BUILDPLATFORM")
+	}
+	for _, want := range []string{"CGO_ENABLED=0", "-trimpath", "-s -w", "./cmd/microgateway", "GOOS=${TARGETOS}", "GOARCH=${TARGETARCH}"} {
 		if !strings.Contains(build, want) {
 			problems = append(problems, fmt.Sprintf("build stage lacks %q", want))
 		}
 	}
+	for _, name := range []string{"ARG TARGETOS", "ARG TARGETARCH"} {
+		if !slices.ContainsFunc(lines[:last], func(line string) bool { return strings.TrimSpace(line) == name }) {
+			problems = append(problems, "build stage lacks "+name)
+		}
+	}
 	if !slices.ContainsFunc(lines[:last], func(line string) bool { return strings.TrimSpace(line) == "ARG VERSION=dev" }) {
 		problems = append(problems, "build stage lacks ARG VERSION=dev")
+	}
+	probeComment, managementComment := false, false
+	for _, line := range lines {
+		text := strings.TrimSpace(line)
+		if !strings.HasPrefix(text, "#") {
+			continue
+		}
+		if strings.Contains(text, "probe port") && strings.Contains(text, "9902") {
+			probeComment = true
+		}
+		if strings.Contains(text, "management port") && strings.Contains(text, "loopback") && strings.Contains(text, "not exposed") {
+			managementComment = true
+		}
+	}
+	if !probeComment {
+		problems = append(problems, "Dockerfile has no comment naming the probe port 9902")
+	}
+	if !managementComment {
+		problems = append(problems, "Dockerfile has no comment saying the management port binds to loopback and is not exposed")
 	}
 	if !workdirRE.MatchString(build) {
 		problems = append(problems, "build stage does not enter the redis module")
@@ -1259,7 +1413,16 @@ func TestDockerfileModes(t *testing.T) {
 		{"build with GOWORK off", "GOWORK=/src/go.work go build", "GOWORK=off go build", "redis command"},
 		{"build without workspace", "GOWORK=/src/go.work go build", "go build", "redis command"},
 		{"download with GOWORK off", "GOWORK=/src/go.work go mod download", "GOWORK=off go mod download", "redis command"},
-		{"final stage as root", "USER nonroot", "USER root", "USER nonroot"},
+		{"final stage as root", "USER 65532:65532", "USER root", "USER 65532:65532"},
+		{"named user", "USER 65532:65532", "USER nonroot", "USER 65532:65532"},
+		{"uid only", "USER 65532:65532", "USER 65532", "USER 65532:65532"},
+		{"management port exposed", "EXPOSE 8080 9902", "EXPOSE 8080 9901 9902", "management port 9901"},
+		{"no probe port", "EXPOSE 8080 9902", "EXPOSE 8080", "EXPOSE 8080 9902"},
+		{"emulated build stage", "FROM --platform=$BUILDPLATFORM golang", "FROM golang", "BUILDPLATFORM"},
+		{"no target arch", "GOARCH=${TARGETARCH} ", "", "GOARCH=${TARGETARCH}"},
+		{"no target os arg", "ARG TARGETOS\n", "", "ARG TARGETOS"},
+		{"no probe comment", "# The probe port is 9902", "# The health port is 9902", "probe port"},
+		{"no management comment", "is not exposed", "is published", "management port binds"},
 		{"version default", "ARG VERSION=dev", "ARG VERSION=1.0", "ARG VERSION=dev"},
 	}
 	for _, c := range cases {

@@ -1,4 +1,5 @@
 GOLANGCI_LINT_VERSION := v2.14.0
+ACTIONLINT_VERSION := v1.7.12
 GOLANGCI_LINT ?= golangci-lint
 FUZZTIME ?= 30s
 MICROGATEWAY_SOAK ?= 60s
@@ -24,7 +25,7 @@ COVER_EXCLUDE := $(CORE)/internal/teststore $(CORE)/internal/testcert $(CORE)/in
 REDIS_COVERFLAGS ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help build test race vet cover cover-ci cover-times lint tidy-check realnet bench require-heavy require-redis fuzz soak perf integration docker hygiene check release-prepare release-check release-verify reload-load
+.PHONY: help build test race vet cover cover-ci cover-times lint tidy-check realnet bench require-heavy require-redis fuzz soak perf integration docker workflow-lint hygiene check release-prepare release-check release-verify reload-load
 
 help: ## list the targets
 	@grep -E '^[A-Za-z0-9_.-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "%-16s %s\n", $$1, $$2}'
@@ -98,6 +99,9 @@ reload-load: require-heavy build ## hot reload of bin/microgateway under a paced
 
 docker: ## build the container image
 	docker build --build-arg VERSION=$(BUILD_VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) -t microgateway:$(BUILD_VERSION) .
+
+workflow-lint: ## actionlint ACTIONLINT_VERSION over every workflow in .github/workflows; fetches the tool, needs the network
+	$(GO_CORE) run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
 
 hygiene: ## repository, commit, remote, dependency and release checks
 	$(GO_CORE) test -count=1 -v -run '^(TestTrackedFileHygiene|TestCommitMessageHygiene|TestRemotes|TestTrackedGoLines|TestModuleDependencies|TestModulesInstallable|TestIgnoreFiles|TestLicense|TestNoCopiedSource|TestCoreHasNoRedisDependency|TestReleaseCheck)$$' ./internal/doccheck ./internal/cli

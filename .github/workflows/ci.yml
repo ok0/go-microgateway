@@ -137,3 +137,20 @@ jobs:
         with:
           fetch-depth: 0
       - run: make docker
+      - name: image user
+        run: |
+          id=$(docker create microgateway:dev)
+          docker cp "$id:/etc/passwd" "$RUNNER_TEMP/passwd"
+          docker rm "$id"
+          grep '^nonroot:x:65532:65532:' "$RUNNER_TEMP/passwd"
+
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: make workflow-lint
