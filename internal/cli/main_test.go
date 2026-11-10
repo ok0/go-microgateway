@@ -73,6 +73,15 @@ func startRunArgs(t *testing.T, args []string, errb interface {
 	String() string
 }) *runHandle {
 	t.Helper()
+	return startRunEnv(t, args, errb, Env{})
+}
+
+// startRunEnv is startRunArgs with base supplying the Env fields it does not set itself (for example PollOnly).
+func startRunEnv(t *testing.T, args []string, errb interface {
+	io.Writer
+	String() string
+}, base Env) *runHandle {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	ready := make(chan Addrs, 1)
@@ -81,7 +90,14 @@ func startRunArgs(t *testing.T, args []string, errb interface {
 	clk := clock.NewFake(time.Now())
 	var out bytes.Buffer
 	go func() {
-		done <- Main(ctx, Env{Args: append([]string{"run"}, args...), Stdout: &out, Stderr: errb, Signals: sig, Ready: func(a Addrs) { ready <- a }, Clock: clk})
+		env := base
+		env.Args = append([]string{"run"}, args...)
+		env.Stdout = &out
+		env.Stderr = errb
+		env.Signals = sig
+		env.Ready = func(a Addrs) { ready <- a }
+		env.Clock = clk
+		done <- Main(ctx, env)
 	}()
 	h := &runHandle{t: t, sig: sig, done: done, cancel: cancel, clk: clk, errb: errb}
 	var addrs Addrs

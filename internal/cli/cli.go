@@ -85,6 +85,7 @@ type Env struct {
 	Signals   <-chan os.Signal            // nil: run subscribes to SIGINT, SIGTERM and SIGHUP while serving
 	Ready     func(Addrs)                 // optional; called once run has bound its listeners
 	Clock     clock.Clock                 // nil: the real clock; times the gateway, certificate expiry checks, the reload watcher and shutdown
+	PollOnly  bool                        // tests only: the reload watcher opens no file-event source and detects changes by polling; the binary never sets it
 }
 
 // Main runs one invocation and returns its exit code. It never exits the process. opts are passed to every
@@ -111,7 +112,7 @@ func Main(ctx context.Context, env Env, opts ...microgateway.Option) int {
 	case "validate":
 		return runValidate(args[1:], stdout, stderr, lookup, opts)
 	case "run":
-		return runServe(ctx, args[1:], stdout, stderr, lookup, env.Signals, env.Ready, env.Clock, opts)
+		return runServe(ctx, args[1:], stdout, stderr, lookup, env.Signals, env.Ready, env.Clock, env.PollOnly, opts)
 	case "version":
 		_, _ = fmt.Fprintf(stdout, "microgateway %s (commit %s, built %s)\n", versionString(), commit, date)
 		return 0
@@ -180,7 +181,7 @@ func printLoadError(stderr io.Writer, cmd, path string, err error) int {
 	return 1
 }
 
-func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, lookup func(string) (string, bool), signals <-chan os.Signal, ready func(Addrs), envClock clock.Clock, opts []microgateway.Option) int {
+func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, lookup func(string) (string, bool), signals <-chan os.Signal, ready func(Addrs), envClock clock.Clock, pollOnly bool, opts []microgateway.Option) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	path := fs.String("config", "", "path to the configuration file")
@@ -282,6 +283,7 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer, look
 		Logger:       logger,
 		Apply:        func() error { return applyReload(g, srv, *path, logger) },
 		Fatal:        func(err error) bool { return errors.Is(err, microgateway.ErrClosed) },
+		PollOnly:     pollOnly,
 	})
 	watchCtx, stopWatch := context.WithCancel(context.Background())
 	watchDone := make(chan error, 1)
