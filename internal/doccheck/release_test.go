@@ -540,3 +540,53 @@ func TestChangelogTagFindings(t *testing.T) {
 		t.Errorf("ChangelogTagFindings(nil, nil, v0.1.0, true) patterns = %v, want [changelog-missing]", got)
 	}
 }
+
+const fenceTicks = "```"
+
+const fenceFixture = "# Changelog\n\n## [Unreleased]\n\n" +
+	"## [v0.3.0] - 2026-11-10\n\n### Breaking\n\n- Old.\n\n" + fenceTicks + "yaml\nold: 1\n" + fenceTicks + "\n\n" +
+	"## [v0.2.0] - 2026-11-08\n\n### Breaking\n\n- Entry.\n\n" + fenceTicks + "text\nnot yaml\n" + fenceTicks + "\n\n" +
+	fenceTicks + "yaml\na: 1\n" + fenceTicks + "\n\n" +
+	"### Added\n\n- Feature.\n\n" + fenceTicks + "yaml\nb: 2\n" + fenceTicks + "\n"
+
+func TestChangelogFence(t *testing.T) {
+	doc := Parse("CHANGELOG.md", []byte(fenceFixture))
+	start, end, err := ChangelogSubsection(doc, "v0.2.0", "Breaking")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v02 := slices.Index(doc.Lines, "## [v0.2.0] - 2026-11-08")
+	breaking := v02 + slices.Index(doc.Lines[v02:], "### Breaking")
+	added := slices.Index(doc.Lines, "### Added")
+	if start != breaking+1 || end != added {
+		t.Errorf("ChangelogSubsection = %d, %d, want %d, %d", start, end, breaking+1, added)
+	}
+	cases := []struct {
+		name, src, version, wantBody, wantErr string
+	}{
+		{name: "ok", src: fenceFixture, version: "v0.2.0", wantBody: "a: 1"},
+		{name: "newer release ignored", src: fenceFixture, version: "v0.3.0", wantBody: "old: 1"},
+		{name: "no section", src: fenceFixture, version: "v0.1.0", wantErr: "no section [v0.1.0]"},
+		{name: "no subsection", src: replaceOnce(t, fenceFixture, "### Breaking\n\n- Entry.", "### Fixed\n\n- Entry."), version: "v0.2.0", wantErr: "has no Breaking subsection"},
+		{name: "no fence", src: replaceOnce(t, fenceFixture, fenceTicks+"yaml\na: 1\n"+fenceTicks+"\n", ""), version: "v0.2.0", wantErr: "has no yaml fence"},
+		{name: "two fences", src: replaceOnce(t, fenceFixture, fenceTicks+"yaml\na: 1\n"+fenceTicks+"\n", fenceTicks+"yaml\na: 1\n"+fenceTicks+"\n\n"+fenceTicks+"yaml\nc: 3\n"+fenceTicks+"\n"), version: "v0.2.0", wantErr: "has 2 yaml fences"},
+		{name: "deeper heading", src: replaceOnce(t, fenceFixture, fenceTicks+"yaml\na: 1", "#### Note\n\n"+fenceTicks+"yaml\na: 1"), version: "v0.2.0", wantBody: "a: 1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f, err := ChangelogFence(Parse("CHANGELOG.md", []byte(c.src)), c.version, "Breaking", "yaml")
+			if c.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+					t.Fatalf("error = %v, want one containing %q", err, c.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if f.Body != c.wantBody {
+				t.Errorf("body = %q, want %q", f.Body, c.wantBody)
+			}
+		})
+	}
+}

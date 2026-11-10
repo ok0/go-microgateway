@@ -300,6 +300,22 @@ func TestContributingReleasing(t *testing.T) {
 		}
 	}
 
+	redisMod, err := ParseGoMod(readAt(t, root, "redis/go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	core := redisMod.Requires[corePath]
+	if !releaseVersion(core) {
+		t.Fatalf("redis/go.mod requires %s %q, not a release version", corePath, core)
+	}
+	for _, v := range regexp.MustCompile(`\bv(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\b`).FindAllString(body, -1) {
+		if !releaseVersion(v) {
+			t.Errorf("Releasing names %q, not a release version", v)
+		} else if compareRelease(v, core) > 0 {
+			t.Errorf("Releasing names %s, above the core version %s that redis/go.mod requires", v, core)
+		}
+	}
+
 	files := map[string][]byte{}
 	for _, name := range repoFiles(t) {
 		files[name] = readAt(t, root, name)
@@ -334,6 +350,34 @@ func TestContributingReleasing(t *testing.T) {
 			t.Errorf("Release verification lacks %q", want)
 		}
 	}
+}
+
+// releaseSubsections returns the body of the first level-2 section whose heading starts with prefix, the texts of its level-3 subheadings in order, and the body of each of them keyed by text. ok is false when no level-2 heading starts with prefix.
+func releaseSubsections(doc *Doc, prefix string) (body string, subs []string, bodies map[string]string, ok bool) {
+	for i, h := range doc.Headings {
+		if h.Level != 2 || !strings.HasPrefix(h.Text, prefix) {
+			continue
+		}
+		body, _, _, _ = section(doc, h.Text)
+		bodies = map[string]string{}
+		for j := i + 1; j < len(doc.Headings) && doc.Headings[j].Level > 2; j++ {
+			sub := doc.Headings[j]
+			if sub.Level != 3 {
+				continue
+			}
+			end := len(doc.Lines)
+			for _, next := range doc.Headings[j+1:] {
+				if next.Level <= 3 {
+					end = next.Line - 1
+					break
+				}
+			}
+			subs = append(subs, sub.Text)
+			bodies[sub.Text] = strings.Join(doc.Lines[sub.Line:end], "\n")
+		}
+		return body, subs, bodies, true
+	}
+	return "", nil, nil, false
 }
 
 func TestChangelog(t *testing.T) {
@@ -376,6 +420,32 @@ func TestChangelog(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("section %s lacks %q", history, want)
 		}
+	}
+	relBody, relSubs, relBodies, relOK := releaseSubsections(doc, "[v0.2.0] - ")
+	if !relOK {
+		t.Fatal("CHANGELOG.md has no [v0.2.0] section")
+	}
+	if want := []string{"Breaking", "Added", "Changed"}; !slices.Equal(relSubs, want) {
+		t.Errorf("[v0.2.0] subheadings = %q, want %q", relSubs, want)
+	}
+	bullets := 0
+	for _, line := range strings.Split(relBodies["Breaking"], "\n") {
+		if strings.HasPrefix(line, "- ") {
+			bullets++
+		}
+	}
+	if bullets != 5 {
+		t.Errorf("[v0.2.0] Breaking has %d entries, want 5", bullets)
+	}
+	for _, want := range []string{"`redis/v0.2.0`", "`global.shutdown_delay: 0s`", "`global.drain_timeout: 30s`", "`admin.probes.enabled: false`", "`admin.auth.management: none`", "`*config.Duration`", "no YAML setting to restore", "deploy/helm/microgateway", "make k8s-check", "`k8s`", "`actionlint`", "ghcr.io/ok0/go-microgateway", "65532:65532", "9902"} {
+		if !strings.Contains(relBody, want) {
+			t.Errorf("[v0.2.0] section lacks %q", want)
+		}
+	}
+	if _, subs, _, ok := releaseSubsections(doc, "[v0.1.1] - "); !ok {
+		t.Error("CHANGELOG.md has no [v0.1.1] section")
+	} else if want := []string{"Fixed"}; !slices.Equal(subs, want) {
+		t.Errorf("[v0.1.1] subheadings = %q, want %q", subs, want)
 	}
 	src := readAt(t, root, "CHANGELOG.md")
 	for _, f := range Hygiene("CHANGELOG.md", src) {
@@ -578,6 +648,36 @@ func TestNextPatch(t *testing.T) {
 	}
 }
 
+// nextMinor returns the minor release after v: the minor number plus one and patch zero, without any prerelease (vX.Y.Z[-p] gives vX.(Y+1).0).
+func nextMinor(t *testing.T, v string) string {
+	t.Helper()
+	numbers, _, _ := strings.Cut(strings.TrimPrefix(v, "v"), "-")
+	parts := strings.Split(numbers, ".")
+	if len(parts) != 3 {
+		t.Fatalf("nextMinor(%q): want three numbers", v)
+	}
+	y, err := strconv.ParseUint(parts[1], 10, 64)
+	if err != nil || y == math.MaxUint64 {
+		t.Fatalf("nextMinor(%q): minor number is not a number below the maximum", v)
+	}
+	return "v" + parts[0] + "." + strconv.FormatUint(y+1, 10) + ".0"
+}
+
+func TestNextMinor(t *testing.T) {
+	cases := []struct{ v, want string }{
+		{"v0.1.1", "v0.2.0"},
+		{"v0.1.0", "v0.2.0"},
+		{"v0.9.3", "v0.10.0"},
+		{"v1.2.3-rc.1", "v1.3.0"},
+		{"v0.0.0", "v0.1.0"},
+	}
+	for _, c := range cases {
+		if got := nextMinor(t, c.v); got != c.want {
+			t.Errorf("nextMinor(%q) = %q, want %q", c.v, got, c.want)
+		}
+	}
+}
+
 func TestReleasePrepare(t *testing.T) {
 	requireMake(t)
 	requireTool(t, "go")
@@ -604,76 +704,94 @@ func TestReleasePrepare(t *testing.T) {
 	if !releaseVersion(r) {
 		t.Fatalf("redis/go.mod requires %s %q, not a release version", corePath, r)
 	}
-	n := nextPatch(t, r)
-	if compareRelease(n, r) <= 0 {
-		t.Fatalf("next version %s is not above %s", n, r)
-	}
-	t.Logf("preparing %s from %s", n, r)
-	dir := t.TempDir()
-	writeTree(t, dir, orig)
 
-	wantRedis := replaceOnce(t, orig["redis/go.mod"], corePath+" "+r, corePath+" "+n)
-	wantWork := replaceOnce(t, orig["go.work"], corePath+" "+r+" => ./", corePath+" "+n+" => ./")
-	expected := maps.Clone(orig)
-	expected["redis/go.mod"] = wantRedis
-	expected["go.work"] = wantWork
+	prepare := func(t *testing.T, from, n string) {
+		if compareRelease(n, from) <= 0 {
+			t.Fatalf("next version %s is not above %s", n, from)
+		}
+		t.Logf("preparing %s from %s", n, from)
+		dir := t.TempDir()
+		base := maps.Clone(orig)
+		if from != r {
+			base["redis/go.mod"] = replaceOnce(t, base["redis/go.mod"], corePath+" "+r, corePath+" "+from)
+			base["go.work"] = replaceOnce(t, base["go.work"], corePath+" "+r, corePath+" "+from)
+		}
+		writeTree(t, dir, base)
 
-	checkFiles := func(t *testing.T, want map[string]string) {
-		t.Helper()
-		for name, body := range want {
-			if got := string(readAt(t, dir, name)); got != body {
-				t.Errorf("%s changed: got %q, want %q", name, got, body)
+		wantRedis := replaceOnce(t, base["redis/go.mod"], corePath+" "+from, corePath+" "+n)
+		wantWork := replaceOnce(t, base["go.work"], corePath+" "+from+" => ./", corePath+" "+n+" => ./")
+		expected := maps.Clone(base)
+		expected["redis/go.mod"] = wantRedis
+		expected["go.work"] = wantWork
+
+		checkFiles := func(t *testing.T, want map[string]string) {
+			t.Helper()
+			for name, body := range want {
+				if got := string(readAt(t, dir, name)); got != body {
+					t.Errorf("%s changed: got %q, want %q", name, got, body)
+				}
+			}
+		}
+
+		out, err := run(t, dir, nil, "make", "-C", dir, "release-prepare", "VERSION="+n)
+		if err != nil {
+			t.Fatalf("make release-prepare VERSION=%s: %v\n%s", n, err, out)
+		}
+		checkFiles(t, expected)
+		core, err := ParseGoMod(readAt(t, dir, "go.mod"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		redis, err := ParseGoMod(readAt(t, dir, "redis/go.mod"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if found := ReleaseFindings(n, readAt(t, dir, "go.work"), core, redis); len(found) != 0 {
+			t.Errorf("ReleaseFindings after release-prepare: %+v", found)
+		}
+		if found := RequireTagFindings(n, []string{from, "redis/" + from}); len(found) != 0 {
+			t.Errorf("RequireTagFindings(%s) after release-prepare: %+v", n, found)
+		}
+		stale := findingPatterns(ReleaseFindings(from, readAt(t, dir, "go.work"), core, redis))
+		for _, p := range []string{"release-require", "release-replace"} {
+			if !slices.Contains(stale, p) {
+				t.Errorf("ReleaseFindings(%s) after release-prepare lacks %s: %q", from, p, stale)
+			}
+		}
+
+		out, err = run(t, dir, nil, "make", "-C", dir, "release-prepare", "VERSION="+n)
+		if err != nil {
+			t.Fatalf("second make release-prepare VERSION=%s: %v\n%s", n, err, out)
+		}
+		checkFiles(t, expected)
+
+		for _, version := range []string{"", "0.2.0", "v1", "v0.2.0-0.20260101000000-abcdefabcdef"} {
+			out, err := run(t, dir, nil, "make", "-C", dir, "release-prepare", "VERSION="+version)
+			if exitStatus(t, err) == 0 {
+				t.Errorf("release-prepare accepted version %q", version)
+			}
+			if !bytes.Contains(out, []byte("VERSION")) {
+				t.Errorf("release-prepare output for version %q does not name VERSION:\n%s", version, out)
+			}
+			checkFiles(t, expected)
+		}
+
+		for _, name := range []string{"go.work", "redis/go.mod"} {
+			if got := string(readAt(t, root, name)); got != orig[name] {
+				t.Errorf("real %s changed", name)
 			}
 		}
 	}
 
-	out, err := run(t, dir, nil, "make", "-C", dir, "release-prepare", "VERSION="+n)
-	if err != nil {
-		t.Fatalf("make release-prepare VERSION=%s: %v\n%s", n, err, out)
+	cases := []struct{ name, from, n string }{
+		{"patch", r, nextPatch(t, r)},
+		{"minor", r, nextMinor(t, r)},
+		{"v0.1.1 to v0.2.0", "v0.1.1", "v0.2.0"},
 	}
-	checkFiles(t, expected)
-	core, err := ParseGoMod(readAt(t, dir, "go.mod"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	redis, err := ParseGoMod(readAt(t, dir, "redis/go.mod"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if found := ReleaseFindings(n, readAt(t, dir, "go.work"), core, redis); len(found) != 0 {
-		t.Errorf("ReleaseFindings after release-prepare: %+v", found)
-	}
-	if found := RequireTagFindings(n, []string{r, "redis/" + r}); len(found) != 0 {
-		t.Errorf("RequireTagFindings(%s) after release-prepare: %+v", n, found)
-	}
-	stale := findingPatterns(ReleaseFindings(r, readAt(t, dir, "go.work"), core, redis))
-	for _, p := range []string{"release-require", "release-replace"} {
-		if !slices.Contains(stale, p) {
-			t.Errorf("ReleaseFindings(%s) after release-prepare lacks %s: %q", r, p, stale)
-		}
-	}
-
-	out, err = run(t, dir, nil, "make", "-C", dir, "release-prepare", "VERSION="+n)
-	if err != nil {
-		t.Fatalf("second make release-prepare VERSION=%s: %v\n%s", n, err, out)
-	}
-	checkFiles(t, expected)
-
-	for _, version := range []string{"", "0.2.0", "v1", "v0.2.0-0.20260101000000-abcdefabcdef"} {
-		out, err := run(t, dir, nil, "make", "-C", dir, "release-prepare", "VERSION="+version)
-		if exitStatus(t, err) == 0 {
-			t.Errorf("release-prepare accepted version %q", version)
-		}
-		if !bytes.Contains(out, []byte("VERSION")) {
-			t.Errorf("release-prepare output for version %q does not name VERSION:\n%s", version, out)
-		}
-		checkFiles(t, expected)
-	}
-
-	for _, name := range []string{"go.work", "redis/go.mod"} {
-		if got := string(readAt(t, root, name)); got != orig[name] {
-			t.Errorf("real %s changed", name)
-		}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			prepare(t, c.from, c.n)
+		})
 	}
 }
 

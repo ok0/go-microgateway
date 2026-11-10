@@ -690,3 +690,64 @@ func ChangelogTagFindings(releases []ChangelogRelease, tags []string, pending st
 	}
 	return findings
 }
+
+// ChangelogSubsection returns the 1-based line of the level-3 heading subheading inside the section of release version of a changelog, and the last line of that subsection: the line before the next heading of level 3 or less, or the last line of the document. The section is the level-2 heading whose text starts with "[" + version + "] - ". It returns an error naming the version, and the subheading when the section has none.
+func ChangelogSubsection(doc *Doc, version, subheading string) (start, end int, err error) {
+	prefix := "[" + version + "] - "
+	sec := -1
+	for _, h := range doc.Headings {
+		if h.Level == 2 && strings.HasPrefix(h.Text, prefix) {
+			sec = h.Line
+			break
+		}
+	}
+	if sec < 0 {
+		return 0, 0, fmt.Errorf("%s: no section [%s] - YYYY-MM-DD", doc.Path, version)
+	}
+	secEnd := len(doc.Lines)
+	for _, h := range doc.Headings {
+		if h.Level <= 2 && h.Line > sec {
+			secEnd = h.Line - 1
+			break
+		}
+	}
+	start = -1
+	for _, h := range doc.Headings {
+		if h.Level == 3 && h.Text == subheading && h.Line > sec && h.Line <= secEnd {
+			start = h.Line
+			break
+		}
+	}
+	if start < 0 {
+		return 0, 0, fmt.Errorf("%s: section %s has no %s subsection", doc.Path, version, subheading)
+	}
+	end = secEnd
+	for _, h := range doc.Headings {
+		if h.Level <= 3 && h.Line > start {
+			end = min(h.Line-1, secEnd)
+			break
+		}
+	}
+	return start, end, nil
+}
+
+// ChangelogFence returns the only fenced block with info-string language lang inside the subsection found by ChangelogSubsection, including blocks under deeper headings of that subsection. It returns an error when the subsection is missing, or when it holds no such block or more than one; the error names the version, the subheading, the language and the count.
+func ChangelogFence(doc *Doc, version, subheading, lang string) (Fence, error) {
+	start, end, err := ChangelogSubsection(doc, version, subheading)
+	if err != nil {
+		return Fence{}, err
+	}
+	var found []Fence
+	for _, f := range doc.Fences {
+		if f.Lang == lang && f.Line > start && f.Line <= end {
+			found = append(found, f)
+		}
+	}
+	switch {
+	case len(found) == 0:
+		return Fence{}, fmt.Errorf("%s:%d: %s subsection of %s has no %s fence", doc.Path, start, subheading, version, lang)
+	case len(found) > 1:
+		return Fence{}, fmt.Errorf("%s:%d: %s subsection of %s has %d %s fences, want one", doc.Path, start, subheading, version, len(found), lang)
+	}
+	return found[0], nil
+}
