@@ -104,6 +104,10 @@ func (c *Config) applyDefaults() {
 
 	defBool(&c.Admin.Enabled, true)
 	defStr(&c.Admin.Address, "127.0.0.1:9901")
+	defBool(&c.Admin.Probes.Enabled, true)
+	defStr(&c.Admin.Probes.Address, ":9902")
+	defBool(&c.Admin.Probes.Metrics, false)
+	defStr(&c.Admin.Auth.Management, "auto")
 
 	for i := range c.Upstreams {
 		u := &c.Upstreams[i]

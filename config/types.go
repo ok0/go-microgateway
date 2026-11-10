@@ -102,14 +102,28 @@ type Admin struct {
 	Enabled *bool `yaml:"enabled" json:"enabled"`
 	// Address is the host:port the endpoint listens on. Default "127.0.0.1:9901".
 	Address string `yaml:"address" json:"address"`
-	// Auth holds the bearer tokens accepted by mutating admin endpoints. Empty disables them.
+	// Probes configures the probe endpoint, which serves /livez and /readyz, and /metrics when Metrics is true, without a credential.
+	Probes AdminProbes `yaml:"probes" json:"probes"`
+	// Auth holds the bearer tokens accepted by the cache purge endpoint and, when Auth.Management requires it, by /config, /upstreams and /metrics.
 	Auth AdminAuth `yaml:"auth" json:"auth"`
 }
 
-// AdminAuth lists the credentials of the mutating admin endpoints (cache purge). With no keys those endpoints are absent.
+// AdminProbes configures the probe endpoint. Fields left at their zero value take the defaults noted on each field.
+type AdminProbes struct {
+	// Enabled turns the probe endpoint on. Default true when nil; an explicit false is kept.
+	Enabled *bool `yaml:"enabled" json:"enabled"`
+	// Address is the host:port the probe endpoint listens on. Default ":9902" (all interfaces).
+	Address string `yaml:"address" json:"address"`
+	// Metrics serves /metrics on the probe endpoint without a credential. Default false when nil.
+	Metrics *bool `yaml:"metrics" json:"metrics"`
+}
+
+// AdminAuth lists the admin credentials. Cache purge is present only with at least one key; Management decides whether the management endpoints need one.
 type AdminAuth struct {
 	// Keys lists the accepted bearer tokens, stored as hashes.
 	Keys []AdminKey `yaml:"keys" json:"keys"`
+	// Management selects when /config, /upstreams and /metrics need a bearer token from Keys: "auto" (default) when Admin.Address is not a loopback address, "required" always, "none" never.
+	Management string `yaml:"management" json:"management"`
 }
 
 // AdminKey is one accepted admin bearer token, stored as a hash.

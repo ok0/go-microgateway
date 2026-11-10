@@ -33,7 +33,12 @@ listeners:
 admin:
   enabled: true
   address: "127.0.0.1:9901"
+  probes:
+    enabled: true
+    address: ":9902"
+    metrics: true
   auth:
+    management: required
     keys:
       - id: ops
         hash: "sha256:1111111111111111111111111111111111111111111111111111111111111111"

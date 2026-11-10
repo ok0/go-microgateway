@@ -199,3 +199,293 @@ func TestAdminAuthFingerprint(t *testing.T) {
 		t.Error("same admin key hash gave different fingerprints")
 	}
 }
+
+func TestAdminProbeDefaults(t *testing.T) {
+	c, err := Parse([]byte(minimalYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkProbeDefaults(t, c)
+
+	c, err = Parse([]byte(minimalYAML + "admin:\n  probes:\n    metrics: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !*c.Admin.Probes.Enabled || c.Admin.Probes.Address != ":9902" || !*c.Admin.Probes.Metrics || c.Admin.Auth.Management != "auto" {
+		t.Errorf("partial probes block: got enabled=%v address=%q metrics=%v management=%q", *c.Admin.Probes.Enabled, c.Admin.Probes.Address, *c.Admin.Probes.Metrics, c.Admin.Auth.Management)
+	}
+
+	c, err = Parse([]byte(minimalYAML + "admin:\n  probes:\n    enabled: false\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *c.Admin.Probes.Enabled {
+		t.Error("explicit probes.enabled false was replaced")
+	}
+
+	c, err = Parse([]byte(minimalYAML + "admin:\n  probes:\n    address: \"\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Admin.Probes.Address != ":9902" {
+		t.Errorf("empty probes.address = %q, want the default :9902", c.Admin.Probes.Address)
+	}
+
+	g := goConfig(1)
+	if err := g.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	checkProbeDefaults(t, g)
+
+	g = goConfig(1)
+	g.Admin.Probes.Enabled = boolPtr(false)
+	if err := g.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if *g.Admin.Probes.Enabled {
+		t.Error("Go-built probes.enabled false was replaced")
+	}
+}
+
+func checkProbeDefaults(t *testing.T, c *Config) {
+	t.Helper()
+	if c.Admin.Address != "127.0.0.1:9901" {
+		t.Errorf("Admin.Address = %q, want 127.0.0.1:9901", c.Admin.Address)
+	}
+	if c.Admin.Probes.Enabled == nil || !*c.Admin.Probes.Enabled {
+		t.Error("Probes.Enabled is not true by default")
+	}
+	if c.Admin.Probes.Address != ":9902" {
+		t.Errorf("Probes.Address = %q, want :9902", c.Admin.Probes.Address)
+	}
+	if c.Admin.Probes.Metrics == nil || *c.Admin.Probes.Metrics {
+		t.Error("Probes.Metrics is not false by default")
+	}
+	if c.Admin.Auth.Management != "auto" {
+		t.Errorf("Auth.Management = %q, want auto", c.Admin.Auth.Management)
+	}
+}
+
+func TestIsLoopbackAddress(t *testing.T) {
+	cases := []struct {
+		addr string
+		want bool
+	}{
+		{"127.0.0.1:1", true},
+		{"[::1]:1", true},
+		{"localhost:1", true},
+		{"LOCALHOST:1", true},
+		{"127.0.0.2:1", true},
+		{"127.0.0.1:0", true},
+		{":1", false},
+		{"0.0.0.0:1", false},
+		{"[::]:1", false},
+		{"host:1", false},
+		{"10.0.0.1:1", false},
+		{"127.0.0.1", false},
+		{"localhost", false},
+		{"[::1]", false},
+		{"", false},
+		{"127.0.0.1:x", false},
+		{"127.0.0.1:65536", false},
+		{"[::1%lo0]:1", false},
+	}
+	for _, tc := range cases {
+		if got := IsLoopbackAddress(tc.addr); got != tc.want {
+			t.Errorf("IsLoopbackAddress(%q) = %v, want %v", tc.addr, got, tc.want)
+		}
+	}
+}
+
+func TestManagementAuthRequired(t *testing.T) {
+	for _, addr := range []string{"127.0.0.1:9901", "0.0.0.0:9901"} {
+		loopback := IsLoopbackAddress(addr)
+		for _, mode := range []string{"auto", "", "required", "none", "open"} {
+			a := Admin{Address: addr, Auth: AdminAuth{Management: mode}}
+			var want bool
+			switch mode {
+			case "auto", "":
+				want = !loopback
+			case "required", "open":
+				want = true
+			case "none":
+				want = false
+			}
+			if got := a.ManagementAuthRequired(); got != want {
+				t.Errorf("address %s mode %q: ManagementAuthRequired() = %v, want %v", addr, mode, got, want)
+			}
+		}
+	}
+}
+
+func TestAdminExposureInvalid(t *testing.T) {
+	cases := []struct {
+		name    string
+		admin   string
+		goAdmin func(*Admin)
+		path    string
+		msg     string
+	}{
+		{
+			"auto non-loopback without keys",
+			"admin:\n  address: \"0.0.0.0:9901\"\n",
+			func(a *Admin) { a.Address = "0.0.0.0:9901" },
+			"admin.auth.keys", `non-loopback address "0.0.0.0:9901"`,
+		},
+		{
+			"empty host without keys",
+			"admin:\n  address: \":9901\"\n",
+			func(a *Admin) { a.Address = ":9901" },
+			"admin.auth.keys", `non-loopback address ":9901"`,
+		},
+		{
+			"explicit auto unspecified IPv6 without keys",
+			"admin:\n  address: \"[::]:9901\"\n  auth:\n    management: auto\n",
+			func(a *Admin) { a.Address = "[::]:9901"; a.Auth.Management = "auto" },
+			"admin.auth.keys", "non-loopback",
+		},
+		{
+			"required on loopback without keys",
+			"admin:\n  auth:\n    management: required\n",
+			func(a *Admin) { a.Auth.Management = "required" },
+			"admin.auth.keys", "admin.auth.management is required",
+		},
+		{
+			"unknown management mode",
+			"admin:\n  auth:\n    management: open\n",
+			func(a *Admin) { a.Auth.Management = "open" },
+			"admin.auth.management", "must be one of auto, required, none",
+		},
+		{
+			"invalid probe address",
+			"admin:\n  probes:\n    address: \"nowhere\"\n",
+			func(a *Admin) { a.Probes.Address = "nowhere" },
+			"admin.probes.address", `invalid address "nowhere"`,
+		},
+		{
+			"probe port out of range",
+			"admin:\n  probes:\n    address: \":99999\"\n",
+			func(a *Admin) { a.Probes.Address = ":99999" },
+			"admin.probes.address", "invalid address",
+		},
+		{
+			"whitespace probe address",
+			"admin:\n  probes:\n    address: \" \"\n",
+			func(a *Admin) { a.Probes.Address = " " },
+			"admin.probes.address", "invalid address",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse([]byte("version: 1\n" + adminSeedError + minimalBody + tc.admin))
+			checkAdminErr(t, err, tc.path, tc.msg, nil, true)
+			c := goConfig(1)
+			c.Global.DrainTimeout = Duration(-time.Second)
+			tc.goAdmin(&c.Admin)
+			checkAdminErr(t, c.Validate(), tc.path, tc.msg, nil, false)
+		})
+	}
+}
+
+func TestAdminExposureOnePass(t *testing.T) {
+	doc := "version: 1\n" + adminSeedError + minimalBody + "admin:\n  address: \"0.0.0.0:9901\"\n  probes:\n    address: \"nowhere\"\n"
+	_, err := Parse([]byte(doc))
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("want *ValidationError, got %T: %v", err, err)
+	}
+	want := map[string]bool{"global.drain_timeout": false, "admin.auth.keys": false, "admin.probes.address": false}
+	for _, fe := range ve.Errors {
+		if _, ok := want[fe.Path]; ok {
+			want[fe.Path] = true
+			if fe.Line <= 0 {
+				t.Errorf("%s reported with line %d, want a line", fe.Path, fe.Line)
+			}
+		}
+	}
+	for path, found := range want {
+		if !found {
+			t.Errorf("no error at %s: %v", path, err)
+		}
+	}
+	if strings.Contains(err.Error(), "sha256:") {
+		t.Errorf("error text carries a hash: %v", err)
+	}
+}
+
+func TestAdminExposureValid(t *testing.T) {
+	keyA := []adminSpec{{"ops", "sha256:" + adminHexA}}
+	cases := []struct {
+		name    string
+		admin   string
+		goAdmin func(*Admin)
+	}{
+		{
+			"none on unspecified address without keys",
+			"admin:\n  address: \"0.0.0.0:9901\"\n  auth:\n    management: none\n",
+			func(a *Admin) { a.Address = "0.0.0.0:9901"; a.Auth.Management = "none" },
+		},
+		{
+			"auto on unspecified address with one key",
+			"admin:\n  address: \"0.0.0.0:9901\"\n  auth:\n    keys:\n" + adminKeysYAML(keyA),
+			func(a *Admin) { a.Address = "0.0.0.0:9901"; a.Auth.Keys = adminKeysGo(keyA) },
+		},
+		{
+			"required on loopback with one key",
+			"admin:\n  auth:\n    management: required\n    keys:\n" + adminKeysYAML(keyA),
+			func(a *Admin) { a.Auth.Management = "required"; a.Auth.Keys = adminKeysGo(keyA) },
+		},
+		{
+			"disabled admin on unspecified address without keys",
+			"admin:\n  enabled: false\n  address: \"0.0.0.0:9901\"\n",
+			func(a *Admin) { a.Enabled = boolPtr(false); a.Address = "0.0.0.0:9901" },
+		},
+		{
+			"disabled admin with required and no keys",
+			"admin:\n  enabled: false\n  auth:\n    management: required\n",
+			func(a *Admin) { a.Enabled = boolPtr(false); a.Auth.Management = "required" },
+		},
+		{
+			"disabled probes with invalid address",
+			"admin:\n  probes:\n    enabled: false\n    address: \"nowhere\"\n",
+			func(a *Admin) { a.Probes.Enabled = boolPtr(false); a.Probes.Address = "nowhere" },
+		},
+		{
+			"localhost on auto without keys",
+			"admin:\n  address: \"localhost:9901\"\n",
+			func(a *Admin) { a.Address = "localhost:9901" },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Parse([]byte(minimalYAML + tc.admin)); err != nil {
+				t.Errorf("Parse: %v", err)
+			}
+			c := goConfig(1)
+			tc.goAdmin(&c.Admin)
+			if err := c.Validate(); err != nil {
+				t.Errorf("Validate: %v", err)
+			}
+		})
+	}
+}
+
+func TestAdminExposureInvalidAddressNoDerived(t *testing.T) {
+	_, err := Parse([]byte(minimalYAML + "admin:\n  address: \"nowhere\"\n"))
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("want *ValidationError, got %T: %v", err, err)
+	}
+	atAddress := false
+	for _, fe := range ve.Errors {
+		if fe.Path == "admin.address" {
+			atAddress = true
+		}
+		if fe.Path == "admin.auth.keys" {
+			t.Errorf("derived error at admin.auth.keys: %v", err)
+		}
+	}
+	if !atAddress {
+		t.Errorf("no error at admin.address: %v", err)
+	}
+}
