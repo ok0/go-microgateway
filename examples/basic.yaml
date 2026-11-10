@@ -36,10 +36,12 @@ listeners:
     idle_timeout: 120s
     max_header_bytes: 1048576
 
-# The admin endpoint serves health and metrics on a loopback address only.
+# The management endpoint serves config, upstream state and metrics on loopback only. The probe listener serves /livez and /readyz on all interfaces for health checks.
 admin:
   enabled: true
   address: "127.0.0.1:9901"
+  probes:
+    address: ":9902"
 
 upstreams:
   - name: users

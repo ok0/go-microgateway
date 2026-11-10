@@ -10,7 +10,7 @@ Each table has these columns:
 - **Constraints** lists the rules that `microgateway validate` checks.
 - **Meaning** describes the key.
 
-A change to one of the following keys is not applied by a reload and needs a restart: `listeners[]` `name`, `address`, `tls`, `http2`, `h2c`, `read_header_timeout`, `read_timeout`, `write_timeout`, `idle_timeout` and `max_header_bytes`; `admin.enabled`; `admin.address`; `global.log.level`; `global.log.format`; `global.reload.debounce`; and `global.reload.poll_interval`.
+A change to one of the following keys is not applied by a reload and needs a restart: `listeners[]` `name`, `address`, `tls`, `http2`, `h2c`, `read_header_timeout`, `read_timeout`, `write_timeout`, `idle_timeout` and `max_header_bytes`; `admin.enabled`; `admin.address`; `admin.probes.enabled`; `admin.probes.address`; `global.log.level`; `global.log.format`; `global.reload.debounce`; and `global.reload.poll_interval`.
 
 ## version
 
@@ -30,7 +30,7 @@ Process-wide settings. The defaults of the `log` and `reload` blocks apply when 
 | `global.drain_timeout` | duration | `20s` | must be positive | Bounds how long shutdown waits for in-flight requests after the listeners stop. |
 | `global.shutdown_delay` | duration | `5s` | must not be negative; `0s` turns the wait off | How long the gateway keeps serving, with readiness false, after it starts shutting down and before the listeners stop. |
 
-During the shutdown delay `/readyz` returns `503` while requests are still served. Keep `shutdown_delay + drain_timeout + margin <= terminationGracePeriodSeconds` with a margin of at least 5 s; the defaults (5 s + 20 s + 5 s) fit the Kubernetes default of 30 s. To restore the earlier immediate stop and drain, set `global.shutdown_delay: 0s` and `global.drain_timeout: 30s`. See [Signals and shutdown](operations.md#signals-and-shutdown).
+During the shutdown delay `/readyz` returns `503` while requests are still served. During the shutdown delay and the drain `/readyz` returns `503` on the probe and management listeners. Keep `shutdown_delay + drain_timeout + margin <= terminationGracePeriodSeconds` with a margin of at least 5 s; the defaults (5 s + 20 s + 5 s) fit the Kubernetes default of 30 s. To restore the earlier immediate stop and drain, set `global.shutdown_delay: 0s` and `global.drain_timeout: 30s`. See [Signals and shutdown](operations.md#signals-and-shutdown).
 
 ### global.log
 
@@ -73,7 +73,7 @@ Each entry is one address the gateway accepts connections on. The `tls` block is
 
 ## admin
 
-The administrative endpoint is configured here. Its mutating endpoints, such as cache purge, are present only when `admin.auth.keys` lists at least one key. The management endpoints `/config`, `/upstreams` and `/metrics` need an `Authorization: Bearer` token that matches one of `admin.auth.keys` when `admin.auth.management` is `required`, or when it is `auto` and `admin.address` is not a loopback address. Loopback means `localhost` or an address in `127.0.0.0/8` or `::1`. An empty host such as `:9901`, `0.0.0.0` and `::` are not loopback. A missing token returns `401` and a wrong one `403`. `/livez` and `/readyz` never need a token. The probe endpoint configured under `admin.probes` serves only `/livez` and `/readyz`, and `/metrics` when `admin.probes.metrics` is `true`, without a token.
+The administrative endpoint is configured here. Its mutating endpoints, such as cache purge, are present only when `admin.auth.keys` lists at least one key. The management endpoints `/config`, `/upstreams` and `/metrics` need an `Authorization: Bearer` token that matches one of `admin.auth.keys` when `admin.auth.management` is `required`, or when it is `auto` and `admin.address` is not a loopback address. Loopback means `localhost` or an address in `127.0.0.0/8` or `::1`. An empty host such as `:9901`, `0.0.0.0` and `::` are not loopback. A missing token returns `401` and a wrong one `403`. `/livez` and `/readyz` never need a token. The probe endpoint configured under `admin.probes` serves only `/livez` and `/readyz`, and `/metrics` when `admin.probes.metrics` is `true`, without a token. The binary binds the probe endpoint as its own listener on `admin.probes.address` (default `:9902`, all interfaces), independent of `admin.enabled`, while the management endpoint stays on `admin.address` (default `127.0.0.1:9901`). `admin.probes.metrics: true` is the scrape opt-in: it exposes metrics without a token to anyone who can reach the port. `admin.probes.enabled` and `admin.probes.address` need a restart; `admin.probes.metrics`, `admin.auth.management` and `admin.auth.keys` apply on reload. See [Admin listeners](operations.md#admin-listeners).
 
 | Key | Type | Default | Constraints | Meaning |
 |---|---|---|---|---|

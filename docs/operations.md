@@ -1,6 +1,6 @@
 # Operations
 
-This guide covers running the `microgateway` binary: its commands and flags, signals and shutdown, hot reload, TLS and HTTP/2, the admin listener, the metrics it exports, its logs and the error responses it writes. The configuration keys are described in the [configuration reference](configuration.md). The cache purge API is described in the [caching guide](caching.md). Running several replicas is covered in the [multi-instance guide](multi-instance.md). Embedding the gateway in a Go program is covered in the [embedding guide](embedding.md).
+This guide covers running the `microgateway` binary: its commands and flags, signals and shutdown, hot reload, TLS and HTTP/2, the management and probe listeners, the metrics it exports, its logs and the error responses it writes. The configuration keys are described in the [configuration reference](configuration.md). The cache purge API is described in the [caching guide](caching.md). Running several replicas is covered in the [multi-instance guide](multi-instance.md). Embedding the gateway in a Go program is covered in the [embedding guide](embedding.md).
 
 ## Commands
 
@@ -32,9 +32,9 @@ Exit statuses: `0` on success, `1` when the configuration is invalid, a listener
 
 - `SIGHUP` starts a reload attempt at once, even when the watched files have not changed. The log line `reload requested` is written first. See [Hot reload](#hot-reload).
 - `SIGINT` and `SIGTERM` start a graceful shutdown. The gateway logs `shutting down` and then runs these steps in order:
-  1. Readiness turns false. `/readyz` on the admin listener returns `503` with `not_ready`, so a load balancer can stop sending new traffic.
+  1. Readiness turns false. `/readyz` on the probe listener and on the management listener returns `503` with `not_ready`, so a load balancer can stop sending new traffic.
   2. The gateway keeps serving for `global.shutdown_delay` (default `5s`). Readiness stays false and new requests are still served, so a load balancer or Kubernetes can remove the instance from its endpoints before the listeners stop.
-  3. The listeners stop accepting connections. In-flight requests get up to `global.drain_timeout` (default `20s`) to finish. The log line `drain complete` is written when they all finish.
+  3. The listeners stop accepting connections. In-flight requests get up to `global.drain_timeout` (default `20s`) to finish. The log line `drain complete` is written when they all finish. The probe and management listeners keep serving until the drain ends and then close; the probe listener closes last.
   4. If the drain timeout elapses, the remaining connections are closed and `drain timeout; connections force-closed` is logged at warn level. The process then exits with status 1.
   5. The gateway is closed and `stopped` is logged.
 - A second `SIGINT` or `SIGTERM` during the delay or the drain forces the shutdown at once. The log line `second signal; forcing shutdown` is written, remaining connections are closed and the process exits with status 1.
@@ -45,6 +45,7 @@ Exit statuses: `0` on success, `1` when the configuration is invalid, a listener
 
 - Keep `shutdown_delay + drain_timeout + margin <= terminationGracePeriodSeconds`, with a margin of at least 5 s for closing the gateway and the process exit. The defaults, 5 s + 20 s + 5 s, add up to 30 s, the Kubernetes default. Raise `terminationGracePeriodSeconds` when you raise either value.
 - During the delay `/readyz` returns `503` and requests are still served.
+- During the shutdown delay and the drain `/readyz` returns `503` on the probe listener, and `/livez` keeps returning `200`.
 - Each instance applies its own delay and drain when it receives the signal. Instances do not coordinate, and no shared store is used.
 - To restore the earlier behavior (listeners stop at once, 30 s drain), set these keys in the configuration:
 
@@ -99,6 +100,7 @@ sequenceDiagram
 - Some settings cannot change while the gateway runs. For each of these the reload logs `restart required; change not applied` at warn level, and the running value is kept. The other changes in the same file still apply.
   - `listeners` (the set of names, and per listener `name`, `address`, `tls`, `tls.min_version`, `http2`, `h2c`, `read_header_timeout`, `read_timeout`, `write_timeout`, `idle_timeout` and `max_header_bytes`)
   - `admin.enabled` and `admin.address`
+  - `admin.probes.enabled` and `admin.probes.address`
   - `global.log.level` and `global.log.format`
   - `global.reload.debounce` and `global.reload.poll_interval`
 
@@ -110,9 +112,20 @@ sequenceDiagram
 - HTTP/2 is served by the Go standard library's bundled HTTP/2 server. The configuration has no HTTP/2-specific keys. The listener's `read_timeout`, `write_timeout` and `idle_timeout` also bound HTTP/2 streams and connections, and the other HTTP/2 limits keep the standard library defaults. HTTP/2 deadlines are measured on the wall clock.
 - `read_header_timeout` defaults to `10s`, `idle_timeout` to `120s` and `max_header_bytes` to `1048576`. `read_timeout` and `write_timeout` default to `0`, which means no limit.
 
-## Admin listener
+## Admin listeners
 
-The admin endpoint is a separate listener. Its address is `admin.address` (default `127.0.0.1:9901`). Set `admin.enabled: false` to run without it. The data listeners never serve admin paths. A non-loopback `admin.address` needs at least one `admin.auth.keys` entry, and `/config`, `/upstreams` and `/metrics` on it then need a bearer token; see `admin.auth.management` in the [configuration reference](configuration.md#admin).
+The binary binds two listeners besides the data listeners, each per instance: the management listener on `admin.address` (default `127.0.0.1:9901`, loopback only) and the probe listener on `admin.probes.address` (default `:9902`, all interfaces).
+
+### Management listener
+
+The admin endpoint is a separate listener. Its address is `admin.address` (default `127.0.0.1:9901`). Set `admin.enabled: false` to run without it. The data listeners never serve admin paths. A non-loopback `admin.address` needs at least one `admin.auth.keys` entry, and `/config`, `/upstreams` and `/metrics` on it then need a bearer token; see `admin.auth.management` in the [configuration reference](configuration.md#admin). `admin.auth.management` selects one of three modes: `auto` (the default) needs a token only on a non-loopback address, `required` always needs one, and `none` never does and logs a warning on a non-loopback address.
+
+In Kubernetes, reach the loopback management port with `kubectl port-forward pod/<pod> 9901:9901`, then `curl http://127.0.0.1:9901/config`; the port-forward connects to the pod's loopback interface.
+
+```
+kubectl port-forward pod/<pod> 9901:9901
+curl http://127.0.0.1:9901/config
+```
 
 The admin listener serves HTTP/1.1 only, with a header read timeout of `10s` and an idle timeout of `120s`. Every admin response carries `Cache-Control: no-store`.
 
@@ -125,6 +138,16 @@ Endpoints:
 - `GET` and `HEAD /metrics` returns `200` with the metrics in the Prometheus text format.
 - `POST /cache/purge` removes cached responses. Its request, response and error cases are described in the [caching guide](caching.md). It is available only when `admin.auth.keys` contains at least one key and a cache is configured. A request needs an `Authorization: Bearer` header whose token matches one of the keys. A missing or malformed header returns `401` with `unauthorized`. A token that matches no key returns `403` with `forbidden`.
 - Any other path returns `404` with `not_found`. A method that the path does not accept returns `405` with `method_not_allowed`, and the `Allow` header lists the accepted methods (`GET, HEAD` for the read endpoints and `POST` for the purge endpoint).
+
+### Probe listener
+
+The probe listener serves `GET` and `HEAD` on `/livez` and `/readyz`, and on `/metrics` only when `admin.probes.metrics` is `true`. Every other path returns `404` with `not_found`, and no credential is ever needed. It never serves configuration, upstream state or purge. It is plain HTTP/1.1 even when a data listener uses TLS, with a `10s` header read timeout and a `120s` idle timeout. It is bound even when `admin.enabled` is `false`. Point kubelet `httpGet` probes at it.
+
+`admin.probes.metrics: true` lets Prometheus scrape the pod IP without a token, but anyone who can reach the port can read the metrics. Keep it `false` unless the pod network is trusted, and otherwise scrape the management listener with a token or through a sidecar.
+
+A change to `admin.probes.address` or `admin.probes.enabled` (as for `admin.address` and `admin.enabled`) is restart-required: the reload logs `restart required; change not applied` and the running listener stays. `admin.probes.metrics` applies on reload.
+
+A bind failure, including a port already used by another listener, stops startup with an error naming `listener "probe"` and the address. Turn the listener off with `admin.probes.enabled: false`.
 
 ## Metrics
 
@@ -222,7 +245,8 @@ Messages that matter during operation:
 
 | Level | Message | When |
 |-------|---------|------|
-| info | `listening` | A listener is bound. The fields are `listener` and `address`. |
+| info | `listening` | A listener is bound. The fields are `listener` and `address`. `listener` is `admin` or `probe` for the two admin listeners. |
+| info | `probe listener is unauthenticated and serves only /livez and /readyz` | The probe listener is bound. With `admin.probes.metrics: true` the message is `probe listener is unauthenticated and serves /livez, /readyz and /metrics`. The field is `address`. |
 | info | `reload requested` | A `SIGHUP` was received. |
 | info | `configuration reloaded` | A reload was applied. |
 | debug | `configuration unchanged` | A reload found no change. |

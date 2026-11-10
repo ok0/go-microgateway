@@ -25,6 +25,7 @@ listeners:
     address: ":8080"
 
 # The admin endpoint listens on loopback only. Cache purge is available because a bearer token is configured.
+# The binary also binds the probe listener on :9902 (all interfaces, /livez and /readyz only); set admin.probes.enabled: false to turn it off.
 admin:
   address: "127.0.0.1:9901"
   auth:

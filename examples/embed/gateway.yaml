@@ -9,6 +9,7 @@
 #     curl -H 'X-API-Key: example-api-key-embed' http://127.0.0.1:8080/api/items
 #   Admin token example-admin-token for the admin listener, cache purge only:
 #     curl -X POST -H 'Authorization: Bearer example-admin-token' -d '{"all":true}' http://127.0.0.1:9901/cache/purge
+# An embedding program binds no probe listener itself; serve Gateway.ProbeHandler on a listener of your own for health checks.
 version: 1
 
 listeners:

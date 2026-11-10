@@ -58,7 +58,7 @@ A reload builds a complete new configuration before it changes anything. The new
 
 When the new snapshot is installed, each request keeps the snapshot it started with until it finishes. A request that started before the swap is handled entirely by the old configuration, and a request that starts after the swap is handled entirely by the new one. The old snapshot is released after its last request finishes, so state it owns, such as connections to upstreams, is closed only then.
 
-Some settings cannot change without a restart, because they belong to the listeners or to the admin endpoint: the listener names, addresses, TLS settings, HTTP/2 settings, the timeouts and the header size limit of each listener, `admin.enabled`, `admin.address`, the log level and format, and the reload timings. When the binary reloads a file that changes one of these settings, it logs a warning named `restart required; change not applied` for each field, and the running value stays in effect.
+Some settings cannot change without a restart, because they belong to the listeners or to the admin endpoint: the listener names, addresses, TLS settings, HTTP/2 settings, the timeouts and the header size limit of each listener, `admin.enabled`, `admin.address`, `admin.probes.enabled`, `admin.probes.address`, the log level and format, and the reload timings. When the binary reloads a file that changes one of these settings, it logs a warning named `restart required; change not applied` for each field, and the running value stays in effect.
 
 ## Two-module layout
 
