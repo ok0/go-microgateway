@@ -65,7 +65,7 @@ admin:
       - id: cli
         hash: "` + purgeCLIHash + `"
 `
-	h := startRun(t, writeTemp(t, cfg))
+	h := startRun(t, writeTemp(t, withZeroShutdownDelay(t, cfg)))
 	public := h.addrs.Listeners["public"].String()
 	admin := h.addrs.Admin.String()
 	client := &http.Client{Timeout: testwait.Guard(t)}

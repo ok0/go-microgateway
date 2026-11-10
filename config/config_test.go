@@ -493,8 +493,11 @@ func TestDefaults(t *testing.T) {
 	if c.Global.RequestIDHeader != "X-Request-ID" {
 		t.Errorf("RequestIDHeader = %q", c.Global.RequestIDHeader)
 	}
-	if c.Global.DrainTimeout.Std() != 30*time.Second {
+	if c.Global.DrainTimeout.Std() != 20*time.Second {
 		t.Errorf("DrainTimeout = %v", c.Global.DrainTimeout)
+	}
+	if c.Global.ShutdownDelay == nil || c.Global.ShutdownDelay.Std() != 5*time.Second {
+		t.Errorf("ShutdownDelay = %v, want 5s", c.Global.ShutdownDelay)
 	}
 	if c.Listeners[0].HTTP2 == nil || !*c.Listeners[0].HTTP2 {
 		t.Errorf("HTTP2 default not true")
@@ -558,6 +561,103 @@ func TestDefaults(t *testing.T) {
 	}
 	if cb == nil || cb.SuccessThreshold == nil || *cb.SuccessThreshold != 2 {
 		t.Errorf("default success_threshold not 2: %+v", cb)
+	}
+}
+
+func TestShutdownDefaultsFitDefaultGrace(t *testing.T) {
+	const defaultGrace = 30 * time.Second
+	const graceMargin = 5 * time.Second
+	check := func(t *testing.T, c *Config) {
+		t.Helper()
+		if c.Global.ShutdownDelay == nil {
+			t.Fatal("ShutdownDelay is nil after defaults")
+		}
+		delay := c.Global.ShutdownDelay.Std()
+		drain := c.Global.DrainTimeout.Std()
+		if delay != 5*time.Second {
+			t.Errorf("ShutdownDelay = %v, want 5s", delay)
+		}
+		if drain != 20*time.Second {
+			t.Errorf("DrainTimeout = %v, want 20s", drain)
+		}
+		if delay <= 0 {
+			t.Errorf("ShutdownDelay = %v, want > 0", delay)
+		}
+		if delay+drain+graceMargin > defaultGrace {
+			t.Errorf("shutdown_delay %v + drain_timeout %v + margin %v exceeds the default grace period %v", delay, drain, graceMargin, defaultGrace)
+		}
+	}
+	t.Run("parsed", func(t *testing.T) {
+		c, err := Parse([]byte(minimalYAML))
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, c)
+	})
+	t.Run("go-built", func(t *testing.T) {
+		c, err := Parse([]byte(minimalYAML))
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Global.ShutdownDelay = nil
+		c.Global.DrainTimeout = 0
+		if err := c.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		check(t, c)
+	})
+}
+
+func TestShutdownDelayExplicitZeroKept(t *testing.T) {
+	c, err := Parse([]byte("version: 1\nglobal:\n  shutdown_delay: 0s\n" + minimalBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Global.ShutdownDelay == nil || c.Global.ShutdownDelay.Std() != 0 {
+		t.Errorf("explicit shutdown_delay 0s not kept: %v", c.Global.ShutdownDelay)
+	}
+	if c.Global.DrainTimeout.Std() != 20*time.Second {
+		t.Errorf("DrainTimeout = %v, want 20s", c.Global.DrainTimeout)
+	}
+
+	g, err := Parse([]byte(minimalYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.Global.ShutdownDelay = durPtr(0)
+	if err := g.Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want nil", err)
+	}
+	if g.Global.ShutdownDelay == nil || g.Global.ShutdownDelay.Std() != 0 {
+		t.Errorf("go-built shutdown_delay 0 not kept: %v", g.Global.ShutdownDelay)
+	}
+}
+
+func TestShutdownDelayNegativeRejected(t *testing.T) {
+	doc := "version: 1\nglobal:\n  shutdown_delay: -1s\n  log:\n    level: loud\n" + minimalBody
+	_, err := Parse([]byte(doc))
+	fes := fieldErrors(t, err)
+	var delayCount int
+	var sawDelay, sawLevel bool
+	for _, fe := range fes {
+		switch fe.Path {
+		case "global.shutdown_delay":
+			delayCount++
+			if strings.Contains(fe.Msg, "must not be negative") && fe.Line == 3 {
+				sawDelay = true
+			}
+		case "global.log.level":
+			sawLevel = true
+		}
+	}
+	if delayCount != 1 || !sawDelay {
+		t.Errorf("want one global.shutdown_delay error at line 3 containing \"must not be negative\"")
+	}
+	if !sawLevel {
+		t.Errorf("want a global.log.level error from the same run")
+	}
+	if t.Failed() {
+		t.Logf("all field errors: %v", fes)
 	}
 }
 

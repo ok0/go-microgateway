@@ -78,7 +78,8 @@ func (c *Config) applyDefaults() {
 	if g.StripIdentityHeaders == nil {
 		g.StripIdentityHeaders = []string{"X-Consumer-ID", "X-Consumer-Metadata", "X-User-ID", "X-Auth-Subject", "X-Auth-Claims"}
 	}
-	defDur(&g.DrainTimeout, 30*time.Second)
+	defDur(&g.DrainTimeout, 20*time.Second)
+	defDurPtr(&g.ShutdownDelay, 5*time.Second)
 	defStr(&g.Log.Level, "info")
 	defStr(&g.Log.Format, "json")
 	defBool(&g.Log.AccessLog, true)

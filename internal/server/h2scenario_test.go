@@ -1184,6 +1184,7 @@ func TestHTTP2ShutdownLeavesNothingArmed(t *testing.T) {
 				cc := &countClock{Clock: clock.Real()}
 				cfg := w.config(t, limits(time.Hour, time.Hour, time.Hour, time.Hour))
 				cfg.Global.DrainTimeout = config.Duration(time.Second)
+				cfg.Global.ShutdownDelay = durPtr(0)
 				entered := make(chan struct{}, 1)
 				h := http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 					entered <- struct{}{}

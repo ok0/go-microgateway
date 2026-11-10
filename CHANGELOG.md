@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Breaking
+
+- `global.shutdown_delay` now defaults to `5s` (was `0s`). On `SIGTERM` or `SIGINT` each instance reports not ready on `/readyz` and keeps serving for 5 s before its listeners stop, so a load balancer can remove it first. Restore the previous behavior with `global.shutdown_delay: 0s`.
+- `global.drain_timeout` now defaults to `20s` (was `30s`), so `shutdown_delay + drain_timeout + 5s` fits the default Kubernetes termination grace period of 30 s. Restore the previous value with `global.drain_timeout: 30s`.
+- In the Go API, `config.Global.ShutdownDelay` is now a `*config.Duration` (was `config.Duration`): nil takes the default and an explicit zero is kept. Code that sets it assigns a pointer, for example `d := config.Duration(0); cfg.Global.ShutdownDelay = &d`.
+
 ### Added
 
 - `make reload-load` (opt-in with `MICROGATEWAY_HEAVY=1`) runs gateways from `bin/microgateway` and in-process gateways under a paced loopback load. It reloads them through the file watcher, SIGHUP and the Go API, and checks graceful shutdown under load. It prints `PASS` only with zero failed requests, every reload effective within 2 s, exact reload counters and the same outcome on every path.

@@ -22,6 +22,11 @@ import (
 
 var serverStart = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
+func durPtr(d time.Duration) *config.Duration {
+	v := config.Duration(d)
+	return &v
+}
+
 func testConfig(t *testing.T, mutate func(*config.Config)) *config.Config {
 	t.Helper()
 	cfg := &config.Config{
@@ -118,7 +123,7 @@ func startServer(t *testing.T, cfg *config.Config, h, admin http.Handler, ready 
 }
 
 func TestServeAndShutdown(t *testing.T) {
-	cfg := testConfig(t, nil)
+	cfg := testConfig(t, func(c *config.Config) { c.Global.ShutdownDelay = durPtr(0) })
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "ok")
 	})
@@ -395,7 +400,7 @@ func TestAdminListener(t *testing.T) {
 
 func TestShutdownGraceful(t *testing.T) {
 	cfg := testConfig(t, func(c *config.Config) {
-		c.Global.ShutdownDelay = config.Duration(300 * time.Millisecond)
+		c.Global.ShutdownDelay = durPtr(300 * time.Millisecond)
 		c.Global.DrainTimeout = config.Duration(5 * time.Second)
 	})
 	entered := make(chan struct{}, 1)
@@ -471,6 +476,7 @@ func TestShutdownGraceful(t *testing.T) {
 
 func TestShutdownForced(t *testing.T) {
 	cfg := testConfig(t, func(c *config.Config) {
+		c.Global.ShutdownDelay = durPtr(0)
 		c.Global.DrainTimeout = config.Duration(200 * time.Millisecond)
 	})
 	hangEntered := make(chan struct{}, 1)
@@ -532,6 +538,15 @@ func TestShutdownForced(t *testing.T) {
 	err, _ = testwait.Recv(t, "read on hijacked connection", readErr, nil)
 	if err == nil {
 		t.Fatal("hijacked connection still readable after forced close")
+	}
+}
+
+func TestNewRequiresShutdownDelay(t *testing.T) {
+	cfg := testConfig(t, nil)
+	cfg.Global.ShutdownDelay = nil
+	_, err := New(cfg, okHandler(), okHandler(), nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "shutdown_delay") {
+		t.Fatalf("New error = %v, want error naming shutdown_delay", err)
 	}
 }
 
@@ -626,4 +641,40 @@ func TestShutdownForcedClosesBeforeCancel(t *testing.T) {
 	if r.err == nil {
 		t.Fatalf("client received status %d from a request cut off by a forced shutdown, want a connection error", r.status)
 	}
+}
+
+func TestShutdownDelayReleasesTimerWhenContextEnds(t *testing.T) {
+	t.Run("canceled-during-delay", func(t *testing.T) {
+		fake := clock.NewFake(serverStart)
+		srv := startServer(t, testConfig(t, func(c *config.Config) { c.Global.ShutdownDelay = durPtr(5 * time.Second) }), okHandler(), nil, nil, WithClock(fake))
+		if n := fake.Waiters(); n != 0 {
+			t.Fatalf("waiters before Shutdown = %d, want 0", n)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		errc := shutdownAsync(srv, ctx)
+		awaitDue(t, fake, 1, 5*time.Second, "shutdown delay timer")
+		cancel()
+		err, _ := testwait.Recv(t, "Shutdown to return after ctx cancel", errc, nil)
+		if !errors.Is(err, ErrForcedClose) {
+			t.Fatalf("Shutdown error = %v, want ErrForcedClose", err)
+		}
+		if !fake.Now().Equal(serverStart) {
+			t.Fatalf("fake clock advanced to %v, want %v", fake.Now(), serverStart)
+		}
+		testwait.Until(t, "shutdown delay timer released", func() bool { return fake.Waiters() == 0 }, func() string { return fmt.Sprintf("waiters=%d", fake.Waiters()) })
+	})
+	t.Run("canceled-before-shutdown", func(t *testing.T) {
+		fake := clock.NewFake(serverStart)
+		srv := startServer(t, testConfig(t, func(c *config.Config) { c.Global.ShutdownDelay = durPtr(5 * time.Second) }), okHandler(), nil, nil, WithClock(fake))
+		if n := fake.Waiters(); n != 0 {
+			t.Fatalf("waiters before Shutdown = %d, want 0", n)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err, _ := testwait.Recv(t, "Shutdown to return", shutdownAsync(srv, ctx), nil)
+		if !errors.Is(err, ErrForcedClose) {
+			t.Fatalf("Shutdown error = %v, want ErrForcedClose", err)
+		}
+		testwait.Until(t, "shutdown delay timer released", func() bool { return fake.Waiters() == 0 }, func() string { return fmt.Sprintf("waiters=%d", fake.Waiters()) })
+	})
 }

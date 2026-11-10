@@ -186,6 +186,15 @@ func writeTemp(t *testing.T, content string) string {
 	return path
 }
 
+// withZeroShutdownDelay returns cfg with global.shutdown_delay set to 0s, for runs stopped by a context cancel or a signal without advancing the fake clock through the default delay. cfg must start with "version: 1\n" and have no global block.
+func withZeroShutdownDelay(t *testing.T, cfg string) string {
+	t.Helper()
+	if !strings.HasPrefix(cfg, "version: 1\n") || strings.Contains(cfg, "\nglobal:") {
+		t.Fatalf("withZeroShutdownDelay: config must start with version: 1 and have no global block:\n%s", cfg)
+	}
+	return strings.Replace(cfg, "version: 1\n", "version: 1\nglobal:\n  shutdown_delay: 0s\n", 1)
+}
+
 const minimalConfig = `version: 1
 listeners:
   - name: public
@@ -622,7 +631,7 @@ func TestRunBadFlags(t *testing.T) {
 }
 
 func TestRunLogFlagOverride(t *testing.T) {
-	path := writeTemp(t, minimalConfig)
+	path := writeTemp(t, withZeroShutdownDelay(t, minimalConfig))
 	var errb bytes.Buffer
 	h := startRunArgs(t, []string{"-config", path, "-log-format", "text", "-log-level", "debug"}, &errb)
 	if code := h.stop(); code != 0 {

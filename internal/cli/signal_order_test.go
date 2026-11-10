@@ -46,7 +46,7 @@ func (w *signalWriter) String() string {
 
 func TestRunSignalsSentAtReadyAreHandled(t *testing.T) {
 	backend := echoBackend(t, "backend")
-	path := writeTemp(t, lifecycleConfig("", backend.URL))
+	path := writeTemp(t, lifecycleConfig("global:\n  shutdown_delay: 0s\n", backend.URL))
 
 	t.Run("sigterm at ready", func(t *testing.T) {
 		errb := &signalWriter{}

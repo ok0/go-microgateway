@@ -191,6 +191,7 @@ func TestHTTP2ShutdownSendsGoAway(t *testing.T) {
 }
 
 func shutdownSendsGoAway(t *testing.T, cfg *config.Config, pool *x509.CertPool) {
+	cfg.Global.ShutdownDelay = durPtr(0)
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -95,6 +95,7 @@ func TestSemanticChecks(t *testing.T) {
 		{"drain timeout negative", func(c *Config) {
 			c.Global.DrainTimeout = Duration(-time.Second)
 		}, "global.drain_timeout", "must be positive"},
+		{"shutdown delay negative", func(c *Config) { c.Global.ShutdownDelay = durPtr(-time.Second) }, "global.shutdown_delay", "must not be negative"},
 		{"zero rate on token_bucket", func(c *Config) {
 			c.Routes[0].RateLimit = &RateLimit{Algorithm: "token_bucket", Rate: int64Ptr(0)}
 		}, "routes[0].rate_limit.rate", "must be >= 1"},

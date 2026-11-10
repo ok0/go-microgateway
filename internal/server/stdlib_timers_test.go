@@ -183,7 +183,9 @@ func TestHTTP2GracefulShutdownCompletesStreams(t *testing.T) {
 		<-release
 		_, _ = io.WriteString(w, body)
 	})
-	srv := startServer(t, limitCfg(t, tlsOn(certFile, keyFile, true)), h, nil, nil, WithClock(fake))
+	cfg := limitCfg(t, tlsOn(certFile, keyFile, true))
+	cfg.Global.ShutdownDelay = durPtr(0)
+	srv := startServer(t, cfg, h, nil, nil, WithClock(fake))
 	addr := srv.Addrs()["public"].String()
 	client := h2Client(t, pool, false)
 
@@ -223,7 +225,7 @@ func TestHTTP2GracefulShutdownCompletesStreams(t *testing.T) {
 func TestShutdownKeepsYoungSilentNewConn(t *testing.T) {
 	fake := clock.NewFake(serverStart)
 	cfg := limitCfg(t, limits(time.Hour, time.Hour, time.Hour, time.Hour))
-	cfg.Global.ShutdownDelay = 0
+	cfg.Global.ShutdownDelay = durPtr(0)
 	cfg.Global.DrainTimeout = config.Duration(10 * time.Second)
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -275,7 +277,7 @@ func TestShutdownClosesSilentNewConnAfterFiveSeconds(t *testing.T) {
 		t.Skip("waits 5 s of wall time for net/http's StateNew rule")
 	}
 	cfg := limitCfg(t, limits(time.Hour, time.Hour, time.Hour, time.Hour))
-	cfg.Global.ShutdownDelay = 0
+	cfg.Global.ShutdownDelay = durPtr(0)
 	cfg.Global.DrainTimeout = config.Duration(30 * time.Second)
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})

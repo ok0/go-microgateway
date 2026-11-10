@@ -33,13 +33,28 @@ Exit statuses: `0` on success, `1` when the configuration is invalid, a listener
 - `SIGHUP` starts a reload attempt at once, even when the watched files have not changed. The log line `reload requested` is written first. See [Hot reload](#hot-reload).
 - `SIGINT` and `SIGTERM` start a graceful shutdown. The gateway logs `shutting down` and then runs these steps in order:
   1. Readiness turns false. `/readyz` on the admin listener returns `503` with `not_ready`, so a load balancer can stop sending new traffic.
-  2. The gateway keeps serving for `global.shutdown_delay` (default `0`, so no wait).
-  3. The listeners stop accepting connections. In-flight requests get up to `global.drain_timeout` (default `30s`) to finish. The log line `drain complete` is written when they all finish.
+  2. The gateway keeps serving for `global.shutdown_delay` (default `5s`). Readiness stays false and new requests are still served, so a load balancer or Kubernetes can remove the instance from its endpoints before the listeners stop.
+  3. The listeners stop accepting connections. In-flight requests get up to `global.drain_timeout` (default `20s`) to finish. The log line `drain complete` is written when they all finish.
   4. If the drain timeout elapses, the remaining connections are closed and `drain timeout; connections force-closed` is logged at warn level. The process then exits with status 1.
   5. The gateway is closed and `stopped` is logged.
-- A second `SIGINT` or `SIGTERM` during the drain forces the shutdown at once. The log line `second signal; forcing shutdown` is written, remaining connections are closed and the process exits with status 1.
+- A second `SIGINT` or `SIGTERM` during the delay or the drain forces the shutdown at once. The log line `second signal; forcing shutdown` is written, remaining connections are closed and the process exits with status 1.
 - A `SIGHUP` received during the shutdown is ignored and logged as `reload ignored; shutting down`.
 - A reload updates `global.shutdown_delay` and `global.drain_timeout` for the next shutdown.
+
+### Shutdown timing
+
+- Keep `shutdown_delay + drain_timeout + margin <= terminationGracePeriodSeconds`, with a margin of at least 5 s for closing the gateway and the process exit. The defaults, 5 s + 20 s + 5 s, add up to 30 s, the Kubernetes default. Raise `terminationGracePeriodSeconds` when you raise either value.
+- During the delay `/readyz` returns `503` and requests are still served.
+- Each instance applies its own delay and drain when it receives the signal. Instances do not coordinate, and no shared store is used.
+- To restore the earlier behavior (listeners stop at once, 30 s drain), set these keys in the configuration:
+
+  ```yaml
+  global:
+    shutdown_delay: 0s
+    drain_timeout: 30s
+  ```
+
+  These values no longer leave the 5 s margin under the 30 s default grace period.
 
 ## Hot reload
 

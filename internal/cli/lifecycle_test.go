@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ok0/go-microgateway/config"
 	"github.com/ok0/go-microgateway/internal/clock"
 	"github.com/ok0/go-microgateway/internal/testcert"
 	"github.com/ok0/go-microgateway/internal/testwait"
@@ -291,7 +292,7 @@ func TestRunTLS(t *testing.T) {
 	dir := t.TempDir()
 	certFile, keyFile, pool := testcert.Write(t, dir)
 	backend := wsBackend(t)
-	path := writeTemp(t, tlsConfigYAML(backend.URL, certFile, keyFile, ""))
+	path := writeTemp(t, withZeroShutdownDelay(t, tlsConfigYAML(backend.URL, certFile, keyFile, "")))
 
 	h := startRun(t, path)
 	secure := h.addrs.Listeners["secure"].String()
@@ -355,7 +356,7 @@ func TestRunTLSHTTP1Only(t *testing.T) {
 	dir := t.TempDir()
 	certFile, keyFile, pool := testcert.Write(t, dir)
 	backend := wsBackend(t)
-	path := writeTemp(t, tlsConfigYAML(backend.URL, certFile, keyFile, "    http2: false\n"))
+	path := writeTemp(t, withZeroShutdownDelay(t, tlsConfigYAML(backend.URL, certFile, keyFile, "    http2: false\n")))
 
 	h := startRun(t, path)
 	secure := h.addrs.Listeners["secure"].String()
@@ -538,6 +539,7 @@ func TestRunForcedShutdown(t *testing.T) {
 	ws := wsBackend(t)
 	path := writeTemp(t, fmt.Sprintf(`version: 1
 global:
+  shutdown_delay: 0s
   drain_timeout: 300ms
 listeners:
   - name: public
@@ -602,7 +604,7 @@ routes:
 
 func TestRunSecondSignal(t *testing.T) {
 	hold, entered, _ := holdBackend(t)
-	path := writeTemp(t, lifecycleConfig("global:\n  drain_timeout: 1m\n", hold.URL))
+	path := writeTemp(t, lifecycleConfig("global:\n  shutdown_delay: 0s\n  drain_timeout: 1m\n", hold.URL))
 
 	h := startRun(t, path)
 	public := h.addrs.Listeners["public"].String()
@@ -617,5 +619,144 @@ func TestRunSecondSignal(t *testing.T) {
 	h.sig <- syscall.SIGTERM
 	if code := h.wait(t); code == 0 {
 		t.Error("exit code = 0, want nonzero after second signal")
+	}
+}
+
+func TestRunShutdownSequenceDefaultDelay(t *testing.T) {
+	backend, entered, release := holdBackend(t)
+	path := writeTemp(t, lifecycleConfig("global:\n  reload:\n    poll_interval: 1h\n", backend.URL))
+
+	cfg, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delay, drain := cfg.Global.ShutdownDelay.Std(), cfg.Global.DrainTimeout.Std()
+	if delay <= 0 {
+		t.Fatalf("default shutdown delay = %v, want > 0", delay)
+	}
+	bound := delay + drain + 5*time.Second
+
+	var errb syncBuffer
+	h := startRunArgs(t, []string{"-config", path}, &errb)
+	public := h.addrs.Listeners["public"].String()
+	admin := h.addrs.Admin.String()
+
+	holdRes := startHold(t, public)
+	testwait.Recv(t, "/hold request to reach the backend", entered, nil)
+
+	sigAt := h.clk.Now()
+	h.sig <- syscall.SIGTERM
+	eventually(t, "readiness to report 503 after SIGTERM before any clock advance", func() bool { return readyzStatus(t, admin) == http.StatusServiceUnavailable })
+	if now := h.clk.Now(); !now.Equal(sigAt) {
+		t.Fatalf("fake clock moved from %v to %v before any advance", sigAt, now)
+	}
+
+	fastClient := &http.Client{
+		Timeout:   testwait.Guard(t),
+		Transport: &http.Transport{DisableKeepAlives: true},
+	}
+	resp, body := fetchURL(t, fastClient, "http://"+public+"/fast")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/fast during shutdown delay: status = %d, want 200; body %s", resp.StatusCode, body)
+	}
+
+	awaitDue(t, h.clk, 1, delay, "shutdown delay timer armed", errb.String)
+	h.clk.Advance(delay - time.Millisecond)
+	if n := h.clk.Due(time.Millisecond); n < 1 {
+		t.Fatalf("no timer due within 1ms at delay-1ms; the shutdown delay ended early")
+	}
+	select {
+	case code := <-h.done:
+		t.Fatalf("Main returned %d before the shutdown delay elapsed; stderr:\n%s", code, errb.String())
+	default:
+	}
+	conn, err := net.Dial("tcp", public)
+	if err != nil {
+		t.Fatalf("data listener refused a connection inside the shutdown delay: %v", err)
+	}
+	_ = conn.Close()
+	resp, body = fetchURL(t, fastClient, "http://"+public+"/fast")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/fast at delay-1ms: status = %d, want 200; body %s", resp.StatusCode, body)
+	}
+	if s := readyzStatus(t, admin); s != http.StatusServiceUnavailable {
+		t.Fatalf("/readyz at delay-1ms: status = %d, want 503", s)
+	}
+	select {
+	case r := <-holdRes:
+		t.Fatalf("/hold finished before release inside the shutdown delay: %+v", r)
+	default:
+	}
+
+	h.clk.Advance(time.Millisecond)
+	eventually(t, "data listener to refuse new connections once the shutdown delay ended", func() bool {
+		conn, err := net.Dial("tcp", public)
+		if err != nil {
+			return true
+		}
+		_ = conn.Close()
+		return false
+	})
+	select {
+	case r := <-holdRes:
+		t.Fatalf("/hold finished before release after the listener closed: %+v", r)
+	default:
+	}
+
+	close(release)
+	r, _ := testwait.Recv(t, "/hold to complete after release", holdRes, nil)
+	if r.err != nil || r.status != http.StatusOK {
+		t.Fatalf("/hold result = %+v, want status 200", r)
+	}
+
+	code := h.wait(t)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr:\n%s", code, errb.String())
+	}
+	elapsed := h.clk.Now().Sub(sigAt)
+	if elapsed < delay || elapsed > bound {
+		t.Errorf("shutdown elapsed %v after SIGTERM, want between delay %v and bound %v (drain %v)", elapsed, delay, bound, drain)
+	}
+	if !strings.Contains(errb.String(), "drain complete") {
+		t.Errorf("stderr lacks drain complete; stderr:\n%s", errb.String())
+	}
+	if conn, err := net.Dial("tcp", public); err == nil {
+		_ = conn.Close()
+		t.Error("data listener still accepts connections after shutdown")
+	}
+}
+
+func TestRunSecondSignalDuringDelay(t *testing.T) {
+	hold, entered, _ := holdBackend(t)
+	path := writeTemp(t, lifecycleConfig("global:\n  reload:\n    poll_interval: 1h\n", hold.URL))
+
+	cfg, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delay := cfg.Global.ShutdownDelay.Std()
+
+	var errb syncBuffer
+	h := startRunArgs(t, []string{"-config", path}, &errb)
+	public := h.addrs.Listeners["public"].String()
+	admin := h.addrs.Admin.String()
+
+	_ = startHold(t, public)
+	testwait.Recv(t, "/hold request to reach the backend", entered, nil)
+
+	sigAt := h.clk.Now()
+	h.sig <- syscall.SIGTERM
+	eventually(t, "readiness to report 503 after SIGTERM", func() bool { return readyzStatus(t, admin) == http.StatusServiceUnavailable })
+	awaitDue(t, h.clk, 1, delay, "shutdown delay timer armed", errb.String)
+
+	h.sig <- syscall.SIGTERM
+	if code := h.wait(t); code != 1 {
+		t.Fatalf("exit code = %d, want 1 after second signal during the delay; stderr:\n%s", code, errb.String())
+	}
+	if now := h.clk.Now(); !now.Equal(sigAt) {
+		t.Errorf("fake clock moved from %v to %v; the second signal should force shutdown without advancing it", sigAt, now)
+	}
+	if !strings.Contains(errb.String(), "second signal; forcing shutdown") {
+		t.Errorf("stderr lacks forced-shutdown log; stderr:\n%s", errb.String())
 	}
 }

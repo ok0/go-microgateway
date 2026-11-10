@@ -190,7 +190,7 @@ routes:
 func TestRunReloadOnFileEdit(t *testing.T) {
 	a := echoBackend(t, "a")
 	b := echoBackend(t, "b")
-	path := writeTemp(t, twoRouteConfig(a.URL, b.URL, false))
+	path := writeTemp(t, withZeroShutdownDelay(t, twoRouteConfig(a.URL, b.URL, false)))
 
 	h := startRun(t, path)
 	public := h.addrs.Listeners["public"].String()
@@ -199,7 +199,7 @@ func TestRunReloadOnFileEdit(t *testing.T) {
 		t.Fatalf("/a status = %d, want 200; body %s", resp.StatusCode, body)
 	}
 
-	replaceAtomic(t, path, []byte(twoRouteConfig(a.URL, b.URL, true)))
+	replaceAtomic(t, path, []byte(withZeroShutdownDelay(t, twoRouteConfig(a.URL, b.URL, true))))
 	eventuallyAdvancing(t, "/b served after the rename", h.clk, reloadStep, func() bool { return statusOf(client, "http://"+public+"/b/y") == http.StatusOK }, nil)
 	resp, body := doGet(t, client, public, "/b/y", "", nil)
 	if resp.StatusCode != http.StatusOK {
@@ -226,6 +226,8 @@ func TestRunSIGHUPReloadsEnvironment(t *testing.T) {
 	backend := echoBackend(t, "users")
 	t.Setenv("MICROGATEWAY_TEST_ENV", "one")
 	path := writeTemp(t, fmt.Sprintf(`version: 1
+global:
+  shutdown_delay: 0s
 listeners:
   - name: public
     address: "127.0.0.1:0"
@@ -279,6 +281,8 @@ func TestRunReloadFailureKeepsServing(t *testing.T) {
 	backend := echoBackend(t, "users")
 	valid := func(route string) string {
 		return fmt.Sprintf(`version: 1
+global:
+  shutdown_delay: 0s
 listeners:
   - name: public
     address: "127.0.0.1:0"
@@ -362,6 +366,7 @@ func TestRunRestartRequiredWarnings(t *testing.T) {
 		}
 		return fmt.Sprintf(`version: 1
 global:
+  shutdown_delay: 0s
   log:
     level: %s
 listeners:
@@ -464,6 +469,7 @@ func TestRunCertificateReload(t *testing.T) {
 	certConfig := func(renC, renK string) string {
 		return fmt.Sprintf(`version: 1
 global:
+  shutdown_delay: 0s
   reload:
     poll_interval: 100ms
 listeners:

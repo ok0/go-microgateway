@@ -34,10 +34,10 @@ type Global struct {
 	TrustedProxies []string `yaml:"trusted_proxies" json:"trusted_proxies"`
 	// StripIdentityHeaders lists headers removed from inbound requests. Default [X-Consumer-ID, X-Consumer-Metadata, X-User-ID, X-Auth-Subject, X-Auth-Claims], applied only when nil.
 	StripIdentityHeaders []string `yaml:"strip_identity_headers" json:"strip_identity_headers"`
-	// DrainTimeout bounds how long shutdown waits for in-flight requests. Default 30s.
+	// DrainTimeout bounds how long shutdown waits for in-flight requests after the listeners stop. Default 20s.
 	DrainTimeout Duration `yaml:"drain_timeout" json:"drain_timeout"`
-	// ShutdownDelay is how long the gateway keeps serving after it starts shutting down. Default 0.
-	ShutdownDelay Duration `yaml:"shutdown_delay" json:"shutdown_delay"`
+	// ShutdownDelay is how long the gateway keeps serving, with readiness false, after it starts shutting down and before its listeners stop. Default 5s. Nil means unset and takes the default; an explicit 0 is kept and turns the wait off.
+	ShutdownDelay *Duration `yaml:"shutdown_delay" json:"shutdown_delay"`
 	// Log configures logging.
 	Log Log `yaml:"log" json:"log"`
 	// Reload configures configuration reloading.

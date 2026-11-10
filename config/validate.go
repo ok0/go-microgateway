@@ -182,7 +182,9 @@ func checkGlobal(ck *checker, g *Global) {
 		}
 	}
 	requirePositive(ck, "global.drain_timeout", g.DrainTimeout)
-	requireNonNegative(ck, "global.shutdown_delay", g.ShutdownDelay)
+	if g.ShutdownDelay != nil {
+		requireNonNegative(ck, "global.shutdown_delay", *g.ShutdownDelay)
+	}
 	if !slices.Contains([]string{"debug", "info", "warn", "error"}, g.Log.Level) {
 		ck.add("global.log.level", "must be one of debug, info, warn, error")
 	}

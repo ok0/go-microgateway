@@ -154,6 +154,9 @@ func New(cfg *config.Config, h http.Handler, admin http.Handler, ready func(bool
 			}
 		}
 	}
+	if cfg.Global.ShutdownDelay == nil {
+		return nil, errors.New("server: global.shutdown_delay is not set; validate the configuration first")
+	}
 	s := &Server{
 		cfg:           cfg,
 		logger:        logger,
@@ -329,10 +332,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	delay, drain := s.shutdownDelay, s.drainTimeout
 	s.mu.Unlock()
 	if delay > 0 {
-		select {
-		case <-s.clk.After(delay):
-		case <-ctx.Done():
-		}
+		// The delay ends early when ctx is done; stopping it releases its timer either way.
+		delayCtx, stopDelay := clock.WithTimeout(ctx, s.clk, delay)
+		<-delayCtx.Done()
+		stopDelay()
 	}
 	drainCtx, cancel := clock.WithTimeout(ctx, s.clk, drain)
 	errs := make([]error, len(s.data))

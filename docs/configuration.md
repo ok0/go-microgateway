@@ -27,8 +27,10 @@ Process-wide settings. The defaults of the `log` and `reload` blocks apply when 
 | `global.request_id_header` | string | `X-Request-ID` | must not be empty | Header that carries the request identifier. |
 | `global.trusted_proxies` | list of strings | none | each entry is an IP address or a CIDR prefix | Addresses or prefixes whose forwarding headers are trusted. |
 | `global.strip_identity_headers` | list of strings | `[X-Consumer-ID, X-Consumer-Metadata, X-User-ID, X-Auth-Subject, X-Auth-Claims]` | applied only when the key is absent; an explicit empty list keeps no default | Headers removed from inbound requests. |
-| `global.drain_timeout` | duration | `30s` | must be positive | Bounds how long shutdown waits for in-flight requests. |
-| `global.shutdown_delay` | duration | none | must not be negative | How long the gateway keeps serving after it starts shutting down. |
+| `global.drain_timeout` | duration | `20s` | must be positive | Bounds how long shutdown waits for in-flight requests after the listeners stop. |
+| `global.shutdown_delay` | duration | `5s` | must not be negative; `0s` turns the wait off | How long the gateway keeps serving, with readiness false, after it starts shutting down and before the listeners stop. |
+
+During the shutdown delay `/readyz` returns `503` while requests are still served. Keep `shutdown_delay + drain_timeout + margin <= terminationGracePeriodSeconds` with a margin of at least 5 s; the defaults (5 s + 20 s + 5 s) fit the Kubernetes default of 30 s. To restore the earlier immediate stop and drain, set `global.shutdown_delay: 0s` and `global.drain_timeout: 30s`. See [Signals and shutdown](operations.md#signals-and-shutdown).
 
 ### global.log
 

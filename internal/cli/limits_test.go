@@ -69,7 +69,7 @@ func TestRunServerLimitsOnClock(t *testing.T) {
 	backend := echoBackend(t, "echo")
 
 	t.Run("header", func(t *testing.T) {
-		h := startRun(t, writeTemp(t, limitsRunConfig(backend.URL)))
+		h := startRun(t, writeTemp(t, withZeroShutdownDelay(t, limitsRunConfig(backend.URL))))
 		public := h.addrs.Listeners["public"].String()
 
 		before := h.clk.Due(2 * time.Second)
@@ -96,7 +96,7 @@ func TestRunServerLimitsOnClock(t *testing.T) {
 	})
 
 	t.Run("idle", func(t *testing.T) {
-		h := startRun(t, writeTemp(t, limitsRunConfig(backend.URL)))
+		h := startRun(t, writeTemp(t, withZeroShutdownDelay(t, limitsRunConfig(backend.URL))))
 		public := h.addrs.Listeners["public"].String()
 
 		var wc *watchConn

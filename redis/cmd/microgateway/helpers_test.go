@@ -93,6 +93,8 @@ func adminKeyHash(token string) string {
 func instanceDoc(o docOpts) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "version: 1\n")
+	// Instances stop by SIGTERM without advancing their fake clock, so the fixture keeps the immediate stop explicitly.
+	fmt.Fprintf(&b, "global:\n  shutdown_delay: 0s\n")
 	fmt.Fprintf(&b, "listeners:\n  - name: public\n    address: \"127.0.0.1:0\"\n")
 	fmt.Fprintf(&b, "admin:\n  address: \"127.0.0.1:0\"\n")
 	if o.Cache {
