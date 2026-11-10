@@ -16,44 +16,44 @@ To render the manifests without installing them:
 helm template gateway deploy/helm/microgateway -f values.yaml > gateway.yaml
 ```
 
-The chart needs Helm 4, or Helm 3.22 or later. The default image is `ghcr.io/ok0/go-microgateway:<appVersion>`. That image exists only after the release tag with the same version is published. Before then, set `image.repository` and `image.tag` to an image you built with `make docker`.
+The chart needs Helm 4, or Helm 3.22 or later. The default image is `ghcr.io/ok0/go-microgateway:<appVersion>`. That image exists only after the release tag with the same version is published. Before then, set `values.image.repository` and `values.image.tag` to an image you built with `make docker`.
 
 ## Values
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `image.repository` | `ghcr.io/ok0/go-microgateway` | Image repository. |
-| `image.tag` | `""` | Image tag. Empty means the chart `appVersion`. |
-| `image.pullPolicy` | `IfNotPresent` | Image pull policy. |
-| `replicaCount` | `2` | Replicas. Used only when autoscaling is off. |
-| `autoscaling.enabled` | `true` | Creates a HorizontalPodAutoscaler and leaves the replica count to it. |
-| `autoscaling.minReplicas` | `2` | Lowest replica count the autoscaler sets. |
-| `autoscaling.maxReplicas` | `10` | Highest replica count the autoscaler sets. |
-| `autoscaling.targetCPUUtilizationPercentage` | `70` | Average CPU utilization, in percent of the request, that the autoscaler aims for. |
-| `podDisruptionBudget.enabled` | `true` | Creates a PodDisruptionBudget. |
-| `podDisruptionBudget.maxUnavailable` | `1` | Pods that voluntary disruptions may take down at once. |
-| `resources.requests.cpu` | `100m` | CPU request of the gateway container. |
-| `resources.requests.memory` | `64Mi` | Memory request of the gateway container. |
-| `resources.limits.memory` | `256Mi` | Memory limit of the gateway container. The chart sets no CPU limit. |
-| `shutdown.delay` | `10s` | Value of `global.shutdown_delay`. Must be greater than `0s`. |
-| `shutdown.drainTimeout` | `20s` | Value of `global.drain_timeout`. Must be greater than `0s`. |
-| `shutdown.terminationGracePeriodSeconds` | `40` | Pod termination grace period. Must be at least `delay + drainTimeout + 5s`. |
-| `ports.http` | `8080` | Container port of the data listeners, and the port that the Service targets. |
-| `ports.probe` | `9902` | Container port of the probe listener. |
-| `service.type` | `ClusterIP` | Service type. |
-| `service.port` | `80` | Service port for the `http` port. |
-| `metrics.enabled` | `false` | Serves `/metrics` on the probe listener, without a token. |
-| `redis.enabled` | `false` | Uses an external Redis for rate limits and the response cache. |
-| `redis.address` | `""` | Address of the Redis server, as `host:port`. Required when Redis is enabled. |
-| `redis.keyPrefix` | `microgateway` | Prefix of the keys that the gateway writes to Redis. |
-| `redis.existingSecret` | `""` | Secret that holds the Redis password. Required when Redis is enabled. |
-| `redis.passwordKey` | `password` | Key of the Secret that holds the Redis password. |
-| `env` | `[]` | Extra container environment entries, appended after the chart's own entries. |
-| `config` | `{}` | Gateway configuration, merged with the chart defaults as described in [Gateway configuration](#gateway-configuration). |
+| `values.image.repository` | `ghcr.io/ok0/go-microgateway` | Image repository. |
+| `values.image.tag` | `""` | Image tag. Empty means the chart `appVersion`. |
+| `values.image.pullPolicy` | `IfNotPresent` | Image pull policy. |
+| `values.replicaCount` | `2` | Replicas. Used only when autoscaling is off. |
+| `values.autoscaling.enabled` | `true` | Creates a HorizontalPodAutoscaler and leaves the replica count to it. |
+| `values.autoscaling.minReplicas` | `2` | Lowest replica count the autoscaler sets. |
+| `values.autoscaling.maxReplicas` | `10` | Highest replica count the autoscaler sets. |
+| `values.autoscaling.targetCPUUtilizationPercentage` | `70` | Average CPU utilization, in percent of the request, that the autoscaler aims for. |
+| `values.podDisruptionBudget.enabled` | `true` | Creates a PodDisruptionBudget. |
+| `values.podDisruptionBudget.maxUnavailable` | `1` | Pods that voluntary disruptions may take down at once. |
+| `values.resources.requests.cpu` | `100m` | CPU request of the gateway container. |
+| `values.resources.requests.memory` | `64Mi` | Memory request of the gateway container. |
+| `values.resources.limits.memory` | `256Mi` | Memory limit of the gateway container. The chart sets no CPU limit. |
+| `values.shutdown.delay` | `10s` | Value of `global.shutdown_delay`. Must be greater than `0s`. |
+| `values.shutdown.drainTimeout` | `20s` | Value of `global.drain_timeout`. Must be greater than `0s`. |
+| `values.shutdown.terminationGracePeriodSeconds` | `40` | Pod termination grace period. Must be at least `values.shutdown.delay` + `values.shutdown.drainTimeout` + 5s; see [Shutdown timing](#shutdown-timing). |
+| `values.ports.http` | `8080` | Container port of the data listeners, and the port that the Service targets. |
+| `values.ports.probe` | `9902` | Container port of the probe listener. |
+| `values.service.type` | `ClusterIP` | Service type. |
+| `values.service.port` | `80` | Service port for the `http` port. |
+| `values.metrics.enabled` | `false` | Serves `/metrics` on the probe listener, without a token. |
+| `values.redis.enabled` | `false` | Uses an external Redis for rate limits and the response cache. |
+| `values.redis.address` | `""` | Address of the Redis server, as `host:port`. Required when Redis is enabled. |
+| `values.redis.keyPrefix` | `microgateway` | Prefix of the keys that the gateway writes to Redis. |
+| `values.redis.existingSecret` | `""` | Secret that holds the Redis password. Required when Redis is enabled. |
+| `values.redis.passwordKey` | `password` | Key of the Secret that holds the Redis password. |
+| `values.env` | `[]` | Extra container environment entries, appended after the chart's own entries. |
+| `values.config` | `{}` | Gateway configuration, merged with the chart defaults as described in [Gateway configuration](#gateway-configuration). |
 
 ## Gateway configuration
 
-Write the gateway settings under `config`, using the keys of the [configuration reference](configuration.md). The values below define one upstream and one route:
+Write the gateway settings under `values.config`, using the keys of the [configuration reference](configuration.md). The values below define one upstream and one route:
 
 ```yaml
 config:
@@ -103,8 +103,8 @@ routes:
 
 The chart merges the values as follows:
 
-- The chart default for `listeners` is replaced when `config.listeners` is set. A user listener must listen on `ports.http`, because the container port and the Service target that port.
-- The chart always sets `version`, `global.shutdown_delay`, `global.drain_timeout`, `admin.address` and `admin.probes`. These values win over the same keys in `config`.
+- The chart default for `listeners` is replaced when `values.config` sets `listeners`. A user listener must listen on `values.ports.http`, because the container port and the Service target that port.
+- The chart always sets `version`, `global.shutdown_delay`, `global.drain_timeout`, `admin.address` and `admin.probes`. These values win over the same keys in `values.config`.
 - Other keys under `global` and `admin` are kept, for example `global.log` and `admin.auth`.
 - Lists are replaced, not merged.
 - With Redis enabled, `stores` and `cache.store` are set by the chart. A user `stores` list is dropped. Other keys under `cache` are kept.
@@ -189,7 +189,11 @@ routes:
 
 The password reaches the pod as the environment variable `REDIS_PASSWORD`, read from the Secret. The configuration holds only the reference `${REDIS_PASSWORD}`, so the password never appears in the ConfigMap. The response cache uses the store as soon as `cache.store` is set. Rate limits share their counters only on routes that set `store: shared`.
 
-The chart supports standalone Redis only. Sentinel and cluster modes are not set by values. To use them, leave `redis.enabled` false, write the `stores` entry in `config` with the mode you need, and pass the password through `env` with a `valueFrom.secretKeyRef` entry. Without a shared store, every rate limit, cache entry and cache purge applies to one pod only. See the [multi-instance guide](multi-instance.md).
+The chart supports standalone Redis only. Sentinel and cluster modes are not set by values. To use them, leave `values.redis.enabled` false, write the `stores` entry in `values.config` with the mode you need, and pass the password through `values.env` with a `valueFrom.secretKeyRef` entry.
+
+### Per-pod state without Redis
+
+Without a shared store, every rate limit, cache entry and cache purge applies to one pod only. With the default `values.redis.enabled` false, the install notes print the same warning. See the [multi-instance guide](multi-instance.md).
 
 ## Probes and the management listener
 
@@ -199,15 +203,17 @@ The kubelet probes `/livez` and `/readyz` with `httpGet` on the container port n
 kubectl port-forward deployment/gateway-microgateway 9901:9901
 ```
 
-Setting `metrics.enabled: true` serves `/metrics` on the probe port without a token, so that Prometheus can scrape the pod IP. Enable it only on a pod network that you trust. See the [probe listener](operations.md#probe-listener) for the details.
+Setting `values.metrics.enabled` to `true` serves `/metrics` on the probe port without a token, so that Prometheus can scrape the pod IP. Enable it only on a pod network that you trust. See the [probe listener](operations.md#probe-listener) for the details.
 
 ## Shutdown timing
 
 The chart keeps this inequality true:
 
 ```text
-delay + drainTimeout + 5s <= terminationGracePeriodSeconds
+shutdown_delay + drain_timeout + 5s <= terminationGracePeriodSeconds
 ```
+
+`shutdown_delay` and `drain_timeout` are the `global` keys of the rendered configuration, set from `values.shutdown.delay` and `values.shutdown.drainTimeout`, and `terminationGracePeriodSeconds` comes from `values.shutdown.terminationGracePeriodSeconds`. A render that breaks the rule fails with an error that names it by the values: `delay + drainTimeout + 5s <= terminationGracePeriodSeconds`.
 
 When a pod is deleted, the kubelet sends SIGTERM while the endpoint removal is still spreading to the load balancers. During `shutdown_delay` the gateway reports not ready and keeps serving requests, so traffic moves away from the pod before the listeners stop. After that, in-flight requests get up to `drain_timeout` to finish. The 5 s margin covers closing the gateway and the process exit. Keep at least that margin.
 
@@ -215,15 +221,19 @@ The image is distroless and has no shell, so the chart has no exec `preStop` hoo
 
 Worked check with the defaults: `10s + 20s + 5s = 35s`, which is at most the default grace period of `40s`.
 
-The render fails when `shutdown.delay` is `0s`, or when the sum is greater than `terminationGracePeriodSeconds`. Durations are written as whole `h`, `m`, `s` or `ms` parts, such as `10s` or `1m30s`.
+The render fails when `values.shutdown.delay` is `0s`, or when the sum is greater than `values.shutdown.terminationGracePeriodSeconds`. Durations are written as whole `h`, `m`, `s` or `ms` parts, such as `10s` or `1m30s`.
 
 ## Configuration updates
 
-Edit `config` and run `helm upgrade`. The ConfigMap changes, and the gateway reloads the new file when the kubelet updates the mounted volume. This can take a minute or more, and no rollout is needed. An invalid configuration is logged, and the previous configuration keeps serving.
+Edit `values.config` and run `helm upgrade`. The ConfigMap changes, and the gateway reloads the new file when the kubelet updates the mounted volume. This can take a minute or more, and no rollout is needed. An invalid configuration is logged, and the previous configuration keeps serving.
 
-Some settings need a restart, such as listener and admin addresses. For those, run `kubectl rollout restart deployment/<name>`. The chart mounts the directory, not a `subPath`, because a `subPath` mount never receives updates.
+Some settings need a restart, such as listener and admin addresses. For those, run `kubectl rollout restart deployment/<name>`.
 
-Changes to `env`, including a rotated value in the Secret, need a restart as well.
+### Why the chart does not use subPath
+
+The chart mounts the directory, not a `subPath`, because a `subPath` mount never receives updates.
+
+Changes to `values.env`, including a rotated value in the Secret, need a restart as well.
 
 ## Security context
 
@@ -239,7 +249,7 @@ The pod and the container run with these settings:
 
 The defaults request `100m` of CPU and `64Mi` of memory, and limit memory to `256Mi`. The chart sets no CPU limit. The Go runtime sets `GOMAXPROCS` from the container CPU limit when one is set, and from the CPUs of the node otherwise.
 
-To keep the Go heap below the memory limit, set `GOMEMLIMIT` a little under `resources.limits.memory` through `env`:
+To keep the Go heap below the memory limit, set `GOMEMLIMIT` a little under `values.resources.limits.memory` through `values.env`:
 
 ```yaml
 env:
