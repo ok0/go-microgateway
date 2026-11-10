@@ -1,0 +1,10 @@
+# Files that helm package and install should leave out.
+.DS_Store
+.git/
+.gitignore
+*.tgz
+*.swp
+*.bak
+*~
+.idea/
+.vscode/

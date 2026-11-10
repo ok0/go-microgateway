@@ -1,0 +1,11 @@
+microgateway {{ .Chart.AppVersion }} is installed as {{ include "microgateway.fullname" . }} in namespace {{ .Release.Namespace }}.
+
+The management listener listens on 127.0.0.1:9901 inside each pod. To reach one pod, run
+  kubectl --namespace {{ .Release.Namespace }} port-forward deployment/{{ include "microgateway.fullname" . }} 9901:9901
+then run curl http://127.0.0.1:9901/config.
+
+Kubelet probes use the port named probe ({{ .Values.ports.probe }}).{{ if .Values.metrics.enabled }} When metrics.enabled is set, /metrics is also served there without authentication.{{ end }}
+{{- if not .Values.redis.enabled }}
+
+WARNING: rate limits and the response cache are kept per pod, and a cache purge sent through the port-forward reaches only that one pod. Set redis.enabled=true with an external Redis to share them.
+{{- end }}

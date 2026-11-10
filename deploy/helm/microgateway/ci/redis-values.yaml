@@ -1,0 +1,22 @@
+# Redis variant rendered in CI. The Secret named below is expected to exist in the cluster.
+redis:
+  enabled: true
+  address: "redis.data.svc.cluster.local:6379"
+  existingSecret: microgateway-redis
+
+config:
+  upstreams:
+    - name: api
+      hosts:
+        - url: "http://api.default.svc.cluster.local:8080"
+  routes:
+    - name: api
+      match:
+        path: /api/
+      upstream: api
+      rate_limit:
+        rate: 100
+        per: 1s
+        burst: 100
+        store: shared
+        on_store_error: local

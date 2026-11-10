@@ -1,0 +1,9 @@
+apiVersion: v2
+name: microgateway
+description: An HTTP API gateway run as two or more stateless replicas.
+type: application
+version: 0.2.0
+appVersion: "0.2.0"
+home: https://github.com/ok0/go-microgateway
+sources:
+  - https://github.com/ok0/go-microgateway

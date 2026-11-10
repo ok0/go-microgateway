@@ -1,0 +1,62 @@
+# Container image. An empty tag means the chart appVersion is used.
+image:
+  repository: ghcr.io/ok0/go-microgateway
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Replica count. Used only when autoscaling is disabled.
+replicaCount: 2
+
+# Horizontal autoscaling on average CPU utilization.
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+# Voluntary disruption budget for the pods.
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+# Container resources. No CPU limit is set by default.
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+# Shutdown timing. The render fails unless delay is above 0s and delay + drainTimeout + 5s <= terminationGracePeriodSeconds.
+shutdown:
+  delay: 10s
+  drainTimeout: 20s
+  terminationGracePeriodSeconds: 40
+
+# Container ports. The http port serves traffic; the probe port serves /livez and /readyz.
+ports:
+  http: 8080
+  probe: 9902
+
+# Service that exposes the http port.
+service:
+  type: ClusterIP
+  port: 80
+
+# Serve /metrics on the probe port without authentication.
+metrics:
+  enabled: false
+
+# Shared state through an external standalone Redis. The chart sets stores and cache.store when enabled.
+redis:
+  enabled: false
+  address: ""
+  keyPrefix: microgateway
+  existingSecret: ""
+  passwordKey: password
+
+# Extra container environment entries, appended after REDIS_PASSWORD.
+env: []
+
+# Gateway configuration merged into config.yaml. The chart sets version, global.shutdown_delay, global.drain_timeout, admin.address and admin.probes, and with Redis stores and cache.store.
+config: {}

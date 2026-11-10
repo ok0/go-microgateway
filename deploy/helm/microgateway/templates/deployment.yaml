@@ -1,0 +1,86 @@
+{{- include "microgateway.validate" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "microgateway.fullname" . }}
+  labels:
+    {{- include "microgateway.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "microgateway.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "microgateway.labels" . | nindent 8 }}
+    spec:
+      terminationGracePeriodSeconds: {{ int .Values.shutdown.terminationGracePeriodSeconds }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "microgateway.selectorLabels" . | nindent 14 }}
+      containers:
+        - name: microgateway
+          image: {{ include "microgateway.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["run", "-config", "/etc/microgateway/config.yaml"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.ports.http }}
+              protocol: TCP
+            - name: probe
+              containerPort: {{ .Values.ports.probe }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: probe
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probe
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- if or .Values.redis.enabled .Values.env }}
+          env:
+            {{- if .Values.redis.enabled }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.existingSecret | quote }}
+                  key: {{ .Values.redis.passwordKey | quote }}
+            {{- end }}
+            {{- with .Values.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/microgateway
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "microgateway.fullname" . }}
