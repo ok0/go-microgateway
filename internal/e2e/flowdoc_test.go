@@ -53,6 +53,18 @@ func TestRequestFlowMatchesDocs(t *testing.T) {
 func TestRequestFlowMatchesDocsRejects(t *testing.T) {
 	path, src := archDocSource(t)
 	text := string(src)
+	const flowStart = "flowchart TD\n  client["
+	const fence = "```mermaid\n"
+	at := strings.Index(text, flowStart)
+	if at < 0 {
+		t.Fatalf("architecture document lacks %q", flowStart)
+	}
+	open := strings.LastIndex(text[:at], fence)
+	if open < 0 {
+		t.Fatalf("architecture document has no %q before %q", fence, flowStart)
+	}
+	diagramOld := text[open : at+len(flowStart)]
+	diagramNew := "```text\n" + text[open+len(fence):at+len(flowStart)]
 	cases := []struct{ name, old, new, want string }{
 		{
 			"node order",
@@ -73,7 +85,7 @@ func TestRequestFlowMatchesDocsRejects(t *testing.T) {
 		},
 		{"pipeline order", "4. `cache`\n5. `circuit_breaker`", "4. `circuit_breaker`\n5. `cache`", "numbered list of \"Default pipeline order\""},
 		{"pipeline terminal", "7. `proxy`", "7. the proxy", "numbered list of \"Default pipeline order\""},
-		{"no diagram", "```mermaid\nflowchart TD\n  client[", "```text\nflowchart TD\n  client[", "want one mermaid diagram under \"Request flow\""},
+		{"no diagram", diagramOld, diagramNew, "want one mermaid diagram under \"Request flow\""},
 	}
 	for _, c := range cases {
 		if !strings.Contains(text, c.old) {
