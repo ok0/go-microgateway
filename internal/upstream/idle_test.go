@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/http/httptrace"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -166,6 +167,25 @@ func settleTrace(ctx context.Context, got func(httptrace.GotConnInfo)) (context.
 	return httptrace.WithClientTrace(ctx, tr), settled
 }
 
+// dialsRunning reports whether a stdlib dial goroutine of tr is still running. dialConnFor ends right after it
+// puts a new HTTP/2 connection into the idle pool; net/http has no trace hook for that put (PutIdleConn is HTTP/1 only).
+func dialsRunning(tr *Transport) bool {
+	buf := make([]byte, 1<<16)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			return strings.Contains(string(buf[:n]), fmt.Sprintf("(*Transport).dialConnFor(%p", tr.inner))
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+}
+
+// awaitPooled waits until the stdlib has finished pooling the connection that tr dialed (HTTP/2 stand-in for the PutIdleConn wait).
+func awaitPooled(t *testing.T, tr *Transport) {
+	t.Helper()
+	testwait.Until(t, "stdlib dial goroutine finished pooling", func() bool { return !dialsRunning(tr) }, func() string { return "dialConnFor still running for this transport" })
+}
+
 func readClose(t *testing.T, resp *http.Response) string {
 	t.Helper()
 	b, err := io.ReadAll(resp.Body)
@@ -232,6 +252,8 @@ func TestIdleConnReusedBelowLimit(t *testing.T) {
 			}
 			if !h2 {
 				testwait.Done(t, "request 1 returned to idle pool", settled1, nil)
+			} else {
+				awaitPooled(t, tr)
 			}
 			checkTimers(t, fake, 0, 1)
 
@@ -631,6 +653,8 @@ func TestStaleHandoutReissued(t *testing.T) {
 				readClose(t, resp)
 				if !h2 {
 					testwait.Done(t, "request 1 returned to idle pool", settled1, nil)
+				} else {
+					awaitPooled(t, tr)
 				}
 				before := d.at(0).wrote.Load()
 
