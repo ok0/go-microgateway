@@ -126,6 +126,7 @@ Each store call is bounded by `cache.store_timeout` (default `100ms`). When the 
 ## Cache request flow
 
 ```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif", "fontSize": "14px", "primaryColor": "#ffffff", "primaryTextColor": "#1c1917", "primaryBorderColor": "#a8a29e", "lineColor": "#8a847d", "clusterBkg": "#f5f4f1", "clusterBorder": "#e2dfd9", "titleColor": "#57534e", "edgeLabelBackground": "#ffffff", "actorBkg": "#ffffff", "actorBorder": "#a8a29e", "actorTextColor": "#1c1917", "actorLineColor": "#d6d3cd", "signalColor": "#8a847d", "signalTextColor": "#7d7670", "labelBoxBkgColor": "#f5f4f1", "labelBoxBorderColor": "#d6d3cd", "labelTextColor": "#1c1917", "loopTextColor": "#7d7670", "noteBkgColor": "#f5f4f1", "noteBorderColor": "#d6d3cd", "noteTextColor": "#1c1917", "activationBkgColor": "#f5f4f1", "activationBorderColor": "#a8a29e"}, "flowchart": {"curve": "basis", "nodeSpacing": 28, "rankSpacing": 44, "padding": 14}}}%%
 flowchart TD
     A["Request arrives at a cached route"] --> B{"Method is GET or HEAD"}
     B -- "no" --> M["Forward with fwd method and purge GET and HEAD entries of the URL on success"]
@@ -147,6 +148,11 @@ flowchart TD
     RE -- "yes" --> SIE["Serve stale with detail stale-if-error"]
     RE -- "no" --> FE["Return the origin failure to the client"]
     MI --> ST["Store the response when it is storable"]
+
+    classDef core fill:#1c1917,stroke:#1c1917,color:#fafaf9,font-weight:600
+    classDef stop fill:#fbf1ec,stroke:#b4532a,color:#7c2d12
+    class H core
+    class FE stop
 ```
 
 ## Purging
@@ -223,6 +229,7 @@ The result reports the reach of the purge in `scope`:
 ## Cluster purge sequence
 
 ```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif", "fontSize": "14px", "primaryColor": "#ffffff", "primaryTextColor": "#1c1917", "primaryBorderColor": "#a8a29e", "lineColor": "#8a847d", "clusterBkg": "#f5f4f1", "clusterBorder": "#e2dfd9", "titleColor": "#57534e", "edgeLabelBackground": "#ffffff", "actorBkg": "#ffffff", "actorBorder": "#a8a29e", "actorTextColor": "#1c1917", "actorLineColor": "#d6d3cd", "signalColor": "#8a847d", "signalTextColor": "#7d7670", "labelBoxBkgColor": "#f5f4f1", "labelBoxBorderColor": "#d6d3cd", "labelTextColor": "#1c1917", "loopTextColor": "#7d7670", "noteBkgColor": "#f5f4f1", "noteBorderColor": "#d6d3cd", "noteTextColor": "#1c1917", "activationBkgColor": "#f5f4f1", "activationBorderColor": "#a8a29e"}, "flowchart": {"curve": "basis", "nodeSpacing": 28, "rankSpacing": 44, "padding": 14}}}%%
 sequenceDiagram
     actor Client
     participant A as Instance A

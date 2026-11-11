@@ -118,6 +118,7 @@ The credential itself is removed from the upstream request unless `forward_crede
 ## Authentication flow
 
 ```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif", "fontSize": "14px", "primaryColor": "#ffffff", "primaryTextColor": "#1c1917", "primaryBorderColor": "#a8a29e", "lineColor": "#8a847d", "clusterBkg": "#f5f4f1", "clusterBorder": "#e2dfd9", "titleColor": "#57534e", "edgeLabelBackground": "#ffffff", "actorBkg": "#ffffff", "actorBorder": "#a8a29e", "actorTextColor": "#1c1917", "actorLineColor": "#d6d3cd", "signalColor": "#8a847d", "signalTextColor": "#7d7670", "labelBoxBkgColor": "#f5f4f1", "labelBoxBorderColor": "#d6d3cd", "labelTextColor": "#1c1917", "loopTextColor": "#7d7670", "noteBkgColor": "#f5f4f1", "noteBorderColor": "#d6d3cd", "noteTextColor": "#1c1917", "activationBkgColor": "#f5f4f1", "activationBorderColor": "#a8a29e"}, "flowchart": {"curve": "basis", "nodeSpacing": 28, "rankSpacing": 44, "padding": 14}}}%%
 flowchart TD
     A["Request enters the gateway"] --> B["Remove client-supplied identity headers"]
     B --> C{"Route auth mode"}
@@ -133,6 +134,11 @@ flowchart TD
     G -- "yes" --> H["Attach identity and set forwarded identity headers"]
     H --> I["Remove credentials unless forward_credentials"]
     I --> J["Route pipeline and upstream"]
+
+    classDef core fill:#1c1917,stroke:#1c1917,color:#fafaf9,font-weight:600
+    classDef stop fill:#fbf1ec,stroke:#b4532a,color:#7c2d12
+    class H core
+    class U,X stop
 ```
 
 ## Rate limiting
@@ -245,12 +251,16 @@ upstreams:
 ## Circuit breaker state machine
 
 ```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif", "fontSize": "14px", "primaryColor": "#ffffff", "primaryTextColor": "#1c1917", "primaryBorderColor": "#a8a29e", "lineColor": "#8a847d", "clusterBkg": "#f5f4f1", "clusterBorder": "#e2dfd9", "titleColor": "#57534e", "edgeLabelBackground": "#ffffff", "actorBkg": "#ffffff", "actorBorder": "#a8a29e", "actorTextColor": "#1c1917", "actorLineColor": "#d6d3cd", "signalColor": "#8a847d", "signalTextColor": "#7d7670", "labelBoxBkgColor": "#f5f4f1", "labelBoxBorderColor": "#d6d3cd", "labelTextColor": "#1c1917", "loopTextColor": "#7d7670", "noteBkgColor": "#f5f4f1", "noteBorderColor": "#d6d3cd", "noteTextColor": "#1c1917", "activationBkgColor": "#f5f4f1", "activationBorderColor": "#a8a29e"}, "flowchart": {"curve": "basis", "nodeSpacing": 28, "rankSpacing": 44, "padding": 14}}}%%
 stateDiagram-v2
     [*] --> Closed
     Closed --> Open : min_requests met and failure_ratio reached, or consecutive_failures in a row
     Open --> HalfOpen : open_timeout elapsed
     HalfOpen --> Closed : success_threshold probes succeed
     HalfOpen --> Open : a probe fails
+
+    classDef stop fill:#fbf1ec,stroke:#b4532a,color:#7c2d12
+    class Open stop
 ```
 
 ## Retry
@@ -297,6 +307,7 @@ Request bodies are buffered so they can be replayed, up to `max_body_bytes` (def
 ## Retry and budget flow
 
 ```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif", "fontSize": "14px", "primaryColor": "#ffffff", "primaryTextColor": "#1c1917", "primaryBorderColor": "#a8a29e", "lineColor": "#8a847d", "clusterBkg": "#f5f4f1", "clusterBorder": "#e2dfd9", "titleColor": "#57534e", "edgeLabelBackground": "#ffffff", "actorBkg": "#ffffff", "actorBorder": "#a8a29e", "actorTextColor": "#1c1917", "actorLineColor": "#d6d3cd", "signalColor": "#8a847d", "signalTextColor": "#7d7670", "labelBoxBkgColor": "#f5f4f1", "labelBoxBorderColor": "#d6d3cd", "labelTextColor": "#1c1917", "loopTextColor": "#7d7670", "noteBkgColor": "#f5f4f1", "noteBorderColor": "#d6d3cd", "noteTextColor": "#1c1917", "activationBkgColor": "#f5f4f1", "activationBorderColor": "#a8a29e"}, "flowchart": {"curve": "basis", "nodeSpacing": 28, "rankSpacing": 44, "padding": 14}}}%%
 flowchart TD
     A["Attempt fails with a connect error, a listed status or a header timeout"] --> B{"Attempts left"}
     B -- "no" --> Z["Return the last response or error"]
@@ -313,6 +324,11 @@ flowchart TD
     G -- "yes" --> H["Wait the jittered backoff"]
     H --> I["Send the next attempt to a host not yet tried, when one is eligible"]
     I --> A
+
+    classDef core fill:#1c1917,stroke:#1c1917,color:#fafaf9,font-weight:600
+    classDef stop fill:#fbf1ec,stroke:#b4532a,color:#7c2d12
+    class I core
+    class Z stop
 ```
 
 The retry budget is per route and per gateway instance. Within `window`, retries are allowed up to `ratio` of the requests seen in that window, plus `min_per_second` multiplied by the window length; a retry that the budget refuses is not sent. Because each instance counts its own traffic, the retry load of N instances stays about `ratio` of their combined traffic.

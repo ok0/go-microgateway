@@ -15,6 +15,7 @@ The gateway is a set of layers. Each layer depends only on the layers below it.
 - **Foundation.** The `config` package holds the schema, strict parsing and validation. The metrics registry produces Prometheus text. The error writer produces the JSON error body. The clock and the random source are injected.
 
 ```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif", "fontSize": "14px", "primaryColor": "#ffffff", "primaryTextColor": "#1c1917", "primaryBorderColor": "#a8a29e", "lineColor": "#8a847d", "clusterBkg": "#f5f4f1", "clusterBorder": "#e2dfd9", "titleColor": "#57534e", "edgeLabelBackground": "#ffffff", "actorBkg": "#ffffff", "actorBorder": "#a8a29e", "actorTextColor": "#1c1917", "actorLineColor": "#d6d3cd", "signalColor": "#8a847d", "signalTextColor": "#7d7670", "labelBoxBkgColor": "#f5f4f1", "labelBoxBorderColor": "#d6d3cd", "labelTextColor": "#1c1917", "loopTextColor": "#7d7670", "noteBkgColor": "#f5f4f1", "noteBorderColor": "#d6d3cd", "noteTextColor": "#1c1917", "activationBkgColor": "#f5f4f1", "activationBorderColor": "#a8a29e"}, "flowchart": {"curve": "basis", "nodeSpacing": 28, "rankSpacing": 44, "padding": 14}}}%%
 flowchart TD
   subgraph Entry
     LST["Listeners and TLS"]
@@ -50,6 +51,11 @@ flowchart TD
   STG --> RED
   STG --> CST
   SNP --> CFG
+
+  classDef core fill:#1c1917,stroke:#1c1917,color:#fafaf9,font-weight:600
+  classDef external fill:#ffffff,stroke:#a8a29e,stroke-dasharray:4 3,color:#44403c
+  class SNP core
+  class RED,CST external
 ```
 
 Timers in this code use the injected clock. The one exception is the protocol timers that net/http's bundled HTTP/2 server runs itself, such as its ping and connection idle timers, which run on wall time.
@@ -71,6 +77,7 @@ For each request the gateway runs the steps below in this order. Each step has a
 11. `load_balancer` picks a host for the attempt, and `upstream` sends the attempt to that host. When the attempt fails and the route's retry settings allow another attempt, the load balancer picks again. Every pick skips a host whose circuit breaker refuses it. The pick prefers a healthy host, one that is not ejected and passes its health checks, that the request has not tried yet; when there is none, it may pick a healthy host that the request already tried; and when no host is healthy, it falls back to the other hosts, untried ones first (panic mode).
 
 ```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif", "fontSize": "14px", "primaryColor": "#ffffff", "primaryTextColor": "#1c1917", "primaryBorderColor": "#a8a29e", "lineColor": "#8a847d", "clusterBkg": "#f5f4f1", "clusterBorder": "#e2dfd9", "titleColor": "#57534e", "edgeLabelBackground": "#ffffff", "actorBkg": "#ffffff", "actorBorder": "#a8a29e", "actorTextColor": "#1c1917", "actorLineColor": "#d6d3cd", "signalColor": "#8a847d", "signalTextColor": "#7d7670", "labelBoxBkgColor": "#f5f4f1", "labelBoxBorderColor": "#d6d3cd", "labelTextColor": "#1c1917", "loopTextColor": "#7d7670", "noteBkgColor": "#f5f4f1", "noteBorderColor": "#d6d3cd", "noteTextColor": "#1c1917", "activationBkgColor": "#f5f4f1", "activationBorderColor": "#a8a29e"}, "flowchart": {"curve": "basis", "nodeSpacing": 28, "rankSpacing": 44, "padding": 14}}}%%
 flowchart TD
   client["Client request"] --> request_id["request_id: assign or keep the request ID"]
   request_id --> client_ip["client_ip: resolve the client IP"]
@@ -92,6 +99,13 @@ flowchart TD
   proxy --> load_balancer["load_balancer: pick a host"]
   load_balancer --> upstream["upstream: send the attempt"]
   upstream -- "retry when the attempt fails and retries remain" --> load_balancer
+
+  classDef core fill:#1c1917,stroke:#1c1917,color:#fafaf9,font-weight:600
+  classDef stop fill:#fbf1ec,stroke:#b4532a,color:#7c2d12
+  classDef optional fill:#f5f4f1,stroke:#d6d3cd,color:#57534e
+  class proxy core
+  class bad_path,no_route stop
+  class timeout,auth,rate_limit,cache,circuit_breaker,retry optional
 ```
 
 ## Default pipeline order

@@ -68,6 +68,7 @@ A reload attempt starts in one of these ways:
 ## Hot reload sequence
 
 ```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif", "fontSize": "14px", "primaryColor": "#ffffff", "primaryTextColor": "#1c1917", "primaryBorderColor": "#a8a29e", "lineColor": "#8a847d", "clusterBkg": "#f5f4f1", "clusterBorder": "#e2dfd9", "titleColor": "#57534e", "edgeLabelBackground": "#ffffff", "actorBkg": "#ffffff", "actorBorder": "#a8a29e", "actorTextColor": "#1c1917", "actorLineColor": "#d6d3cd", "signalColor": "#8a847d", "signalTextColor": "#7d7670", "labelBoxBkgColor": "#f5f4f1", "labelBoxBorderColor": "#d6d3cd", "labelTextColor": "#1c1917", "loopTextColor": "#7d7670", "noteBkgColor": "#f5f4f1", "noteBorderColor": "#d6d3cd", "noteTextColor": "#1c1917", "activationBkgColor": "#f5f4f1", "activationBorderColor": "#a8a29e"}, "flowchart": {"curve": "basis", "nodeSpacing": 28, "rankSpacing": 44, "padding": 14}}}%%
 sequenceDiagram
     participant Op as Operator
     participant FS as Watched files

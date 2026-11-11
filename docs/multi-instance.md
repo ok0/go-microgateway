@@ -5,6 +5,7 @@ This page covers running several identical gateway replicas behind a load balanc
 ## Multi-instance topology
 
 ```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif", "fontSize": "14px", "primaryColor": "#ffffff", "primaryTextColor": "#1c1917", "primaryBorderColor": "#a8a29e", "lineColor": "#8a847d", "clusterBkg": "#f5f4f1", "clusterBorder": "#e2dfd9", "titleColor": "#57534e", "edgeLabelBackground": "#ffffff", "actorBkg": "#ffffff", "actorBorder": "#a8a29e", "actorTextColor": "#1c1917", "actorLineColor": "#d6d3cd", "signalColor": "#8a847d", "signalTextColor": "#7d7670", "labelBoxBkgColor": "#f5f4f1", "labelBoxBorderColor": "#d6d3cd", "labelTextColor": "#1c1917", "loopTextColor": "#7d7670", "noteBkgColor": "#f5f4f1", "noteBorderColor": "#d6d3cd", "noteTextColor": "#1c1917", "activationBkgColor": "#f5f4f1", "activationBorderColor": "#a8a29e"}, "flowchart": {"curve": "basis", "nodeSpacing": 28, "rankSpacing": 44, "padding": 14}}}%%
 flowchart LR
   CL["Clients"] --> LB["Load balancer"]
   LB --> GWA["Gateway replica A"]
@@ -17,6 +18,9 @@ flowchart LR
   GWB --> SHR
   GWN --> SHR
   OPS["Operator"] -.-> GWA
+
+  classDef core fill:#1c1917,stroke:#1c1917,color:#fafaf9,font-weight:600
+  class SHR core
 ```
 
 The replicas run the same configuration and do not know about each other. The load balancer spreads client requests across them. Each replica has its own circuit breakers, health checks, JWKS key sets and in-memory state. When a shared store is configured, the rate-limit counters and the response cache are kept in Redis under the `rl` and `c` namespaces of its `key_prefix`, so every replica reads and writes the same values. An operator who purges the cache calls the admin endpoint of one replica. With a shared store that purge applies to all replicas. With in-memory cache state, the purge applies only to the replica that received it.
