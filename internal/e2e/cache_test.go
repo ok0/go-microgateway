@@ -1126,7 +1126,6 @@ func TestCacheRevalidationGateway(t *testing.T) {
 }
 
 func TestCacheBackgroundRefreshRelease(t *testing.T) {
-	t.Parallel()
 	const target = "http://example.com/bg"
 	const cc = "max-age=60, stale-while-revalidate=30"
 	setup := func(t *testing.T, n *memNetwork) (*cacheScript, chan struct{}, func()) {

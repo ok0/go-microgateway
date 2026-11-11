@@ -28,7 +28,6 @@ func ttlRoute(timeout string, cacheLines ...string) string {
 }
 
 func TestPurgeAcrossReload(t *testing.T) {
-	t.Parallel()
 	const purged = "http://h/purged"
 	const kept = "http://h/kept"
 	admin := purgeAdminYAML(purgeTokA)

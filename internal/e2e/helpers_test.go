@@ -1279,6 +1279,9 @@ type goroutineInfo struct{ kind, stack string }
 // goroutineSnap holds the goroutines alive at one moment, by goroutine ID.
 type goroutineSnap map[int64]goroutineInfo
 
+// snapGoroutines captures every live goroutine in the process. The snapshot is process-global: a test that calls it,
+// and every enclosing test, must not call t.Parallel(); concurrently running tests would count each other's goroutines
+// as leaks.
 func snapGoroutines() goroutineSnap {
 	buf := make([]byte, 1<<16)
 	var n int
@@ -1363,7 +1366,8 @@ func goroutinesBeyond(pre, base goroutineSnap) []string {
 
 // awaitGoroutinesSettled waits until no kind of goroutine started after pre is more numerous than at base: goroutines
 // that predate pre (earlier tests) are ignored, transient ones only delay the wait, and a leaked one is named on the
-// hang guard.
+// hang guard. The snapshot is process-global: a test that calls it, and every enclosing test, must not call
+// t.Parallel(); concurrently running tests would count each other's goroutines as leaks.
 func awaitGoroutinesSettled(t *testing.T, what string, pre, base goroutineSnap) {
 	t.Helper()
 	eventually(t, what, func() bool { return len(goroutinesBeyond(pre, base)) == 0 }, func() string {

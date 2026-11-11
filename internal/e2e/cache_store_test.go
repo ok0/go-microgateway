@@ -293,7 +293,6 @@ func TestCacheMetricsGateway(t *testing.T) {
 }
 
 func TestCacheReloadGateway(t *testing.T) {
-	t.Parallel()
 	t.Run("entry survives an unrelated reload and a route cache change", func(t *testing.T) {
 		n := newMemNetwork()
 		fake := clock.NewFake(cacheStart)
@@ -427,7 +426,6 @@ func TestCacheMultiInstance(t *testing.T) {
 }
 
 func TestCacheNoGoroutineLeak(t *testing.T) {
-	t.Parallel()
 	pre := snapGoroutines()
 	n := newMemNetwork()
 	scr := &cacheScript{}

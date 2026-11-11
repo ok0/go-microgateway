@@ -519,7 +519,6 @@ func TestStaleWhileRevalidateGateway(t *testing.T) {
 }
 
 func TestStaleBackgroundRunnerGateway(t *testing.T) {
-	t.Parallel()
 	pre := snapGoroutines()
 	fake := clock.NewFake(cacheStart)
 	e := newStaleEnv(t, fake, "cache:\n  max_background: 1\n", cacheRouteYAML("r"))
@@ -591,12 +590,10 @@ func TestStaleBackgroundRunnerGateway(t *testing.T) {
 }
 
 func TestStaleBackgroundReleaseGateway(t *testing.T) {
-	t.Parallel()
 	const target = "http://example.com/rel"
 	const other = "  - name: other\n    match:\n      path: /other\n    upstream: up\n"
 
 	t.Run("reload with a new memory cache drains the refresh", func(t *testing.T) {
-		t.Parallel()
 		pre := snapGoroutines()
 		fake := clock.NewFake(cacheStart)
 		e := newStaleEnv(t, fake, "", cacheRouteYAML("r"))
@@ -636,7 +633,6 @@ func TestStaleBackgroundReleaseGateway(t *testing.T) {
 	})
 
 	t.Run("reload with an unchanged cache drains the refresh", func(t *testing.T) {
-		t.Parallel()
 		pre := snapGoroutines()
 		fake := clock.NewFake(cacheStart)
 		e := newStaleEnv(t, fake, "", cacheRouteYAML("r"))
@@ -672,7 +668,6 @@ func TestStaleBackgroundReleaseGateway(t *testing.T) {
 	})
 
 	t.Run("close cancels the refresh", func(t *testing.T) {
-		t.Parallel()
 		pre := snapGoroutines()
 		fake := clock.NewFake(cacheStart)
 		e := newStaleEnv(t, fake, "", cacheRouteYAML("r"))
@@ -701,7 +696,6 @@ func TestStaleBackgroundReleaseGateway(t *testing.T) {
 	})
 
 	t.Run("named store reload", func(t *testing.T) {
-		t.Parallel()
 		pre := snapGoroutines()
 		fake := clock.NewFake(cacheStart)
 		shared := teststore.NewSharedCache(fake, 1<<20)

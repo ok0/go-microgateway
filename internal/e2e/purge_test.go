@@ -927,7 +927,6 @@ func TestPurgeErrorShape(t *testing.T) {
 }
 
 func TestPurgeNoGoroutineLeak(t *testing.T) {
-	t.Parallel()
 	pre := snapGoroutines()
 	g, fake, origin, shared := purgeSharedFixture(t, purgeAdminYAML(purgeTokA), cacheRouteYAML("r"))
 	t.Cleanup(func() { _ = g.Close() })

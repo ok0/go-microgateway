@@ -75,8 +75,6 @@ func coalesceHot() http.Header {
 }
 
 func TestCoalesceGateway(t *testing.T) {
-	t.Parallel()
-
 	t.Run("hundred concurrent misses share one fetch", func(t *testing.T) {
 		t.Parallel()
 		n := newMemNetwork()
@@ -146,7 +144,6 @@ func TestCoalesceGateway(t *testing.T) {
 	})
 
 	t.Run("leader cancel", func(t *testing.T) {
-		t.Parallel()
 		pre := snapGoroutines()
 		n := newMemNetwork()
 		o := newFlightOrigin()
@@ -183,7 +180,6 @@ func TestCoalesceGateway(t *testing.T) {
 	})
 
 	t.Run("waiter cancel", func(t *testing.T) {
-		t.Parallel()
 		pre := snapGoroutines()
 		n := newMemNetwork()
 		o := newFlightOrigin()
@@ -223,7 +219,6 @@ func TestCoalesceGateway(t *testing.T) {
 	})
 
 	t.Run("all clients gone", func(t *testing.T) {
-		t.Parallel()
 		pre := snapGoroutines()
 		n := newMemNetwork()
 		o := newFlightOrigin()
@@ -420,7 +415,6 @@ func TestCoalesceGateway(t *testing.T) {
 	})
 
 	t.Run("panic in the fetch", func(t *testing.T) {
-		t.Parallel()
 		pre := snapGoroutines()
 		n := newMemNetwork()
 		o := newFlightOrigin()
@@ -484,7 +478,6 @@ func (b *boomOnce) middleware(next http.Handler) http.Handler {
 }
 
 func TestCoalesceReloadGateway(t *testing.T) {
-	t.Parallel()
 	otherRoute := "  - name: other\n    match:\n      path: /other\n    upstream: up\n"
 
 	t.Run("reloads keep the parked waiters on the call in flight", func(t *testing.T) {
@@ -525,7 +518,6 @@ func TestCoalesceReloadGateway(t *testing.T) {
 	})
 
 	t.Run("bound reloads drain a held fetch to the base state", func(t *testing.T) {
-		t.Parallel()
 		pre := snapGoroutines()
 		n := newMemNetwork()
 		o := newFlightOrigin()
@@ -564,7 +556,6 @@ func TestCoalesceReloadGateway(t *testing.T) {
 	})
 
 	t.Run("bound reloads drain a held refresh to the base state", func(t *testing.T) {
-		t.Parallel()
 		pre := snapGoroutines()
 		n := newMemNetwork()
 		o := newFlightOrigin()
