@@ -147,8 +147,8 @@ func driveReload(t *testing.T, in *cmInstance, what string, observed func() bool
 			return true
 		}
 		if in.h.clk.Due(cmDebounce) > 0 {
-			over = true
 			if in.advanced-start+cmDebounce > cmBound {
+				over = true
 				return true
 			}
 			in.advance(cmDebounce)
