@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -345,7 +346,8 @@ func TestMigrationRestoresV01Defaults(t *testing.T) {
 			t.Errorf("/config global.drain_timeout = %q, want 20s", got.Global.DrainTimeout)
 		}
 
-		h.cancel()
+		h.sig <- syscall.SIGTERM
+		eventually(t, "shutdown to begin", func() bool { return strings.Contains(errb.String(), "shutting down") })
 		awaitDue(t, h.clk, 1, 5*time.Second, "shutdown delay timer armed", errb.String)
 		h.clk.Advance(5 * time.Second)
 		if code := h.wait(t); code != 0 {
